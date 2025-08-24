@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "npm run db:seed && next dev --turbopack",
     "build": "prisma generate && next build",
+    "build:vercel": "./scripts/build-vercel.sh",
     "start": "next start",
     "lint": "next lint",
     "postinstall": "prisma generate",

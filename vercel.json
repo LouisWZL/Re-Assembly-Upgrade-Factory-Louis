@@ -1,5 +1,5 @@
 {
-  "buildCommand": "prisma generate && prisma db push --accept-data-loss && npx prisma db seed && next build",
+  "buildCommand": "npm run build:vercel",
   "env": {
     "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true",
     "DATABASE_URL": "file:/tmp/db.sqlite"
