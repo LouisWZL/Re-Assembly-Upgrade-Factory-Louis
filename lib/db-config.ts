@@ -35,26 +35,57 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
 // Database initialization function
 export async function ensureDatabaseInitialized() {
   try {
-    // Test database connection
-    await prisma.$connect()
+    console.log('🔧 Starting database initialization...')
     
-    // In production, ensure database is seeded if empty
-    if (process.env.NODE_ENV === 'production') {
-      const factoryCount = await prisma.reassemblyFactory.count()
-      if (factoryCount === 0) {
-        console.log('🌱 Database is empty, running seed...')
-        
+    // Test database connection with timeout
+    const connectionTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Database connection timeout')), 10000)
+    )
+    
+    await Promise.race([prisma.$connect(), connectionTimeout])
+    console.log('✅ Database connected')
+    
+    // Check if database schema exists by trying to count factories
+    let factoryCount = 0
+    try {
+      factoryCount = await prisma.reassemblyFactory.count()
+      console.log(`📊 Found ${factoryCount} factories in database`)
+    } catch (schemaError) {
+      console.log('⚠️ Database schema may not exist, attempting to push schema...')
+      
+      // In production, the database should already be set up by build process
+      if (process.env.NODE_ENV === 'production') {
+        console.error('❌ Database schema missing in production:', schemaError)
+        throw new Error('Database schema not found in production environment')
+      }
+      throw schemaError
+    }
+    
+    // Seed database if empty (production only)
+    if (process.env.NODE_ENV === 'production' && factoryCount === 0) {
+      console.log('🌱 Database is empty, running seed...')
+      
+      try {
         // Import and run seed function
         const { seedDatabase } = await import('../prisma/seed-functions')
         await seedDatabase()
         
-        console.log('✅ Database seeded successfully!')
+        // Verify seeding worked
+        const newFactoryCount = await prisma.reassemblyFactory.count()
+        console.log(`✅ Database seeded successfully! Now have ${newFactoryCount} factories`)
+      } catch (seedError) {
+        console.error('❌ Seeding failed:', seedError)
+        throw seedError
       }
     }
     
     return true
   } catch (error) {
     console.error('❌ Database initialization failed:', error)
+    if (error instanceof Error) {
+      console.error('Error details:', error.message)
+      console.error('Stack trace:', error.stack)
+    }
     return false
   }
 }
