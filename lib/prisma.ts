@@ -1,25 +1,10 @@
-import { PrismaClient } from '@prisma/client'
-import { initializeDatabase } from './init-db'
+// Re-export everything from the enhanced db-config
+export { prisma, ensureDatabaseInitialized, connectWithRetry } from './db-config'
 
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
-}
+// Import prisma for legacy function
+import { prisma } from './db-config'
 
-export const prisma = globalForPrisma.prisma ?? new PrismaClient()
-
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
-
-// Initialize database on first access in production
-let initPromise: Promise<void> | null = null
-
+// Legacy support
 export async function getPrisma() {
-  if (process.env.VERCEL && !initPromise) {
-    initPromise = initializeDatabase()
-  }
-  
-  if (initPromise) {
-    await initPromise
-  }
-  
   return prisma
 }

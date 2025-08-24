@@ -1,8 +1,7 @@
 {
   "buildCommand": "npm run build:vercel",
   "env": {
-    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true",
-    "DATABASE_URL": "file:/tmp/db.sqlite"
+    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true"
   },
   "functions": {
     "app/**/*.js": {
