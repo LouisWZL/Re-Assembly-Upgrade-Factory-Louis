@@ -43,8 +43,8 @@ export async function updateProduktGraph(produktId: string, graphData: any) {
     const updatedProdukt = await prisma.produkt.update({
       where: { id: produktId },
       data: { 
-        graphData,
-        processGraphData, // Save the generated process graph
+        graphData: graphData as unknown as Prisma.InputJsonValue,
+        processGraphData: processGraphData as unknown as Prisma.InputJsonValue, // Save the generated process graph
         // Replace existing Baugruppentypen associations with the ones from the graph
         baugruppentypen: {
           set: baugruppentypenIds.map(id => ({ id }))
@@ -168,13 +168,11 @@ export async function createProdukt(
             {
               bezeichnung: `${data.bezeichnung} Basic`,
               typ: 'basic',
-              zustand: 'GUT',
               links: {} // Empty links object as required by schema
             },
             {
               bezeichnung: `${data.bezeichnung} Premium`,
               typ: 'premium',
-              zustand: 'SEHR_GUT',
               links: {} // Empty links object as required by schema
             }
           ]
@@ -293,7 +291,6 @@ export async function deleteProdukt(produktId: string) {
       include: {
         varianten: {
           include: {
-            baugruppen: true,
             auftraege: true
           }
         },
@@ -330,19 +327,7 @@ export async function deleteProdukt(produktId: string) {
       }
     }
 
-    // First disconnect all baugruppen from variants (many-to-many relationship)
-    for (const variante of produkt.varianten) {
-      if (variante.baugruppen.length > 0) {
-        await prisma.produktvariante.update({
-          where: { id: variante.id },
-          data: {
-            baugruppen: {
-              set: [] // Disconnect all baugruppen
-            }
-          }
-        })
-      }
-    }
+    // Note: Produktvariante doesn't have direct baugruppen relations in current schema
 
     // Disconnect all baugruppentypen from the product
     if (produkt.baugruppentypen.length > 0) {

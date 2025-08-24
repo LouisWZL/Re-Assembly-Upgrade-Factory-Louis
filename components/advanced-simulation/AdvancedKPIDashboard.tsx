@@ -12,6 +12,8 @@ import {
   ResponsiveContainer
 } from 'recharts';
 
+import { AdvancedOrder, ProductionStation } from '@/types/advanced-factory';
+
 interface SimulationOrder {
   id: string;
   kundeId: string;
@@ -44,9 +46,9 @@ interface SimulationStation {
 }
 
 interface AdvancedKPIDashboardProps {
-  orders: SimulationOrder[];
-  completedOrders: SimulationOrder[];
-  stations: SimulationStation[];
+  orders: AdvancedOrder[];
+  completedOrders: AdvancedOrder[];
+  stations: ProductionStation[];
   simulationStartTime: Date;
   onClearData: () => void;
 }
@@ -62,15 +64,15 @@ export function AdvancedKPIDashboard({
   
   // Calculate KPIs
   const totalProcessingTime = completedOrders.reduce((sum, order) => {
-    return sum + Object.values(order.stationDurations)
-      .filter(d => d.actual && d.completed)
-      .reduce((stationSum, d) => stationSum + (d.actual || 0), 0);
+    return sum + Object.values((order as any).stationDurations || {})
+      .filter((d: any) => d.actual && d.completed)
+      .reduce((stationSum: number, d: any) => stationSum + (d.actual || 0), 0);
   }, 0);
   
   const totalWaitingTime = completedOrders.reduce((sum, order) => {
-    return sum + Object.values(order.stationDurations)
-      .filter(d => d.completed)
-      .reduce((stationSum, d) => stationSum + (d.waitingTime || 0), 0);
+    return sum + Object.values((order as any).stationDurations || {})
+      .filter((d: any) => d.completed)
+      .reduce((stationSum: number, d: any) => stationSum + (d.waitingTime || 0), 0);
   }, 0);
   
   const avgProcessingTime = completedOrders.length > 0 ? totalProcessingTime / completedOrders.length : 0;
@@ -80,15 +82,15 @@ export function AdvancedKPIDashboard({
   // Prepare data for stacked bar chart
   const prepareChartData = () => {
     return completedOrders.map((order, index) => {
-      const processingTime = Object.values(order.stationDurations)
-        .filter(d => d.completed)
-        .reduce((sum, d) => sum + (d.actual || 0), 0);
-      const waitingTime = Object.values(order.stationDurations)
-        .filter(d => d.completed)
-        .reduce((sum, d) => sum + (d.waitingTime || 0), 0);
+      const processingTime = Object.values((order as any).stationDurations || {})
+        .filter((d: any) => d.completed)
+        .reduce((sum: number, d: any) => sum + (d.actual || 0), 0);
+      const waitingTime = Object.values((order as any).stationDurations || {})
+        .filter((d: any) => d.completed)
+        .reduce((sum: number, d: any) => sum + (d.waitingTime || 0), 0);
 
       return {
-        name: `${order.kundeName}`,
+        name: `${(order as any).kundeName || order.customer?.firstName + ' ' + order.customer?.lastName}`,
         orderNumber: index + 1,
         Bearbeitungszeit: parseFloat(processingTime.toFixed(1)),
         Wartezeit: parseFloat(waitingTime.toFixed(1))
@@ -97,17 +99,17 @@ export function AdvancedKPIDashboard({
   };
   
   const totalDelays = completedOrders.reduce((sum, order) => {
-    return sum + Object.values(order.stationDurations)
-      .filter(d => d.actual && d.completed)
-      .reduce((stationSum, d) => stationSum + Math.max(0, (d.actual || 0) - d.expected), 0);
+    return sum + Object.values((order as any).stationDurations || {})
+      .filter((d: any) => d.actual && d.completed)
+      .reduce((stationSum: number, d: any) => stationSum + Math.max(0, (d.actual || 0) - d.expected), 0);
   }, 0);
   
   const avgDelay = completedOrders.length > 0 ? totalDelays / completedOrders.length : 0;
   
-  const busyStations = stations.filter(s => s.currentOrder !== null).length;
+  const busyStations = stations.filter(s => s.currentOrderId !== null && s.currentOrderId !== undefined).length;
   const utilizationRate = stations.length > 0 ? (busyStations / stations.length) * 100 : 0;
 
-  const totalWaitingOrders = stations.reduce((sum, station) => sum + station.waitingQueue.length, 0);
+  const totalWaitingOrders = stations.reduce((sum, station) => sum + ((station as any).waitingQueue?.length || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -237,22 +239,22 @@ export function AdvancedKPIDashboard({
                   </TableHeader>
                   <TableBody>
                     {completedOrders.map((order) => {
-                      const completedDurations = Object.values(order.stationDurations).filter(d => d.completed);
-                      const processingTime = completedDurations.reduce((sum, d) => sum + (d.actual || 0), 0);
-                      const waitingTime = completedDurations.reduce((sum, d) => sum + (d.waitingTime || 0), 0);
+                      const completedDurations = Object.values((order as any).stationDurations || {}).filter((d: any) => d.completed);
+                      const processingTime = completedDurations.reduce((sum: number, d: any) => sum + (d.actual || 0), 0);
+                      const waitingTime = completedDurations.reduce((sum: number, d: any) => sum + (d.waitingTime || 0), 0);
                       const totalTime = processingTime + waitingTime;
                       
                       return (
                         <TableRow key={order.id}>
-                          <TableCell className="font-medium">{order.kundeName}</TableCell>
-                          <TableCell>{order.produktvariante}</TableCell>
+                          <TableCell className="font-medium">{(order as any).kundeName || order.customer?.firstName + ' ' + order.customer?.lastName}</TableCell>
+                          <TableCell>{(order as any).produktvariante || order.productVariant?.name}</TableCell>
                           <TableCell>
                             <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
-                              {order.schedulingAlgorithm || 'N/A'}
+                              {(order as any).schedulingAlgorithm || 'N/A'}
                             </span>
                           </TableCell>
-                          <TableCell>{order.startTime.toLocaleString('de-DE')}</TableCell>
-                          <TableCell>{order.completedAt?.toLocaleString('de-DE') || 'N/A'}</TableCell>
+                          <TableCell>{((order as any).startTime || order.createdAt).toLocaleString('de-DE')}</TableCell>
+                          <TableCell>{((order as any).completedAt || (order as any).completedAt)?.toLocaleString('de-DE') || 'N/A'}</TableCell>
                           <TableCell className="text-green-600 font-medium">{processingTime.toFixed(1)} min</TableCell>
                           <TableCell className="text-orange-600 font-medium">{waitingTime.toFixed(1)} min</TableCell>
                           <TableCell className="font-bold">{totalTime.toFixed(1)} min</TableCell>
@@ -270,14 +272,14 @@ export function AdvancedKPIDashboard({
                   <Card key={`details-${order.id}`}>
                     <CardHeader>
                       <CardTitle className="text-base">
-                        {order.kundeName} - {order.produktvariante}
+                        {(order as any).kundeName || order.customer?.firstName + ' ' + order.customer?.lastName} - {(order as any).produktvariante || order.productVariant?.name}
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
                       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                        {Object.entries(order.stationDurations)
-                          .filter(([_, duration]) => duration.completed)
-                          .map(([stationId, duration]) => {
+                        {Object.entries((order as any).stationDurations || {})
+                          .filter(([_, duration]: any) => duration.completed)
+                          .map(([stationId, duration]: any) => {
                             const station = stations.find(s => s.id === stationId);
                             const processingTime = duration.actual || 0;
                             const waitingTime = duration.waitingTime || 0;

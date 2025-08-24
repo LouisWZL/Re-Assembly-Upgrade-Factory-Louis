@@ -37,7 +37,7 @@ export async function addTerminierung(
     throw new Error('Auftrag nicht gefunden')
   }
   
-  const terminierungen = (auftrag.terminierung as Terminierung[]) || []
+  const terminierungen = (auftrag.terminierung as unknown as Terminierung[]) || []
   const neueTerminierung: Terminierung = {
     datum,
     typ,
@@ -70,7 +70,7 @@ export async function addBeschaffung(
     throw new Error('Factory nicht gefunden')
   }
   
-  const beschaffungen = (factory.beschaffung as Beschaffung[]) || []
+  const beschaffungen = (factory.beschaffung as unknown as Beschaffung[]) || []
   const neueBeschaffung: Beschaffung = {
     baugruppen,
     typ,

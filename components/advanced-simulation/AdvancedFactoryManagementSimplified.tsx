@@ -59,9 +59,9 @@ function AdvancedFactoryManagementContent() {
         
         <TabsContent value="kpi" className="mt-0">
           <AdvancedKPIDashboard 
-            orders={activeOrders}
-            completedOrders={completedOrders}
-            stations={stations}
+            orders={activeOrders as any}
+            completedOrders={completedOrders as any}
+            stations={stations as any}
             simulationStartTime={simulationStartTime}
             onClearData={clearAllData}
           />

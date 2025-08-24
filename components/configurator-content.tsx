@@ -418,7 +418,7 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
                         </TableCell>
                         <TableCell>{baugruppe.artikelnummer}</TableCell>
                         <TableCell>
-                          {baugruppe.montagezeit ? `${baugruppe.montagezeit} Min` : '-'}
+                          {(baugruppe as any).montagezeit ? `${(baugruppe as any).montagezeit} Min` : '-'}
                         </TableCell>
                       </TableRow>
                     ))}

@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { createBaugruppentyp, updateBaugruppentyp } from '@/app/actions/baugruppentyp.actions'
+import { useFactory } from '@/contexts/factory-context'
 
 interface BaugruppentypFormProps {
   baugruppentyp?: {
@@ -18,6 +19,7 @@ interface BaugruppentypFormProps {
 }
 
 export function BaugruppentypForm({ baugruppentyp, onSuccess, onCancel }: BaugruppentypFormProps) {
+  const { activeFactory } = useFactory()
   const [isLoading, setIsLoading] = useState(false)
   const [formData, setFormData] = useState({
     bezeichnung: baugruppentyp?.bezeichnung || ''
@@ -36,7 +38,8 @@ export function BaugruppentypForm({ baugruppentyp, onSuccess, onCancel }: Baugru
         })
       } else {
         result = await createBaugruppentyp({
-          bezeichnung: formData.bezeichnung
+          bezeichnung: formData.bezeichnung,
+          factoryId: activeFactory?.id || ''
         })
       }
 

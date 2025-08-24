@@ -9,8 +9,7 @@ export async function getProduktvariante(varianteId: string) {
     const variante = await prisma.produktvariante.findUnique({
       where: { id: varianteId },
       include: {
-        produkt: true,
-        baugruppen: true
+        produkt: true
       }
     })
 

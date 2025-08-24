@@ -204,7 +204,6 @@ export async function getBaugruppe(id: string) {
       where: { id },
       include: {
         baugruppentyp: true,
-        varianten: true,
         prozesse: true
       }
     })
@@ -238,7 +237,6 @@ export async function getBaugruppenByTyp(baugruppentypId: string) {
       },
       include: {
         baugruppentyp: true,
-        varianten: true,
         prozesse: true
       },
       orderBy: {

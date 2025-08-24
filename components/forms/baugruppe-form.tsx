@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { toast } from 'sonner'
 import { createBaugruppe, updateBaugruppe } from '@/app/actions/baugruppe.actions'
 import { getBaugruppentypen } from '@/app/actions/baugruppentyp.actions'
+import { useFactory } from '@/contexts/factory-context'
 
 interface BaugruppeFormProps {
   baugruppe?: {
@@ -26,6 +27,7 @@ interface BaugruppeFormProps {
 }
 
 export function BaugruppeForm({ baugruppe, onSuccess, onCancel }: BaugruppeFormProps) {
+  const { activeFactory } = useFactory()
   const [isLoading, setIsLoading] = useState(false)
   const [baugruppentypen, setBaugruppentypen] = useState<any[]>([])
   const [formData, setFormData] = useState({
@@ -80,7 +82,7 @@ export function BaugruppeForm({ baugruppe, onSuccess, onCancel }: BaugruppeFormP
       if (baugruppe) {
         result = await updateBaugruppe(baugruppe.id, data)
       } else {
-        result = await createBaugruppe(data)
+        result = await createBaugruppe({ ...data, factoryId: activeFactory?.id || '' })
       }
 
       if (result.success) {
