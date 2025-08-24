@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 
 export async function GET() {
   try {
+    // Ensure database is initialized before querying
+    await ensureDatabaseInitialized()
+    
     const factories = await prisma.reassemblyFactory.findMany({
       include: {
         produkte: {
@@ -37,6 +40,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    // Ensure database is initialized before creating
+    await ensureDatabaseInitialized()
+    
     const body = await request.json()
     const { name, kapazität } = body
 

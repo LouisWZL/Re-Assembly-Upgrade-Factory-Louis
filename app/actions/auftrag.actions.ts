@@ -1,6 +1,6 @@
 'use server'
 
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { AuftragsPhase, ReAssemblyTyp, VariantenTyp, Prisma } from '@prisma/client'
 import { initializeCustomers, getRandomKunde } from './kunde.actions'
@@ -11,6 +11,9 @@ import { createOrderGraphFromProduct, getConstrainedZustand, findCompatibleRepla
  */
 export async function getAuftraege(factoryId: string) {
   try {
+    // Ensure database is initialized
+    await ensureDatabaseInitialized()
+    
     // Optimiert: Lade nur notwendige Daten für die Sidebar-Tabellen
     const auftraege = await prisma.auftrag.findMany({
       where: { factoryId },
@@ -391,6 +394,9 @@ async function createSingleOrder(
  */
 export async function generateOrders(factoryId: string, count: number = 10) {
   try {
+    // Ensure database is initialized
+    await ensureDatabaseInitialized()
+    
     // Ensure customers are initialized
     const initResult = await initializeCustomers()
     if (!initResult.success) {
