@@ -1,6 +1,12 @@
 {
-  "buildCommand": "prisma generate && next build",
+  "buildCommand": "prisma generate && prisma db push --accept-data-loss && npx prisma db seed && next build",
   "env": {
-    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true"
+    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true",
+    "DATABASE_URL": "file:/tmp/db.sqlite"
+  },
+  "functions": {
+    "app/**/*.js": {
+      "includeFiles": "prisma/**/*"
+    }
   }
 }
