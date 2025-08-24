@@ -1,0 +1,1968 @@
+'use client'
+
+import { useState, useEffect, useCallback } from 'react';
+import { useFactory } from '@/contexts/factory-context';
+import { useSimulation } from '@/contexts/simulation-context';
+import { useRouter } from 'next/navigation';
+import { getAdvancedSimulationData } from '@/app/actions/advanced-simulation.actions';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Slider } from '@/components/ui/slider';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2 } from 'lucide-react';
+import { toast } from 'sonner';
+import { 
+  ReactFlow,
+  Node, 
+  Edge, 
+  Background, 
+  Controls, 
+  MiniMap,
+  useNodesState,
+  useEdgesState,
+  Position
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+interface SimulationStation {
+  id: string;
+  name: string;
+  type: 'MAIN' | 'SUB';
+  phase?: string;
+  processingTime: number; // in minutes
+  stochasticVariation: number; // percentage (0-1)
+  currentOrder: SimulationOrder | null; // Only one order at a time
+  waitingQueue: SimulationOrder[]; // Orders waiting for this station
+  baugruppentypId?: string;
+  parent?: string;
+  capacity: number; // Maximum 1 for realistic simulation
+}
+
+interface SimulationOrder {
+  id: string;
+  kundeId: string;
+  kundeName: string;
+  produktvariante: string;
+  currentStation: string;
+  progress: number;
+  startTime: Date;
+  stationStartTime?: Date;
+  processSequence: string[];
+  requiredBaugruppentypen: string[];
+  requiredUpgrades: { [baugruppentypId: string]: 'PFLICHT' | 'WUNSCH' };
+  stationDurations: { [stationId: string]: { expected: number; actual?: number; startTime?: Date; completed?: boolean; waitingTime?: number } };
+  isWaiting: boolean;
+  completedAt?: Date;
+  processSequences?: any; // JSON data from database containing all possible sequences
+  selectedSequence?: any; // The randomly selected sequence for this order
+  currentSequenceStep?: number; // Current step index in the selected sequence
+}
+
+// Scheduling algorithms enum and interface
+enum SchedulingAlgorithm {
+  FIFO = 'FIFO',
+  SJF = 'SJF', // Shortest Job First
+  LJF = 'LJF', // Longest Job First  
+  PRIORITY = 'PRIORITY',
+  EDD = 'EDD', // Earliest Due Date
+  RANDOM = 'RANDOM'
+}
+
+interface SchedulingStrategy {
+  name: string;
+  description: string;
+  selectNext: (waitingQueue: SimulationOrder[], currentTime: Date) => SimulationOrder | null;
+}
+
+export function RealDataFactorySimulation() {
+  const { activeFactory } = useFactory();
+  const { 
+    addCompletedOrder, 
+    activeOrders,
+    setActiveOrders, 
+    stations,
+    setStations: setContextStations, 
+    setSimulationStartTime,
+    isRunning,
+    setIsRunning,
+    speed,
+    setSpeed,
+    simulationTime,
+    setSimulationTime,
+    completedOrders,
+    waitingOrders,
+    setWaitingOrders,
+    currentSchedulingAlgorithm,
+    setCurrentSchedulingAlgorithm
+  } = useSimulation();
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [lastRealTime, setLastRealTime] = useState(Date.now());
+  
+  // Local simulation data
+  const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
+  const [factoryData, setFactoryData] = useState<any>(null);
+  
+  // No local scheduling configuration - using context
+  
+  // Scheduling strategies implementation
+  const schedulingStrategies: { [key in SchedulingAlgorithm]: SchedulingStrategy } = {
+    [SchedulingAlgorithm.FIFO]: {
+      name: 'First In First Out',
+      description: 'Ordnung nach Ankunftsreihenfolge',
+      selectNext: (waitingQueue: SimulationOrder[]) => waitingQueue.length > 0 ? waitingQueue[0] : null
+    },
+    [SchedulingAlgorithm.SJF]: {
+      name: 'Shortest Job First',
+      description: 'Kürzeste Bearbeitungszeit zuerst',
+      selectNext: (waitingQueue: SimulationOrder[], currentTime: Date) => {
+        if (waitingQueue.length === 0) return null;
+        return waitingQueue.reduce((shortest, order) => {
+          const shortestTime = Object.values(shortest.stationDurations).reduce((sum, d) => sum + d.expected, 0);
+          const orderTime = Object.values(order.stationDurations).reduce((sum, d) => sum + d.expected, 0);
+          return orderTime < shortestTime ? order : shortest;
+        });
+      }
+    },
+    [SchedulingAlgorithm.LJF]: {
+      name: 'Longest Job First',
+      description: 'Längste Bearbeitungszeit zuerst',
+      selectNext: (waitingQueue: SimulationOrder[], currentTime: Date) => {
+        if (waitingQueue.length === 0) return null;
+        return waitingQueue.reduce((longest, order) => {
+          const longestTime = Object.values(longest.stationDurations).reduce((sum, d) => sum + d.expected, 0);
+          const orderTime = Object.values(order.stationDurations).reduce((sum, d) => sum + d.expected, 0);
+          return orderTime > longestTime ? order : longest;
+        });
+      }
+    },
+    [SchedulingAlgorithm.PRIORITY]: {
+      name: 'Priority Scheduling',
+      description: 'Priorität basierend auf Kundentyp',
+      selectNext: (waitingQueue: SimulationOrder[]) => {
+        if (waitingQueue.length === 0) return null;
+        // Simple priority based on customer name (Premium customers first)
+        return waitingQueue.find(order => order.kundeName.toLowerCase().includes('premium')) || waitingQueue[0];
+      }
+    },
+    [SchedulingAlgorithm.EDD]: {
+      name: 'Earliest Due Date',
+      description: 'Früheste Liefertermin zuerst',
+      selectNext: (waitingQueue: SimulationOrder[]) => {
+        if (waitingQueue.length === 0) return null;
+        return waitingQueue.reduce((earliest, order) => 
+          order.startTime < earliest.startTime ? order : earliest
+        );
+      }
+    },
+    [SchedulingAlgorithm.RANDOM]: {
+      name: 'Random Selection',
+      description: 'Zufällige Auswahl aus Warteschlange',
+      selectNext: (waitingQueue: SimulationOrder[]) => {
+        if (waitingQueue.length === 0) return null;
+        const randomIndex = Math.floor(Math.random() * waitingQueue.length);
+        return waitingQueue[randomIndex];
+      }
+    }
+  };
+  
+  // Flow diagram nodes and edges
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  
+  // Station configuration dialog
+  const [selectedStation, setSelectedStation] = useState<SimulationStation | null>(null);
+  const [stationDialogOpen, setStationDialogOpen] = useState(false);
+  const [tempProcessingTime, setTempProcessingTime] = useState(0);
+
+  // Load factory data
+  useEffect(() => {
+    if (activeFactory) {
+      loadSimulationData();
+    }
+  }, [activeFactory]);
+
+  const loadSimulationData = async () => {
+    if (!activeFactory) return;
+    
+    setLoading(true);
+    try {
+      const result = await getAdvancedSimulationData(activeFactory.id);
+      
+      if (result.success && result.data) {
+        setFactoryData(result.data);
+        
+        // Initialize stations with stochastic variations and capacity limits
+        const mainStations: SimulationStation[] = [
+          { id: 'order-acceptance', name: 'Auftragsannahme', type: 'MAIN', phase: 'AUFTRAGSANNAHME', processingTime: 5, stochasticVariation: 0.2, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'inspection', name: 'Inspektion', type: 'MAIN', phase: 'INSPEKTION', processingTime: 15, stochasticVariation: 0.3, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'demontage-waiting', name: 'Warteschlange Demontage', type: 'MAIN', phase: 'DEMONTAGE', processingTime: 2, stochasticVariation: 0.1, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'demontage', name: 'Demontage', type: 'MAIN', phase: 'DEMONTAGE', processingTime: 0, stochasticVariation: 0.25, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'reassembly', name: 'Re-Assembly', type: 'MAIN', phase: 'REASSEMBLY', processingTime: 0, stochasticVariation: 0.25, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'quality', name: 'Qualitätsprüfung', type: 'MAIN', phase: 'QUALITAETSPRUEFUNG', processingTime: 20, stochasticVariation: 0.4, currentOrder: null, waitingQueue: [], capacity: 1 },
+          { id: 'shipping', name: 'Versand', type: 'MAIN', phase: 'VERSAND', processingTime: 10, stochasticVariation: 0.2, currentOrder: null, waitingQueue: [], capacity: 1 }
+        ];
+        
+        // Filter Baugruppentypen to only include those that are actually used in the process graph
+        const getUsedBaugruppentypen = () => {
+          if (!result.data.processSequences || result.data.processSequences.length === 0) {
+            // Fallback: use all baugruppentypen if no process data
+            return result.data.stations.demontageSubStations;
+          }
+          
+          const processGraphData = result.data.processSequences[0]?.processGraphData;
+          if (!processGraphData || !processGraphData.cells) {
+            return result.data.stations.demontageSubStations;
+          }
+          
+          // Find all connected nodes in the process graph
+          const connectedNodeIds = new Set<string>();
+          const links = processGraphData.cells.filter((cell: any) => cell.type === 'standard.Link');
+          
+          links.forEach((link: any) => {
+            if (link.source && link.target) {
+              connectedNodeIds.add(link.source.id);
+              connectedNodeIds.add(link.target.id);
+            }
+          });
+          
+          // Filter nodes to only include those that are connected and have baugruppentyp
+          const connectedNodes = processGraphData.cells.filter((cell: any) => 
+            cell.type !== 'standard.Link' && 
+            connectedNodeIds.has(cell.id) &&
+            cell.baugruppentyp
+          );
+          
+          const usedBaugruppentypIds = new Set(
+            connectedNodes.map((node: any) => node.baugruppentyp.id)
+          );
+          
+          // Filter the original sub-stations to only include used ones
+          return result.data.stations.demontageSubStations.filter((sub: any) => 
+            usedBaugruppentypIds.has(sub.baugruppentypId)
+          );
+        };
+        
+        const usedBaugruppentypen = getUsedBaugruppentypen();
+        console.log('Used Baugruppentypen:', usedBaugruppentypen.map(b => b.name));
+
+        // Add sub-stations for Demontage and Re-Assembly based on actually used Baugruppentypen
+        const demontageSubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => ({
+          id: `demontage-${sub.id}`,
+          name: sub.name,
+          type: 'SUB' as const,
+          parent: 'demontage',
+          baugruppentypId: sub.baugruppentypId,
+          processingTime: 30, // Default 30 minutes
+          stochasticVariation: 0.3,
+          currentOrder: null,
+          waitingQueue: [],
+          capacity: 1
+        }));
+        
+        const reassemblySubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => ({
+          id: `reassembly-${sub.id}`,
+          name: sub.name.replace('Demontage', 'Montage'), // Convert Demontage to Montage for reassembly stations
+          type: 'SUB' as const,
+          parent: 'reassembly',
+          baugruppentypId: sub.baugruppentypId,
+          processingTime: 45, // Default 45 minutes
+          stochasticVariation: 0.25,
+          currentOrder: null,
+          waitingQueue: [],
+          capacity: 1
+        }));
+        
+        const allStations = [...mainStations, ...demontageSubStations, ...reassemblySubStations];
+        setLocalStations(allStations);
+        setContextStations(allStations);
+        
+        // Convert existing active orders to simulation format and assign to Auftragsannahme
+        const activeOrders = result.data.orders.filter((order: any) => 
+          order.phase !== 'AUFTRAGSABSCHLUSS'
+        );
+        
+        const simulationOrders: SimulationOrder[] = activeOrders.map((order: any) => {
+          const requiredBgt = extractRequiredBaugruppentypen(order);
+          const requiredUpgrades = extractRequiredUpgrades(order);
+          
+          // Use the new function to select a random sequence and convert it
+          const { processSequence: processSeq, selectedSequence } = selectRandomSequenceAndConvert(
+            order, 
+            [...mainStations, ...demontageSubStations, ...reassemblySubStations]
+          );
+          
+          return {
+            id: order.id,
+            kundeId: order.kundeId,
+            kundeName: `${order.kunde.vorname} ${order.kunde.nachname}`,
+            produktvariante: order.produktvariante.bezeichnung,
+            currentStation: 'order-acceptance', // All active orders start at Auftragsannahme
+            progress: 0,
+            startTime: new Date(order.createdAt),
+            stationStartTime: new Date(),
+            processSequence: processSeq,
+            requiredBaugruppentypen: requiredBgt,
+            requiredUpgrades: requiredUpgrades,
+            stationDurations: {},
+            isWaiting: false,
+            processSequences: order.processSequences, // Include the JSON data from database
+            selectedSequence: selectedSequence, // Store the selected sequence
+            currentSequenceStep: 0 // Start at beginning of sequence
+          };
+        });
+        
+        setActiveOrders(simulationOrders);
+        
+        // Set simulation start time
+        setSimulationStartTime(new Date());
+        
+        // Create flow diagram after state is set
+        setTimeout(() => {
+          createFlowDiagram(mainStations, demontageSubStations, reassemblySubStations);
+        }, 100);
+      } else {
+        toast.error(result.error || 'Fehler beim Laden der Simulationsdaten');
+      }
+    } catch (error) {
+      console.error('Error loading simulation data:', error);
+      toast.error('Fehler beim Laden der Simulationsdaten');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // New function to randomly select and convert a JSON sequence to simulation process sequence
+  const selectRandomSequenceAndConvert = (order: any, allStations: SimulationStation[]): { processSequence: string[], selectedSequence: any } => {
+    const processSequencesData = typeof order.processSequences === 'string' 
+      ? JSON.parse(order.processSequences) 
+      : order.processSequences;
+    
+    if (!processSequencesData?.baugruppentypen?.sequences || processSequencesData.baugruppentypen.sequences.length === 0) {
+      // Fallback to old method if no sequences
+      const requiredBgt = extractRequiredBaugruppentypen(order);
+      const requiredUpgrades = extractRequiredUpgrades(order);
+      return {
+        processSequence: determineProcessSequenceWithUpgrades(order, allStations, requiredBgt, requiredUpgrades),
+        selectedSequence: null
+      };
+    }
+    
+    // Randomly select one sequence from baugruppentypen sequences
+    const sequences = processSequencesData.baugruppentypen.sequences;
+    const randomIndex = Math.floor(Math.random() * sequences.length);
+    const selectedSequence = sequences[randomIndex];
+    
+    console.log(`Order ${order.kunde.vorname} ${order.kunde.nachname}: Selected sequence ${selectedSequence.id}:`, selectedSequence.steps);
+    
+    // Convert the sequence steps to station IDs
+    const processSequence: string[] = [];
+    
+    selectedSequence.steps.forEach((step: string, index: number) => {
+      if (step === 'I') {
+        // Inspection
+        if (index === 0) {
+          processSequence.push('order-acceptance', 'inspection', 'demontage-waiting');
+        }
+      } else if (step === '×') {
+        // Quality check transition - this separates demontage from reassembly
+        // No station added, just a marker in the sequence
+      } else if (step === 'Q') {
+        // Quality and shipping
+        processSequence.push('quality', 'shipping');
+      } else {
+        // This is a component step - find corresponding station
+        const isBeforeQuality = selectedSequence.steps.indexOf('×') > -1 && index < selectedSequence.steps.indexOf('×');
+        const isAfterQuality = selectedSequence.steps.indexOf('×') > -1 && index > selectedSequence.steps.indexOf('×');
+        
+        if (isBeforeQuality) {
+          // Demontage station
+          const demontageStation = allStations.find(s => 
+            s.type === 'SUB' && 
+            s.parent === 'demontage' && 
+            (s.name.includes(step) || s.name.includes(step.replace('BGT-PS-', '').replace('BGT-', '')))
+          );
+          if (demontageStation) {
+            processSequence.push(demontageStation.id);
+          }
+        } else if (isAfterQuality) {
+          // Reassembly station  
+          const reassemblyStation = allStations.find(s => 
+            s.type === 'SUB' && 
+            s.parent === 'reassembly' && 
+            (s.name.includes(step) || s.name.includes(step.replace('BGT-PS-', '').replace('BGT-', '')))
+          );
+          if (reassemblyStation) {
+            processSequence.push(reassemblyStation.id);
+          }
+        }
+      }
+    });
+    
+    console.log(`Converted to process sequence:`, processSequence);
+    
+    return {
+      processSequence,
+      selectedSequence
+    };
+  };
+
+  const determineProcessSequenceWithUpgrades = (order: any, allStations: SimulationStation[], requiredBgt: string[], requiredUpgrades: { [baugruppentypId: string]: 'PFLICHT' | 'WUNSCH' }): string[] => {
+    const sequence = ['order-acceptance', 'inspection'];
+    
+    // Add demontage stations for all required Baugruppentypen (all need disassembly)
+    requiredBgt.forEach(bgt => {
+      const station = allStations.find(s => 
+        s.type === 'SUB' && 
+        s.parent === 'demontage' && 
+        (s.name.includes(bgt) || s.name.includes(bgt.replace('BGT-PS-', '').replace('BGT-', '')))
+      );
+      if (station) {
+        sequence.push(station.id);
+      }
+    });
+    
+    // Add reassembly stations only for Baugruppentypen that need PFLICHT or WUNSCH upgrades
+    Object.entries(requiredUpgrades).forEach(([bgt, upgradeType]) => {
+      if (upgradeType === 'PFLICHT' || upgradeType === 'WUNSCH') {
+        const station = allStations.find(s => 
+          s.type === 'SUB' && 
+          s.parent === 'reassembly' && 
+          (s.name.includes(bgt) || s.name.includes(bgt.replace('BGT-PS-', '').replace('BGT-', '')))
+        );
+        if (station) {
+          sequence.push(station.id);
+        }
+      }
+    });
+    
+    sequence.push('quality', 'shipping');
+    
+    // Add waiting station before disassembly operations
+    return addWaitingStationBeforeDisassembly(sequence);
+  };
+
+  // Add waiting list before entering disassembly
+  const addWaitingStationBeforeDisassembly = (sequence: string[]): string[] => {
+    const newSequence = [...sequence];
+    const inspectionIndex = sequence.indexOf('inspection');
+    const demontageIndex = sequence.findIndex(s => s.includes('demontage') && s !== 'demontage-waiting');
+    
+    if (inspectionIndex !== -1 && demontageIndex !== -1) {
+      // Insert waiting station between inspection and first disassembly
+      newSequence.splice(demontageIndex, 0, 'demontage-waiting');
+    }
+    
+    return newSequence;
+  };
+
+  // Keep old function for backward compatibility but mark as deprecated
+  const determineProcessSequence = (order: any, allStations: SimulationStation[], requiredBgt: string[]): string[] => {
+    console.warn('Using deprecated determineProcessSequence, should use determineProcessSequenceWithUpgrades');
+    return determineProcessSequenceWithUpgrades(order, allStations, requiredBgt, {});
+  };
+
+  const extractRequiredBaugruppentypen = (order: any): string[] => {
+    const bgtSet = new Set<string>();
+    order.baugruppenInstances?.forEach((instance: any) => {
+      if (instance.baugruppe?.baugruppentyp?.bezeichnung) {
+        bgtSet.add(instance.baugruppe.baugruppentyp.bezeichnung);
+      }
+    });
+    return Array.from(bgtSet);
+  };
+
+  const extractRequiredUpgrades = (order: any): { [baugruppentypId: string]: 'PFLICHT' | 'WUNSCH' } => {
+    const upgrades: { [baugruppentypId: string]: 'PFLICHT' | 'WUNSCH' } = {};
+    order.baugruppenInstances?.forEach((instance: any) => {
+      if (instance.reAssemblyTyp && instance.baugruppe?.baugruppentyp?.bezeichnung) {
+        upgrades[instance.baugruppe.baugruppentyp.bezeichnung] = instance.reAssemblyTyp;
+      }
+    });
+    return upgrades;
+  };
+
+  const createFlowDiagram = (
+    mainStations: SimulationStation[], 
+    demontageSubStations: SimulationStation[], 
+    reassemblySubStations: SimulationStation[]
+  ) => {
+    const flowNodes: Node[] = [];
+    const flowEdges: Edge[] = [];
+    
+    // Calculate dynamic heights based on number of sub-stations (vertical layout)
+    const demontageHeight = Math.max(350, 120 + demontageSubStations.length * 80 + 40);
+    const reassemblyHeight = Math.max(350, 120 + reassemblySubStations.length * 80 + 40);
+    
+    // Main stations as horizontal flow
+    mainStations.forEach((station, index) => {
+      const isParent = station.id === 'demontage' || station.id === 'reassembly';
+      const isDemontage = station.id === 'demontage';
+      const isReassembly = station.id === 'reassembly';
+      
+      let dynamicHeight = 80;
+      let title = station.name;
+      
+      if (isDemontage) {
+        dynamicHeight = demontageHeight;
+        title = ''; // Empty for floating title
+      } else if (isReassembly) {
+        dynamicHeight = reassemblyHeight;
+        title = ''; // Empty for floating title
+      }
+      
+      flowNodes.push({
+        id: station.id,
+        type: isParent ? 'group' : 'default',
+        position: { x: index * 250, y: 100 },
+        data: { 
+          label: (
+            <div className="text-center">
+              <div className="font-bold">{title}</div>
+              {!isParent && (
+                <>
+                  <div className="text-xs text-gray-500">Zeit: {station.processingTime} min (±{Math.round(station.stochasticVariation * 100)}%)</div>
+                  <div className="text-xs text-blue-500">Belegt: {station.currentOrder ? '1' : '0'}</div>
+                </>
+              )}
+            </div>
+          )
+        },
+        style: {
+          background: isParent ? '#f0f0f0' : '#ffffff',
+          border: '2px solid #1e40af',
+          borderRadius: '8px',
+          padding: isParent ? '20px' : '10px',
+          width: isParent ? 220 : 180,
+          height: dynamicHeight
+        }
+      });
+      
+      // Skip automatic edge creation here - we'll create them manually below
+    });
+    
+    // Add sub-stations for Demontage (process graph style with attractive layout)
+    demontageSubStations.forEach((subStation, index) => {
+      const currentOrderName = subStation.currentOrder?.kundeName || 'Frei';
+      const waitingCount = subStation.waitingQueue?.length || 0;
+      const isOccupied = subStation.currentOrder !== null;
+      
+      // Vertical layout for demontage sub-stations
+      let position = { 
+        x: 20, // Fixed x position (left aligned)
+        y: 60 + index * 80 // Vertical stacking with 80px spacing
+      };
+      
+      // Use fixed vertical layout (no process graph positioning)
+      
+      flowNodes.push({
+        id: subStation.id,
+        type: 'default',
+        position: position,
+        parentId: 'demontage',
+        data: {
+          label: (
+            <div className="text-center">
+              <div className="text-xs font-bold text-gray-800">
+                {subStation.name.replace('Demontage ', '')}
+              </div>
+              <div className={`text-xs font-medium px-1 py-0.5 rounded mt-1 ${
+                isOccupied 
+                  ? 'bg-red-100 text-red-800' 
+                  : 'bg-green-100 text-green-800'
+              }`}>
+                {isOccupied ? currentOrderName : 'Frei'}
+              </div>
+              <div className="text-xs text-gray-600 mt-0.5">
+                {subStation.processingTime}min (±{Math.round(subStation.stochasticVariation * 100)}%)
+              </div>
+              {waitingCount > 0 && (
+                <div className="text-xs bg-orange-100 text-orange-800 px-1 rounded mt-0.5">
+                  Warteschlange: {waitingCount}
+                </div>
+              )}
+            </div>
+          )
+        },
+        style: {
+          background: isOccupied ? '#fef2f2' : '#f0f9ff',
+          border: `2px solid ${isOccupied ? '#dc2626' : '#3b82f6'}`,
+          borderRadius: '8px',
+          padding: '8px',
+          width: 180,
+          height: waitingCount > 0 ? 80 : 70,
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }
+      });
+    });
+    
+    // Add sub-stations for Re-Assembly (process graph style with attractive layout)
+    reassemblySubStations.forEach((subStation, index) => {
+      const currentOrderName = subStation.currentOrder?.kundeName || 'Frei';
+      const waitingCount = subStation.waitingQueue?.length || 0;
+      const isOccupied = subStation.currentOrder !== null;
+      
+      // Vertical layout for reassembly sub-stations
+      let position = { 
+        x: 20, // Fixed x position (left aligned)
+        y: 60 + index * 80 // Vertical stacking with 80px spacing
+      };
+      
+      // Use fixed vertical layout (no process graph positioning)
+      
+      flowNodes.push({
+        id: subStation.id,
+        type: 'default',
+        position: position,
+        parentId: 'reassembly',
+        data: {
+          label: (
+            <div className="text-center">
+              <div className="text-xs font-bold text-gray-800">
+                {subStation.name.replace('Montage ', '')}
+              </div>
+              <div className={`text-xs font-medium px-1 py-0.5 rounded mt-1 ${
+                isOccupied 
+                  ? 'bg-red-100 text-red-800' 
+                  : 'bg-green-100 text-green-800'
+              }`}>
+                {isOccupied ? currentOrderName : 'Frei'}
+              </div>
+              <div className="text-xs text-gray-600 mt-0.5">
+                {subStation.processingTime}min (±{Math.round(subStation.stochasticVariation * 100)}%)
+              </div>
+              {waitingCount > 0 && (
+                <div className="text-xs bg-orange-100 text-orange-800 px-1 rounded mt-0.5">
+                  Warteschlange: {waitingCount}
+                </div>
+              )}
+            </div>
+          )
+        },
+        style: {
+          background: isOccupied ? '#fef2f2' : '#f0fdf4',
+          border: `2px solid ${isOccupied ? '#dc2626' : '#16a34a'}`,
+          borderRadius: '8px',
+          padding: '8px',
+          width: 180,
+          height: waitingCount > 0 ? 80 : 70,
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+        }
+      });
+    });
+
+    // Add floating title nodes for demontage and reassembly areas
+    if (demontageSubStations.length > 0) {
+      const demontageMainNode = flowNodes.find(n => n.id === 'demontage');
+      if (demontageMainNode) {
+        flowNodes.push({
+          id: 'demontage-title',
+          type: 'default',
+          position: { 
+            x: demontageMainNode.position.x + 50, 
+            y: demontageMainNode.position.y - 40 
+          },
+          data: {
+            label: (
+              <div className="text-center bg-blue-600 text-white px-3 py-1 rounded-md font-bold text-sm shadow-lg">
+                Demontage-Bereich
+              </div>
+            )
+          },
+          style: {
+            background: 'transparent',
+            border: 'none',
+            width: 120,
+            height: 30
+          },
+          draggable: false,
+          selectable: false
+        });
+      }
+    }
+
+    if (reassemblySubStations.length > 0) {
+      const reassemblyMainNode = flowNodes.find(n => n.id === 'reassembly');
+      if (reassemblyMainNode) {
+        flowNodes.push({
+          id: 'reassembly-title',
+          type: 'default',
+          position: { 
+            x: reassemblyMainNode.position.x + 50, 
+            y: reassemblyMainNode.position.y - 40 
+          },
+          data: {
+            label: (
+              <div className="text-center bg-green-600 text-white px-3 py-1 rounded-md font-bold text-sm shadow-lg">
+                Re-Assembly-Bereich
+              </div>
+            )
+          },
+          style: {
+            background: 'transparent',
+            border: 'none',
+            width: 140,
+            height: 30
+          },
+          draggable: false,
+          selectable: false
+        });
+      }
+    }
+    
+    // Connect all main stations with proper flow - complete process chain
+    // Create connections between all main process boxes
+    const mainStationIds = mainStations.map(s => s.id);
+    console.log('Creating flow edges for main stations:', mainStationIds);
+    
+    // Verify that all required station IDs exist in flowNodes
+    const existingNodeIds = flowNodes.map(n => n.id);
+    console.log('Existing node IDs:', existingNodeIds);
+    
+    // Check if required nodes exist before creating edges
+    const requiredIds = ['order-acceptance', 'inspection', 'demontage-waiting', 'demontage', 'reassembly', 'quality', 'shipping'];
+    const missingIds = requiredIds.filter(id => !existingNodeIds.includes(id));
+    if (missingIds.length > 0) {
+      console.error('Missing node IDs for connections:', missingIds);
+    }
+    
+    // Add all main station connections explicitly with enhanced visibility
+    const newEdges = [
+      // Initial flow
+      { id: 'order-acceptance-inspection', source: 'order-acceptance', target: 'inspection', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 3, strokeDasharray: '0' } },
+      { id: 'inspection-demontage-waiting', source: 'inspection', target: 'demontage-waiting', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 3, strokeDasharray: '0' } },
+      { id: 'demontage-waiting-demontage', source: 'demontage-waiting', target: 'demontage', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 3, strokeDasharray: '0' } },
+      
+      // Main process flow through big boxes - THESE ARE THE KEY CONNECTIONS
+      { id: 'demontage-reassembly', source: 'demontage', target: 'reassembly', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 4, strokeDasharray: '0' }, animated: true },
+      { id: 'reassembly-quality', source: 'reassembly', target: 'quality', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 4, strokeDasharray: '0' }, animated: true },
+      { id: 'quality-shipping', source: 'quality', target: 'shipping', type: 'smoothstep', style: { stroke: '#dc2626', strokeWidth: 4, strokeDasharray: '0' } }
+    ];
+    
+    console.log('About to add edges:', newEdges);
+    flowEdges.push(...newEdges);
+    
+    console.log('Created flow edges:', flowEdges.map(e => `${e.source} → ${e.target}`));
+    console.log('All flowNodes IDs:', flowNodes.map(n => n.id));
+    console.log('All flowEdges:', flowEdges);
+    
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+  };
+
+  // Simulation engine - now handled in context, but we still need to process orders
+  useEffect(() => {
+    if (!isRunning) return;
+    
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const realTimeDelta = now - lastRealTime;
+      const simulationTimeDelta = realTimeDelta * speed;
+      
+      setLastRealTime(now);
+      
+      // Process orders through stations
+      processOrders(simulationTimeDelta / 60000); // Convert to minutes
+    }, 100); // Update every 100ms
+    
+    return () => clearInterval(interval);
+  }, [isRunning, speed, lastRealTime]);
+
+  const calculateStochasticProcessingTime = (baseTime: number, variation: number): number => {
+    // Apply stochastic variation using normal distribution approximation
+    const randomFactor = (Math.random() - 0.5) * 2; // -1 to 1
+    const variationAmount = baseTime * variation * randomFactor;
+    return Math.max(1, baseTime + variationAmount); // Minimum 1 minute
+  };
+
+  const saveStationDuration = async (orderId: string, stationId: string, stationName: string, stationType: string, expectedDuration: number, actualDuration: number, startTime: Date, endTime: Date) => {
+    try {
+      await fetch('/api/station-duration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auftragId: orderId,
+          stationId,
+          stationName,
+          stationType,
+          expectedDuration,
+          actualDuration,
+          stochasticVariation: (actualDuration - expectedDuration) / expectedDuration,
+          startedAt: startTime.toISOString(),
+          completedAt: endTime.toISOString()
+        })
+      });
+    } catch (error) {
+      console.error('Error saving station duration:', error);
+    }
+  };
+
+  const processOrders = (deltaMinutes: number) => {
+    setContextStations(prevStations => {
+      const updatedStations = [...prevStations];
+      const newCompletedOrders: SimulationOrder[] = [];
+      const updatedOrders: SimulationOrder[] = [];
+      const waitingOrdersList: SimulationOrder[] = [];
+      
+      // First, assign unassigned orders to available stations
+      activeOrders.forEach(order => {
+        const currentStationData = updatedStations.find(s => s.id === order.currentStation);
+        
+        // Debug logging for demontage-waiting assignment
+        if (order.currentStation === 'demontage-waiting' && currentStationData) {
+          console.log(`Assigning ${order.kundeName} to demontage-waiting:`, {
+            stationHasCurrentOrder: !!currentStationData.currentOrder,
+            orderIsWaiting: order.isWaiting,
+            willAssign: !currentStationData.currentOrder && !order.isWaiting
+          });
+        }
+        
+        // If order is at a station but not assigned to the station, assign it (unless station is busy)
+        if (currentStationData && !currentStationData.currentOrder && !order.isWaiting) {
+          currentStationData.currentOrder = order;
+          console.log(`Assigned ${order.kundeName} to ${currentStationData.name}`);
+        }
+      });
+      
+      // Process orders currently in stations
+      activeOrders.forEach(order => {
+        const currentStationData = updatedStations.find(s => s.id === order.currentStation);
+        
+        // Debug logging for demontage-waiting
+        if (order.currentStation === 'demontage-waiting') {
+          console.log(`Order ${order.kundeName} at demontage-waiting:`, {
+            isAssignedToStation: currentStationData?.currentOrder?.id === order.id,
+            progress: order.progress,
+            isWaiting: order.isWaiting,
+            nextStation: order.processSequence[order.processSequence.indexOf(order.currentStation) + 1]
+          });
+        }
+        
+        if (currentStationData && currentStationData.currentOrder?.id === order.id) {
+          // Initialize station duration tracking if not already done
+          if (!order.stationDurations[order.currentStation]) {
+            const stochasticTime = calculateStochasticProcessingTime(
+              currentStationData.processingTime, 
+              currentStationData.stochasticVariation
+            );
+            order.stationDurations[order.currentStation] = {
+              expected: currentStationData.processingTime,
+              actual: stochasticTime,
+              startTime: new Date(),
+              completed: false
+            };
+            order.stationStartTime = new Date();
+            order.progress = 0;
+            order.isWaiting = false;
+          }
+          
+          order.progress += deltaMinutes;
+          const requiredTime = order.stationDurations[order.currentStation].actual || currentStationData.processingTime;
+          
+          // Debug logging for demontage-waiting progress
+          if (order.currentStation === 'demontage-waiting') {
+            console.log(`${order.kundeName} demontage-waiting progress: ${order.progress.toFixed(2)}/${requiredTime.toFixed(2)}`);
+          }
+          
+          if (order.progress >= requiredTime) {
+            // Mark station duration as completed
+            order.stationDurations[order.currentStation].completed = true;
+            
+            // Save station duration to database
+            const stationDuration = order.stationDurations[order.currentStation];
+            if (stationDuration.startTime) {
+              saveStationDuration(
+                order.id,
+                order.currentStation,
+                currentStationData.name,
+                currentStationData.type,
+                stationDuration.expected,
+                stationDuration.actual || requiredTime,
+                stationDuration.startTime,
+                new Date()
+              );
+            }
+            
+            // Free current station
+            currentStationData.currentOrder = null;
+            
+            // Try to assign next order from waiting queue to current station using selected scheduling algorithm
+            if (currentStationData.waitingQueue.length > 0) {
+              const schedulingStrategy = schedulingStrategies[currentSchedulingAlgorithm as SchedulingAlgorithm];
+              const nextOrder = schedulingStrategy.selectNext(currentStationData.waitingQueue, simulationTime);
+              
+              if (nextOrder) {
+                // Remove the selected order from the waiting queue
+                const orderIndex = currentStationData.waitingQueue.findIndex(o => o.id === nextOrder.id);
+                if (orderIndex >= 0) {
+                  currentStationData.waitingQueue.splice(orderIndex, 1);
+                  currentStationData.currentOrder = nextOrder;
+                  nextOrder.isWaiting = false;
+                }
+              }
+            }
+            
+            // Simplified logic: just follow the processSequence array in order
+            const currentIndex = order.processSequence.indexOf(order.currentStation);
+            console.log(`${order.kundeName} completed ${order.currentStation}, current index: ${currentIndex}, sequence length: ${order.processSequence.length}`);
+            
+            if (currentIndex < order.processSequence.length - 1) {
+              const nextStationId = order.processSequence[currentIndex + 1];
+              const nextStation = updatedStations.find(s => s.id === nextStationId);
+              
+              console.log(`${order.kundeName} moving from ${order.currentStation} to ${nextStationId}`);
+              
+              if (nextStation) {
+                if (nextStation.currentOrder === null) {
+                  // Next station is free, assign immediately
+                  nextStation.currentOrder = order;
+                  order.currentStation = nextStationId;
+                  order.progress = 0;
+                  order.isWaiting = false;
+                  console.log(`${order.kundeName} assigned directly to ${nextStationId}`);
+                } else {
+                  // Next station is busy, add to waiting queue
+                  nextStation.waitingQueue.push(order);
+                  order.currentStation = nextStationId;
+                  order.progress = 0;
+                  order.isWaiting = true;
+                  // Initialize waiting time tracking
+                  if (!order.stationDurations[nextStationId]) {
+                    order.stationDurations[nextStationId] = {
+                      expected: nextStation.processingTime,
+                      waitingTime: 0,
+                      startTime: new Date()
+                    };
+                  }
+                  waitingOrdersList.push(order);
+                  console.log(`${order.kundeName} added to waiting queue of ${nextStationId}`);
+                }
+                updatedOrders.push(order); // Make sure order stays in active list
+              } else {
+                console.error(`Next station ${nextStationId} not found for ${order.kundeName}`);
+                updatedOrders.push(order); // Keep order in list even if error
+              }
+            } else {
+              // Order completed
+              console.log(`${order.kundeName} completed entire sequence!`);
+              order.completedAt = new Date();
+              order.schedulingAlgorithm = currentSchedulingAlgorithm;
+              newCompletedOrders.push(order);
+              // Add to shared context for KPI Dashboard
+              addCompletedOrder(order);
+            }
+          } else {
+            // Order still processing
+            updatedOrders.push(order);
+          }
+        } else if (order.isWaiting) {
+          // Order is waiting in queue - track waiting time
+          if (order.stationDurations[order.currentStation]) {
+            order.stationDurations[order.currentStation].waitingTime = 
+              (order.stationDurations[order.currentStation].waitingTime || 0) + deltaMinutes;
+          }
+          waitingOrdersList.push(order);
+        } else {
+          // Order not yet assigned to station
+          updatedOrders.push(order);
+        }
+      });
+      
+      // Update global state - completed orders are now handled by addCompletedOrder in the context
+      if (newCompletedOrders.length > 0) {
+        console.log(`Completed orders:`, newCompletedOrders.map(o => o.kundeName));
+      }
+      setWaitingOrders(waitingOrdersList);
+      
+      // Debug: log order counts
+      console.log(`Order counts - Updated: ${updatedOrders.length}, Waiting: ${waitingOrdersList.length}, Completed: ${newCompletedOrders.length}`);
+      console.log(`Active orders:`, updatedOrders.map(o => `${o.kundeName}@${o.currentStation}`));
+      
+      // Update orders list (remove completed orders and avoid duplicates)
+      const allActiveOrders = [...updatedOrders];
+      // Only add waiting orders that aren't already in updatedOrders
+      waitingOrdersList.forEach(waitingOrder => {
+        if (!allActiveOrders.find(order => order.id === waitingOrder.id)) {
+          allActiveOrders.push(waitingOrder);
+        }
+      });
+      setActiveOrders(allActiveOrders);
+      
+      return updatedStations;
+    });
+    
+    // Update local stations to match context for flow diagram
+    setLocalStations(stations);
+    
+    // Update the flow diagram to reflect current station status
+    updateFlowDiagram();
+  };
+
+  const updateStationOrders = () => {
+    // This function is now integrated into processOrders for better performance
+    updateFlowDiagram();
+  };
+
+  const updateFlowDiagram = () => {
+    setNodes(prevNodes => 
+      prevNodes.map(node => {
+        const station = stations.find(s => s.id === node.id);
+        if (station) {
+          const isParent = station.id === 'demontage' || station.id === 'reassembly';
+          const isDemontage = station.id === 'demontage';
+          const isReassembly = station.id === 'reassembly';
+          const isSub = station.type === 'SUB';
+          
+          let title = station.name;
+          if (isDemontage) {
+            const demontageCount = stations.filter(s => s.type === 'SUB' && s.parent === 'demontage').length;
+            title = `${station.name} (${demontageCount} Baugruppentypen)`;
+          } else if (isReassembly) {
+            const reassemblyCount = stations.filter(s => s.type === 'SUB' && s.parent === 'reassembly').length;
+            title = `${station.name} (${reassemblyCount} Baugruppentypen)`;
+          }
+          
+          if (isSub) {
+            // Handle sub-station updates with new structure
+            const currentOrderName = station.currentOrder?.kundeName || 'Frei';
+            const waitingCount = station.waitingQueue?.length || 0;
+            const isOccupied = station.currentOrder !== null;
+            
+            return {
+              ...node,
+              data: {
+                label: (
+                  <div className="text-center">
+                    <div className="text-xs font-bold text-gray-800">
+                      {station.name.replace('Demontage ', '').replace('Montage ', '')}
+                    </div>
+                    <div className={`text-xs font-medium px-1 py-0.5 rounded mt-1 ${
+                      isOccupied 
+                        ? 'bg-red-100 text-red-800' 
+                        : 'bg-green-100 text-green-800'
+                    }`}>
+                      {isOccupied ? currentOrderName : 'Frei'}
+                    </div>
+                    <div className="text-xs text-gray-600 mt-0.5">
+                      {station.processingTime}min (±{Math.round(station.stochasticVariation * 100)}%)
+                    </div>
+                    {waitingCount > 0 && (
+                      <div className="text-xs bg-orange-100 text-orange-800 px-1 rounded mt-0.5">
+                        Warteschlange: {waitingCount}
+                      </div>
+                    )}
+                  </div>
+                )
+              },
+              style: {
+                ...node.style,
+                background: isOccupied ? '#fef2f2' : (station.parent === 'demontage' ? '#f0f9ff' : '#f0fdf4'),
+                border: `2px solid ${isOccupied ? '#dc2626' : (station.parent === 'demontage' ? '#3b82f6' : '#16a34a')}`,
+                height: waitingCount > 0 ? 80 : 70
+              }
+            };
+          } else {
+            // Handle main station updates
+            const currentOrderName = station.currentOrder?.kundeName || '';
+            const waitingCount = station.waitingQueue?.length || 0;
+            const isOccupied = station.currentOrder !== null;
+            
+            return {
+              ...node,
+              data: {
+                label: (
+                  <div className="text-center">
+                    <div className="font-bold">{title}</div>
+                    {!isParent && (
+                      <>
+                        <div className="text-xs text-gray-500">
+                          {station.processingTime} min (±{Math.round(station.stochasticVariation * 100)}%)
+                        </div>
+                        {isOccupied && (
+                          <div className="text-xs bg-blue-100 text-blue-800 px-1 rounded mt-1">
+                            {currentOrderName}
+                          </div>
+                        )}
+                        {waitingCount > 0 && (
+                          <div className="text-xs bg-orange-100 text-orange-800 px-1 rounded mt-1">
+                            Warteschlange: {waitingCount}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )
+              }
+            };
+          }
+        }
+        return node;
+      })
+    );
+  };
+
+  const handleStationClick = (stationId: string) => {
+    const station = stations.find(s => s.id === stationId);
+    if (station) {
+      setSelectedStation(station);
+      setTempProcessingTime(station.processingTime);
+      setStationDialogOpen(true);
+    }
+  };
+
+  const handleSaveStationTime = () => {
+    if (selectedStation) {
+      setContextStations(prev => 
+        prev.map(s => 
+          s.id === selectedStation.id 
+            ? { ...s, processingTime: tempProcessingTime }
+            : s
+        )
+      );
+      setLocalStations(prev => 
+        prev.map(s => 
+          s.id === selectedStation.id 
+            ? { ...s, processingTime: tempProcessingTime }
+            : s
+        )
+      );
+      toast.success(`Bearbeitungszeit für ${selectedStation.name} aktualisiert`);
+      setStationDialogOpen(false);
+    }
+  };
+
+  const handleSpeedChange = (value: number[]) => {
+    setSpeed(value[0]);
+  };
+
+  const handleCreateNewOrder = async () => {
+    if (!activeFactory) return;
+    
+    try {
+      // Use the exact same logic as Auftragsübersicht by calling generateOrders
+      const response = await fetch('/api/auftrag', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'generateOrders',
+          factoryId: activeFactory.id,
+          count: 1 // Create just one order
+        })
+      });
+      
+      const result = await response.json();
+      
+      if (result.success) {
+        // Reload simulation data to get the new order
+        await loadSimulationData();
+        toast.success('Neuer Auftrag erfolgreich erstellt');
+      } else {
+        toast.error(result.error || 'Fehler beim Erstellen des Auftrags');
+      }
+    } catch (error) {
+      console.error('Error creating new order:', error);
+      toast.error('Fehler beim Erstellen des neuen Auftrags');
+    }
+  };
+
+  const handleClearAllOrders = async () => {
+    if (!activeFactory) return;
+    
+    try {
+      // Stop the simulation first
+      setIsRunning(false);
+      
+      // Delete orders from database
+      const response = await fetch('/api/auftrag', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          action: 'deleteAllOrders',
+          factoryId: activeFactory.id
+        })
+      });
+      
+      const result = await response.json();
+      
+      if (result.success) {
+        // Clear all orders from simulation - handled by context clearAllData
+        
+        // Clear all stations - reset their current orders and waiting queues
+        setContextStations(prevStations => {
+          const clearedStations = prevStations.map(station => ({
+            ...station,
+            currentOrder: null,
+            waitingQueue: []
+          }));
+          setLocalStations(clearedStations);
+          return clearedStations;
+        });
+        
+        // Clear active orders and waiting orders in context
+        setActiveOrders([]);
+        setWaitingOrders([]);
+        
+        // Reset simulation time
+        setSimulationTime(new Date());
+        setSimulationStartTime(new Date());
+        
+        // Force refresh of the entire app to update Auftragsübersicht
+        router.refresh();
+        
+        toast.success(`Alle Aufträge gelöscht (${result.deletedCount} aus Datenbank)`);
+      } else {
+        toast.error(result.error || 'Fehler beim Löschen der Aufträge');
+      }
+    } catch (error) {
+      console.error('Error deleting orders:', error);
+      toast.error('Fehler beim Löschen der Aufträge');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-96">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Lade Simulationsdaten...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Control Panel */}
+      <Card>
+        <CardContent className="flex items-center justify-center py-2">
+          <div className="flex items-center justify-between gap-4 flex-wrap w-full">
+            {/* Control Buttons */}
+            <div className="flex items-center gap-2">
+              <Button
+                onClick={() => setIsRunning(!isRunning)}
+                className={isRunning ? "" : "bg-blue-600 hover:bg-blue-700"}
+                variant={isRunning ? "destructive" : "default"}
+              >
+                {isRunning ? (
+                  <>
+                    <Pause className="h-4 w-4 mr-2" />
+                    Pause
+                  </>
+                ) : (
+                  <>
+                    <Play className="h-4 w-4 mr-2" />
+                    Start
+                  </>
+                )}
+              </Button>
+              
+              <Button
+                onClick={() => {
+                  setIsRunning(false);
+                  setActiveOrders([]);
+                  setSimulationTime(new Date());
+                  setSimulationStartTime(new Date());
+                }}
+                variant="outline"
+                size="sm"
+              >
+                <Square className="h-4 w-4 mr-1" />
+                Stop
+              </Button>
+              
+              <Button
+                onClick={loadSimulationData}
+                variant="outline"
+                size="sm"
+              >
+                <RefreshCw className="h-4 w-4 mr-1" />
+                Neu laden
+              </Button>
+              
+              <Button
+                onClick={handleCreateNewOrder}
+                className="bg-blue-600 hover:bg-blue-700"
+                disabled={!activeFactory}
+                size="sm"
+              >
+                <Plus className="h-4 w-4 mr-1" />
+                Neuer Auftrag
+              </Button>
+              
+              <Button
+                onClick={handleClearAllOrders}
+                className="bg-white text-red-600 border-red-600 hover:bg-red-50"
+                variant="outline"
+                disabled={activeOrders.length === 0 && completedOrders.length === 0}
+                size="sm"
+              >
+                <Trash2 className="h-4 w-4 mr-1" />
+                Alle Aufträge löschen
+              </Button>
+            </div>
+            
+            {/* Speed and Time Controls */}
+            <div className="flex items-center gap-6">
+              <div className="flex items-center gap-2">
+                <Label className="text-sm">Geschwindigkeit:</Label>
+                <Slider
+                  value={[speed]}
+                  onValueChange={handleSpeedChange}
+                  min={1}
+                  max={100}
+                  step={1}
+                  className="w-24"
+                />
+                <span className="text-sm font-medium w-8">{speed}x</span>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <Clock className="h-4 w-4" />
+                <span className="font-mono text-sm">
+                  {simulationTime.toLocaleString('de-DE')}
+                </span>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Statistics */}
+      <div className="grid grid-cols-5 gap-4">
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xl font-bold">{activeOrders.length}</div>
+            <p className="text-xs text-muted-foreground">Aktive Aufträge</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xl font-bold">{waitingOrders.length}</div>
+            <p className="text-xs text-muted-foreground">Wartende Aufträge</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xl font-bold">{completedOrders.length}</div>
+            <p className="text-xs text-muted-foreground">Abgeschlossen</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xl font-bold">{stations.length}</div>
+            <p className="text-xs text-muted-foreground">Stationen</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-4">
+            <div className="text-xl font-bold">
+              {stations.filter(s => s.currentOrder !== null).length}
+            </div>
+            <p className="text-xs text-muted-foreground">Stationen belegt</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Process Flow Diagram */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Prozessfluss</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div style={{ height: 400 }}>
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              onNodesChange={onNodesChange}
+              onEdgesChange={onEdgesChange}
+              onNodeClick={(_, node) => handleStationClick(node.id)}
+              fitView
+              defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+              minZoom={0.5}
+              maxZoom={2}
+              style={{ width: '100%', height: '100%' }}
+            >
+              <Background />
+              <Controls />
+              <MiniMap />
+            </ReactFlow>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Active Orders List */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Aktive Aufträge - Prozesszeiten</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-6">
+            {activeOrders.length === 0 ? (
+              <p className="text-center text-gray-500 py-8">Keine aktiven Aufträge</p>
+            ) : (
+              <>
+                {/* Summary Table */}
+                <div className="rounded-md border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[150px]">Kunde</TableHead>
+                        <TableHead className="w-[200px]">Produktvariante</TableHead>
+                        <TableHead className="w-[150px]">Aktuelle Station</TableHead>
+                        <TableHead className="w-[120px]">Fortschritt</TableHead>
+                        <TableHead className="w-[100px]">Verzögerung</TableHead>
+                        <TableHead className="w-[100px]">Gesamtzeit</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {activeOrders.map((order) => {
+                        const currentStationData = stations.find(s => s.id === order.currentStation);
+                        const currentStationDuration = order.stationDurations[order.currentStation];
+                        const progressPercent = (order.progress / (currentStationDuration?.actual || currentStationData?.processingTime || 1)) * 100;
+                        
+                        // Calculate total delay across all completed stations
+                        const completedStations = Object.entries(order.stationDurations).filter(([stationId, duration]) => {
+                          return duration.actual && order.processSequence.indexOf(order.currentStation) > order.processSequence.indexOf(stationId);
+                        });
+                        const totalDelay = completedStations.reduce((acc, [, duration]) => {
+                          return acc + (duration.actual! - duration.expected);
+                        }, 0);
+                        
+                        // Calculate total time spent so far
+                        const totalTimeSpent = completedStations.reduce((acc, [, duration]) => acc + duration.actual!, 0) + order.progress;
+                        
+                        return (
+                          <TableRow key={order.id}>
+                            <TableCell className="font-medium">{order.kundeName}</TableCell>
+                            <TableCell>{order.produktvariante}</TableCell>
+                            <TableCell>
+                              <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
+                                {currentStationData?.name || 'Unbekannt'}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center space-x-2">
+                                <div className="w-16 bg-gray-200 rounded-full h-2">
+                                  <div 
+                                    className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                                    style={{ width: `${Math.min(100, progressPercent)}%` }}
+                                  ></div>
+                                </div>
+                                <span className="text-xs font-medium">{progressPercent.toFixed(0)}%</span>
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <span className={`text-xs font-medium ${
+                                totalDelay > 0 ? 'text-red-600' : totalDelay < 0 ? 'text-green-600' : 'text-gray-600'
+                              }`}>
+                                {totalDelay > 0 ? '+' : ''}{totalDelay.toFixed(1)} min
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-xs font-medium">
+                              {totalTimeSpent.toFixed(1)} min
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+                
+                {/* Detailed Order Cards */}
+                <div className="space-y-4">
+                  <h3 className="text-lg font-semibold text-gray-800">Detaillierte Auftragsansicht</h3>
+                  {activeOrders.map((order) => {
+                const currentStationData = stations.find(s => s.id === order.currentStation);
+                const currentStationDuration = order.stationDurations[order.currentStation];
+                
+                return (
+                  <div key={order.id} className="border rounded-lg p-4 space-y-3">
+                    {/* Order Header */}
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h4 className="font-semibold text-lg">{order.kundeName}</h4>
+                        <p className="text-sm text-gray-600">{order.produktvariante}</p>
+                        <p className="text-xs text-gray-500">Auftrag ID: {order.id}</p>
+                        {order.selectedSequence && (
+                          <p className="text-xs text-blue-600 mt-1">
+                            Gewählte Sequenz: <span className="font-medium">{order.selectedSequence.id}</span>
+                            <br />
+                            <span className="text-gray-500">
+                              {order.selectedSequence.steps.join(' → ')}
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-sm font-medium text-blue-600">
+                          Aktuell: {currentStationData?.name || 'Unbekannt'}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {order.progress.toFixed(1)} / {currentStationDuration?.actual?.toFixed(1) || currentStationData?.processingTime || 0} min
+                        </div>
+                        <div className="w-32 bg-gray-200 rounded-full h-2 mt-1">
+                          <div 
+                            className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                            style={{ 
+                              width: `${Math.min(100, (order.progress / (currentStationDuration?.actual || currentStationData?.processingTime || 1)) * 100)}%` 
+                            }}
+                          ></div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    {/* Process Sequence */}
+                    <div className="space-y-2">
+                      <h5 className="text-sm font-medium text-gray-700">Vollständige Prozesssequenz:</h5>
+                      <div className="flex flex-wrap gap-2">
+                        {order.processSequence.map((stationId, index) => {
+                          const stationData = stations.find(s => s.id === stationId);
+                          const isCurrentStation = stationId === order.currentStation;
+                          const isCompleted = order.processSequence.indexOf(order.currentStation) > index;
+                          const stationDuration = order.stationDurations[stationId];
+                          
+                          return (
+                            <div 
+                              key={`${order.id}-${stationId}`}
+                              className={`px-3 py-1 rounded-full text-xs border ${
+                                isCurrentStation 
+                                  ? 'bg-blue-100 border-blue-300 text-blue-800' 
+                                  : isCompleted 
+                                    ? 'bg-green-100 border-green-300 text-green-800'
+                                    : 'bg-gray-100 border-gray-300 text-gray-600'
+                              }`}
+                            >
+                              <div className="font-medium">{stationData?.name || stationId}</div>
+                              {stationDuration && (
+                                <div className="text-xs">
+                                  {isCompleted 
+                                    ? `✓ ${stationDuration.actual?.toFixed(1)}min` 
+                                    : `${stationDuration.expected}min (±${Math.round((stationData?.stochasticVariation || 0) * 100)}%)`
+                                  }
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      
+                      {/* Sub-Process Details */}
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 text-xs mt-4">
+                        {/* Demontage Sequence */}
+                        {(() => {
+                          const demontageStations = order.processSequence.filter(stationId => 
+                            stationId.startsWith('demontage-') && stationId !== 'demontage-waiting'
+                          );
+                          return demontageStations.length > 0 ? (
+                            <div className="space-y-2">
+                              <h6 className="font-medium text-blue-600">Demontage-Sequenz ({demontageStations.length})</h6>
+                              <div className="flex flex-wrap gap-1">
+                                {demontageStations.map(stationId => {
+                                  const station = stations.find(s => s.id === stationId);
+                                  const isCurrentStation = stationId === order.currentStation;
+                                  const isCompleted = order.processSequence.indexOf(order.currentStation) > order.processSequence.indexOf(stationId);
+                                  
+                                  return (
+                                    <div 
+                                      key={stationId}
+                                      className={`px-2 py-1 rounded text-xs border ${
+                                        isCurrentStation
+                                          ? 'bg-blue-100 border-blue-300 text-blue-800 font-medium'
+                                          : isCompleted
+                                            ? 'bg-green-100 border-green-300 text-green-800'
+                                            : 'bg-blue-50 border-blue-200 text-blue-600'
+                                      }`}
+                                    >
+                                      {station?.name?.replace('Demontage ', '') || stationId}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ) : null;
+                        })()}
+                        
+                        {/* Re-Assembly Sequence */}
+                        {(() => {
+                          const reassemblyStations = order.processSequence.filter(stationId => 
+                            stationId.startsWith('reassembly-')
+                          );
+                          return reassemblyStations.length > 0 ? (
+                            <div className="space-y-2">
+                              <h6 className="font-medium text-green-600">Re-Assembly-Sequenz ({reassemblyStations.length})</h6>
+                              <div className="flex flex-wrap gap-1">
+                                {reassemblyStations.map(stationId => {
+                                  const station = stations.find(s => s.id === stationId);
+                                  const isCurrentStation = stationId === order.currentStation;
+                                  const isCompleted = order.processSequence.indexOf(order.currentStation) > order.processSequence.indexOf(stationId);
+                                  
+                                  return (
+                                    <div 
+                                      key={stationId}
+                                      className={`px-2 py-1 rounded text-xs border ${
+                                        isCurrentStation
+                                          ? 'bg-blue-100 border-blue-300 text-blue-800 font-medium'
+                                          : isCompleted
+                                            ? 'bg-green-100 border-green-300 text-green-800'
+                                            : 'bg-green-50 border-green-200 text-green-600'
+                                      }`}
+                                    >
+                                      {station?.name?.replace('Montage ', '') || stationId}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ) : null;
+                        })()}
+                        
+                        {/* Required Upgrades */}
+                        {Object.keys(order.requiredUpgrades || {}).length > 0 && (
+                          <div className="space-y-2">
+                            <h6 className="font-medium text-orange-600">Erforderliche Upgrades</h6>
+                            <div className="flex flex-wrap gap-1">
+                              {Object.entries(order.requiredUpgrades || {}).map(([bgt, type]) => (
+                                <div 
+                                  key={bgt}
+                                  className={`px-2 py-1 rounded text-xs border ${
+                                    type === 'PFLICHT'
+                                      ? 'bg-red-50 border-red-200 text-red-700'
+                                      : 'bg-orange-50 border-orange-200 text-orange-700'
+                                  }`}
+                                >
+                                  {bgt.replace('BGT-PS-', '').replace('BGT-', '')}: {type}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Station Durations Details */}
+                    <div className="space-y-2">
+                      <h5 className="text-sm font-medium text-gray-700">Stationszeiten:</h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {Object.entries(order.stationDurations).map(([stationId, duration]) => {
+                          const stationData = stations.find(s => s.id === stationId);
+                          const isCompleted = order.processSequence.indexOf(order.currentStation) > order.processSequence.indexOf(stationId);
+                          
+                          return (
+                            <div 
+                              key={`${order.id}-duration-${stationId}`}
+                              className={`p-2 border rounded ${
+                                isCompleted ? 'bg-green-50 border-green-200' : 'bg-gray-50 border-gray-200'
+                              }`}
+                            >
+                              <div className="text-xs font-medium text-gray-700">
+                                {stationData?.name || stationId}
+                              </div>
+                              <div className="text-xs space-y-1">
+                                <div>Erwartet: {duration.expected} min</div>
+                                <div>Tatsächlich: {duration.actual?.toFixed(1)} min</div>
+                                {duration.actual && duration.expected && (
+                                  <div className={`font-medium ${
+                                    duration.actual > duration.expected ? 'text-red-600' : 'text-green-600'
+                                  }`}>
+                                    {duration.actual > duration.expected ? '+' : ''}
+                                    {(duration.actual - duration.expected).toFixed(1)} min
+                                  </div>
+                                )}
+                                {duration.startTime && (
+                                  <div className="text-gray-500">
+                                    Start: {duration.startTime.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    
+                    {/* Required Baugruppentypen */}
+                    <div className="space-y-2">
+                      <h5 className="text-sm font-medium text-gray-700">Baugruppentypen in Stückliste:</h5>
+                      <div className="flex flex-wrap gap-1">
+                        {order.requiredBaugruppentypen.map((bgt, index) => (
+                          <span 
+                            key={`${order.id}-bgt-${index}`}
+                            className="px-2 py-1 bg-orange-100 text-orange-800 text-xs rounded"
+                          >
+                            {bgt}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Finished Orders List */}
+      {completedOrders.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Abgeschlossene Aufträge - Detaillierte Zeitanalyse</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {completedOrders.map((order) => {
+                // Calculate total processing and waiting times
+                const totalProcessingTime = Object.values(order.stationDurations).reduce(
+                  (sum, duration) => sum + (duration.actual || duration.expected), 0
+                );
+                const totalWaitingTime = Object.values(order.stationDurations).reduce(
+                  (sum, duration) => sum + (duration.waitingTime || 0), 0
+                );
+                const totalTime = totalProcessingTime + totalWaitingTime;
+                
+                return (
+                  <div key={`completed-${order.id}`} className="border rounded-lg p-4 space-y-3 bg-green-50">
+                    {/* Completed Order Header */}
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h4 className="font-semibold text-lg text-green-800">{order.kundeName}</h4>
+                        <p className="text-sm text-green-600">{order.produktvariante}</p>
+                        <p className="text-xs text-green-500">
+                          Abgeschlossen: {order.completedAt?.toLocaleTimeString()}
+                        </p>
+                        {order.selectedSequence && (
+                          <p className="text-xs text-blue-600 mt-1">
+                            Verwendete Sequenz: <span className="font-medium">{order.selectedSequence.id}</span>
+                          </p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <div className="text-lg font-bold text-green-700">
+                          ✓ Fertig
+                        </div>
+                        <div className="text-sm text-gray-600 space-y-1">
+                          <div>Gesamt: {totalTime.toFixed(1)}min</div>
+                          <div>Bearbeitung: {totalProcessingTime.toFixed(1)}min</div>
+                          <div>Wartezeit: {totalWaitingTime.toFixed(1)}min</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Station Times Breakdown */}
+                    <div className="space-y-2">
+                      <h5 className="text-sm font-medium text-gray-700">Detaillierte Stationszeiten:</h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {Object.entries(order.stationDurations).map(([stationId, duration]) => {
+                          const stationData = stations.find(s => s.id === stationId);
+                          const waitingTime = duration.waitingTime || 0;
+                          const processingTime = duration.actual || duration.expected;
+                          
+                          return (
+                            <div 
+                              key={`completed-${order.id}-duration-${stationId}`}
+                              className="p-3 border rounded bg-white"
+                            >
+                              <div className="font-medium text-sm text-green-700">
+                                {stationData?.name || stationId}
+                              </div>
+                              <div className="text-xs space-y-1 mt-1">
+                                <div className="flex justify-between">
+                                  <span>Bearbeitung:</span>
+                                  <span className="font-medium">{processingTime.toFixed(1)}min</span>
+                                </div>
+                                {waitingTime > 0 && (
+                                  <div className="flex justify-between text-orange-600">
+                                    <span>Wartezeit:</span>
+                                    <span className="font-medium">{waitingTime.toFixed(1)}min</span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between font-medium border-t pt-1">
+                                  <span>Gesamt:</span>
+                                  <span>{(processingTime + waitingTime).toFixed(1)}min</span>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Process Sequence Summary */}
+                    <div className="space-y-2">
+                      <h5 className="text-sm font-medium text-gray-700">Durchlaufene Sequenz:</h5>
+                      <div className="flex flex-wrap gap-2">
+                        {order.processSequence.map((stationId, index) => {
+                          const stationData = stations.find(s => s.id === stationId);
+                          const duration = order.stationDurations[stationId];
+                          
+                          return (
+                            <div 
+                              key={`completed-${order.id}-seq-${stationId}`}
+                              className="px-3 py-1 rounded-full text-xs border bg-green-100 border-green-300 text-green-800"
+                            >
+                              <div className="font-medium">{stationData?.name || stationId}</div>
+                              {duration && (
+                                <div className="text-xs">
+                                  ✓ {((duration.actual || duration.expected) + (duration.waitingTime || 0)).toFixed(1)}min
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Process Sequences Overview - Compact Display */}
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium">Alle möglichen Prozesssequenzen</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-2">
+          <div className="space-y-3">
+            {activeOrders.map(order => {
+              // Parse the processSequences JSON data from the order
+              const processSequencesData = typeof order.processSequences === 'string' 
+                ? JSON.parse(order.processSequences) 
+                : order.processSequences;
+              
+              if (!processSequencesData) return null;
+              
+              return (
+                <div key={`seq-${order.id}`} className="border rounded-lg p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs font-medium text-gray-600">{order.kundeName}</span>
+                    <span className="text-xs text-gray-400">•</span>
+                    <span className="text-xs text-gray-500">{order.produktvariante}</span>
+                  </div>
+                  
+                  {/* Baugruppen Sequences */}
+                  {processSequencesData.baugruppen?.sequences && (
+                    <div className="mb-3">
+                      <h6 className="text-xs font-medium text-blue-600 mb-1">
+                        Baugruppen-Sequenzen ({processSequencesData.baugruppen.sequences.length})
+                      </h6>
+                      <div className="space-y-1">
+                        {processSequencesData.baugruppen.sequences.map((seq: any, index: number) => (
+                          <div key={`bg-${order.id}-${seq.id}`} className="flex flex-wrap gap-1">
+                            <span className="text-xs text-gray-400 mr-1">{index + 1}:</span>
+                            {seq.steps.map((step: string, stepIndex: number) => (
+                              <span 
+                                key={`${seq.id}-step-${stepIndex}`}
+                                className={`px-1 py-0.5 text-xs rounded border ${
+                                  step === '×' 
+                                    ? 'bg-yellow-100 border-yellow-300 text-yellow-800' 
+                                    : step === 'I'
+                                      ? 'bg-gray-100 border-gray-300 text-gray-600'
+                                      : step === 'Q'
+                                        ? 'bg-green-100 border-green-300 text-green-600'
+                                        : 'bg-blue-50 border-blue-200 text-blue-700'
+                                }`}
+                              >
+                                {step === '×' ? '⚡' : step === 'I' ? '🔍' : step === 'Q' ? '✓' : step.replace('BG-PS-', '').replace('BG-', '')}
+                              </span>
+                            ))}
+                            <span className="text-xs text-gray-400 ml-1">
+                              ({seq.demontageSteps}D + {seq.remontageSteps}RA)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  
+                  {/* Baugruppentypen Sequences */}
+                  {processSequencesData.baugruppentypen?.sequences && (
+                    <div>
+                      <h6 className="text-xs font-medium text-green-600 mb-1">
+                        Baugruppentyp-Sequenzen ({processSequencesData.baugruppentypen.sequences.length})
+                      </h6>
+                      <div className="space-y-1">
+                        {processSequencesData.baugruppentypen.sequences.map((seq: any, index: number) => (
+                          <div key={`bgt-${order.id}-${seq.id}`} className="flex flex-wrap gap-1">
+                            <span className="text-xs text-gray-400 mr-1">{index + 1}:</span>
+                            {seq.steps.map((step: string, stepIndex: number) => (
+                              <span 
+                                key={`${seq.id}-step-${stepIndex}`}
+                                className={`px-1 py-0.5 text-xs rounded border ${
+                                  step === '×' 
+                                    ? 'bg-yellow-100 border-yellow-300 text-yellow-800' 
+                                    : step === 'I'
+                                      ? 'bg-gray-100 border-gray-300 text-gray-600'
+                                      : step === 'Q'
+                                        ? 'bg-green-100 border-green-300 text-green-600'
+                                        : 'bg-green-50 border-green-200 text-green-700'
+                                }`}
+                              >
+                                {step === '×' ? '⚡' : step === 'I' ? '🔍' : step === 'Q' ? '✓' : step.replace('BGT-PS-', '').replace('BGT-', '')}
+                              </span>
+                            ))}
+                            <span className="text-xs text-gray-400 ml-1">
+                              ({seq.demontageSteps}D + {seq.remontageSteps}RA)
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Station Configuration Dialog */}
+      <Dialog open={stationDialogOpen} onOpenChange={setStationDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Station konfigurieren: {selectedStation?.name}</DialogTitle>
+            <DialogDescription>
+              Passen Sie die Bearbeitungszeit für diese Station an.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="processing-time" className="text-right">
+                Bearbeitungszeit (Minuten)
+              </Label>
+              <Input
+                id="processing-time"
+                type="number"
+                value={tempProcessingTime}
+                onChange={(e) => setTempProcessingTime(Number(e.target.value))}
+                className="col-span-3"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={handleSaveStationTime}>Speichern</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

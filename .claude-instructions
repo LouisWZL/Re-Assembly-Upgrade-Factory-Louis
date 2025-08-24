@@ -1,0 +1,31 @@
+# Claude Code Instructions for Circular Economy Project
+
+## ⚠️ CRITICAL SAFEGUARDS ⚠️
+
+### 🚫 NEVER MODIFY OR DELETE:
+1. **Produktstruktur (Product Structure)** components and functionality
+2. **Prozessstruktur (Process Structure)** components and functionality
+3. **JointJS-based graph editors**
+4. **Factory Configurator core components**
+
+### 📋 BEFORE ANY CHANGES:
+1. Read `CRITICAL_COMPONENTS.md` first
+2. Verify changes don't affect protected components
+3. If unsure, ask user for explicit permission
+4. Test existing functionality after changes
+
+### 🛡️ PROTECTED FILES (DO NOT MODIFY):
+- `components/jointjs-product-view.tsx`
+- `components/produkt-management.tsx` 
+- `lib/process-graph-generator.ts`
+- `components/order-process-graph-viewer.tsx`
+- All factory-configurator core files
+- Database schema fields: `graphData`, `processGraphData*`, `processSequences`
+
+### ✅ SAFE ZONES FOR MODIFICATIONS:
+- Advanced simulation components (separate from main factory config)
+- New database tables/fields (don't modify existing schema)
+- API endpoints (as long as existing ones remain functional)
+- New components that don't interfere with existing ones
+
+This project contains critical product and process structure management functionality that the user depends on. Any accidental modification or deletion of these components will cause significant disruption to their workflow.
