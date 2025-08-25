@@ -117,13 +117,38 @@ async function performInitialization(): Promise<boolean> {
           const { execSync } = require('child_process')
           
           console.log('Running prisma db push...')
-          execSync('npx prisma db push --accept-data-loss --force-reset --skip-generate', { 
-            stdio: 'inherit',
-            env: { ...process.env }
-          })
           
-          console.log('✅ Database schema created successfully')
-          needsSeeding = true
+          // Try different prisma push commands
+          const commands = [
+            'npx prisma db push --accept-data-loss --force-reset --skip-generate',
+            'npx prisma db push --force-reset --skip-generate',  
+            'npx prisma db push --skip-generate'
+          ]
+          
+          let pushSuccess = false
+          for (const cmd of commands) {
+            try {
+              console.log(`Trying: ${cmd}`)
+              execSync(cmd, { 
+                stdio: 'inherit',
+                env: { ...process.env },
+                timeout: 30000 // 30 second timeout
+              })
+              console.log('✅ Database schema created successfully')
+              pushSuccess = true
+              break
+            } catch (cmdError) {
+              console.warn(`Command failed: ${cmd}`)
+              console.warn('Error:', cmdError instanceof Error ? cmdError.message : String(cmdError))
+              continue
+            }
+          }
+          
+          if (pushSuccess) {
+            needsSeeding = true
+          } else {
+            throw new Error('All prisma push commands failed')
+          }
         } catch (pushError) {
           console.error('❌ Failed to create schema with prisma db push:', pushError)
           
@@ -302,11 +327,91 @@ async function createSchemaManually() {
       "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY ("auftragId") REFERENCES "Auftrag"("id")
     );
+
+    -- Create Baugruppe table
+    CREATE TABLE IF NOT EXISTS "Baugruppe" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "bezeichnung" TEXT NOT NULL,
+      "artikelnummer" TEXT NOT NULL UNIQUE,
+      "variantenTyp" TEXT NOT NULL,
+      "verfuegbar" INTEGER NOT NULL DEFAULT 0,
+      "factoryId" TEXT NOT NULL,
+      "baugruppentypId" TEXT,
+      "demontagezeit" INTEGER,
+      "montagezeit" INTEGER,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("factoryId") REFERENCES "ReassemblyFactory"("id"),
+      FOREIGN KEY ("baugruppentypId") REFERENCES "Baugruppentyp"("id")
+    );
+
+    -- Create BaugruppeInstance table
+    CREATE TABLE IF NOT EXISTS "BaugruppeInstance" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "baugruppeId" TEXT NOT NULL,
+      "austauschBaugruppeId" TEXT,
+      "auftragId" TEXT NOT NULL,
+      "zustand" INTEGER NOT NULL,
+      "reAssemblyTyp" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("baugruppeId") REFERENCES "Baugruppe"("id"),
+      FOREIGN KEY ("austauschBaugruppeId") REFERENCES "Baugruppe"("id"),
+      FOREIGN KEY ("auftragId") REFERENCES "Auftrag"("id")
+    );
+
+    -- Create StationDuration table  
+    CREATE TABLE IF NOT EXISTS "StationDuration" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "auftragId" TEXT NOT NULL,
+      "stationId" TEXT NOT NULL,
+      "stationName" TEXT NOT NULL,
+      "stationType" TEXT NOT NULL,
+      "expectedDuration" REAL NOT NULL,
+      "actualDuration" REAL,
+      "stochasticVariation" REAL NOT NULL DEFAULT 0,
+      "startedAt" DATETIME,
+      "completedAt" DATETIME,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("auftragId") REFERENCES "Auftrag"("id")
+    );
+
+    -- Create many-to-many tables
+    CREATE TABLE IF NOT EXISTS "_BaugruppeToProzess" (
+      "A" TEXT NOT NULL,
+      "B" TEXT NOT NULL,
+      UNIQUE("A", "B"),
+      FOREIGN KEY ("A") REFERENCES "Baugruppe"("id"),
+      FOREIGN KEY ("B") REFERENCES "Prozess"("id")
+    );
+
+    CREATE TABLE IF NOT EXISTS "_BaugruppentypToProdukt" (
+      "A" TEXT NOT NULL,
+      "B" TEXT NOT NULL,
+      UNIQUE("A", "B"),
+      FOREIGN KEY ("A") REFERENCES "Baugruppentyp"("id"),
+      FOREIGN KEY ("B") REFERENCES "Produkt"("id")
+    );
   `
 
-  // Execute the SQL
-  await prisma.$executeRawUnsafe(createTablesSQL)
-  console.log('✅ Essential tables created manually')
+  // Execute the SQL - split into multiple statements for better error handling
+  const statements = createTablesSQL.split(';').filter(stmt => stmt.trim())
+  
+  for (const statement of statements) {
+    const cleanStatement = statement.trim()
+    if (cleanStatement) {
+      try {
+        await prisma.$executeRawUnsafe(cleanStatement)
+      } catch (error) {
+        console.warn('SQL statement failed:', cleanStatement.substring(0, 100) + '...')
+        console.warn('Error:', error instanceof Error ? error.message : String(error))
+        // Continue with other statements
+      }
+    }
+  }
+  
+  console.log('✅ Database schema creation completed')
 }
 
 // Minimal seed function for production fallback
