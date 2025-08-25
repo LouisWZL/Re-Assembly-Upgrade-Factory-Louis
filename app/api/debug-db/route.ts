@@ -37,11 +37,41 @@ export async function GET() {
       varianten: variantenCount
     }
 
-    // Test factory query
+    // Test factory query with relationships
     const factories = await prisma.reassemblyFactory.findMany({
-      select: { id: true, name: true }
+      select: { 
+        id: true, 
+        name: true,
+        _count: {
+          select: {
+            produkte: true,
+            baugruppentypen: true,
+            baugruppen: true
+          }
+        }
+      }
     })
-    debug.factoryNames = factories.map(f => f.name)
+    debug.factoryDetails = factories.map(f => ({
+      name: f.name,
+      products: f._count.produkte,
+      baugruppentypen: f._count.baugruppentypen,
+      baugruppen: f._count.baugruppen
+    }))
+    
+    // Get product details
+    const products = await prisma.produkt.findMany({
+      include: {
+        factory: { select: { name: true } },
+        baugruppentypen: { select: { bezeichnung: true } },
+        _count: { select: { varianten: true } }
+      }
+    })
+    debug.productDetails = products.map(p => ({
+      name: p.bezeichnung,
+      factory: p.factory?.name || 'NO FACTORY',
+      baugruppentypen: p.baugruppentypen.map(b => b.bezeichnung),
+      variantenCount: p._count.varianten
+    }))
 
   } catch (error) {
     debug.error = {

@@ -136,10 +136,15 @@ export async function POST() {
     let produkt = currentProdukte.find(p => p.factoryId === factory.id)
     if (!produkt) {
       console.log('🚗 Creating product...')
+      // Make sure we have Baugruppentypen to connect
+      if (baugruppentypen.length === 0) {
+        console.log('⚠️ No Baugruppentypen found to connect to product')
+      }
+      
       produkt = await prisma.produkt.create({
         data: {
           bezeichnung: 'Porsche 911',
-          seriennummer: 'P911-2024-001',
+          seriennummer: `P911-${Date.now()}`, // Unique serial number
           factoryId: factory.id,
           baugruppentypen: {
             connect: baugruppentypen.map(bgt => ({ id: bgt.id }))
@@ -147,7 +152,7 @@ export async function POST() {
         }
       })
       created.produkte = 1
-      console.log('✅ Product created:', produkt.bezeichnung)
+      console.log('✅ Product created:', produkt.bezeichnung, 'with', baugruppentypen.length, 'Baugruppentypen')
     }
 
     // Create product variant if none exist

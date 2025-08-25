@@ -23,7 +23,18 @@ interface DebugData {
     produkte?: number
     varianten?: number
   }
-  factoryNames?: string[]
+  factoryDetails?: Array<{
+    name: string
+    products: number
+    baugruppentypen: number
+    baugruppen: number
+  }>
+  productDetails?: Array<{
+    name: string
+    factory: string
+    baugruppentypen: string[]
+    variantenCount: number
+  }>
   error?: {
     message: string
     stack?: string
@@ -319,11 +330,40 @@ export function DebugInfo() {
                     </div>
                   )}
 
-                  {debugData.factoryNames && debugData.factoryNames.length > 0 && (
+                  {debugData.factoryDetails && debugData.factoryDetails.length > 0 && (
                     <div className="space-y-1">
-                      <div className="font-semibold">Factory Names from Debug:</div>
-                      <div className="text-xs">
-                        {debugData.factoryNames.join(', ')}
+                      <div className="font-semibold">Factory Details:</div>
+                      <div className="space-y-1">
+                        {debugData.factoryDetails.map((factory, idx) => (
+                          <div key={idx} className="text-xs bg-muted p-1 rounded">
+                            <div className="font-medium">{factory.name}</div>
+                            <div className="text-xs text-muted-foreground">
+                              Products: {factory.products}, BGT: {factory.baugruppentypen}, BG: {factory.baugruppen}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {debugData.productDetails && debugData.productDetails.length > 0 && (
+                    <div className="space-y-1">
+                      <div className="font-semibold">Product Details:</div>
+                      <div className="space-y-1">
+                        {debugData.productDetails.map((product, idx) => (
+                          <div key={idx} className="text-xs bg-muted p-1 rounded">
+                            <div className="font-medium">{product.name}</div>
+                            <div className="text-xs">Factory: {product.factory}</div>
+                            <div className="text-xs">Variants: {product.variantenCount}</div>
+                            <div className="text-xs">
+                              BGT ({product.baugruppentypen.length}): {
+                                product.baugruppentypen.length > 0 
+                                  ? product.baugruppentypen.join(', ')
+                                  : 'NONE CONNECTED!'
+                              }
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
