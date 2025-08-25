@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { ChevronDown, Refresh, Database, Settings, Bug } from 'lucide-react'
+import { ChevronDown, RefreshCw, Database, Settings, Bug } from 'lucide-react'
 
 interface DebugData {
   timestamp: string
@@ -154,7 +154,7 @@ export function DebugInfo() {
                     onClick={fetchDebugData}
                     disabled={loading}
                   >
-                    <Refresh className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
                   </Button>
                   <Button 
                     variant="outline" 
