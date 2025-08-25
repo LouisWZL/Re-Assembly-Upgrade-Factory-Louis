@@ -1,14 +1,36 @@
 import { PrismaClient } from '@prisma/client'
 import { seedDatabase } from '../prisma/seed-functions'
 
+// Create a function to get database URL with proper fallback
+function getDatabaseUrl(): string {
+  // In production/Vercel environment
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
+    return process.env.DATABASE_URL || 
+           process.env.TURSO_DATABASE_URL || 
+           'file:/tmp/production.db'
+  }
+  
+  // In development
+  return process.env.DATABASE_URL || 'file:./prisma/dev.db'
+}
+
 // Create a function to get or create prisma instance
 function getPrismaInstance() {
+  const databaseUrl = getDatabaseUrl()
+  
+  console.log('Database configuration:')
+  console.log('- NODE_ENV:', process.env.NODE_ENV)
+  console.log('- VERCEL:', !!process.env.VERCEL)
+  console.log('- DATABASE_URL set:', !!process.env.DATABASE_URL)
+  console.log('- TURSO_DATABASE_URL set:', !!process.env.TURSO_DATABASE_URL)
+  console.log('- Using URL:', databaseUrl)
+  
   // In production on Vercel, always create a new instance
   if (process.env.NODE_ENV === 'production' && process.env.VERCEL) {
     return new PrismaClient({
       datasources: {
         db: {
-          url: process.env.DATABASE_URL || process.env.TURSO_DATABASE_URL || 'file:/tmp/production.db'
+          url: databaseUrl
         }
       }
     })
@@ -23,7 +45,7 @@ function getPrismaInstance() {
     globalForPrisma.prisma = new PrismaClient({
       datasources: {
         db: {
-          url: process.env.DATABASE_URL || 'file:./prisma/dev.db'
+          url: databaseUrl
         }
       }
     })

@@ -4,7 +4,7 @@ set -e
 echo "🔧 Setting up environment for Vercel build..."
 
 # Set DATABASE_URL if not already set (fallback for build-time)
-export DATABASE_URL="${DATABASE_URL:-file:/tmp/build-db.sqlite}"
+export DATABASE_URL="${DATABASE_URL:-file:/tmp/production.db}"
 
 echo "Database URL for build: $DATABASE_URL"
 echo "Node environment: $NODE_ENV"
