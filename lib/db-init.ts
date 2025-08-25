@@ -173,20 +173,43 @@ async function performInitialization(): Promise<boolean> {
       console.log('🌱 Starting database seeding...')
       
       try {
-        await seedDatabase()
+        // First try the full seed script (which has all the correct data)
+        console.log('📝 Running full seed script with all data...')
+        const { execSync } = require('child_process')
+        
+        try {
+          execSync('npx prisma db seed', { 
+            stdio: 'inherit',
+            env: { ...process.env },
+            timeout: 60000 // 60 second timeout
+          })
+          console.log('✅ Full seed script completed')
+        } catch (scriptError) {
+          console.warn('❌ Full seed script failed, trying seed-functions:', scriptError)
+          
+          // Fallback to seed-functions
+          await seedDatabase()
+        }
         
         // Verify seeding worked
         const newFactoryCount = await prisma.reassemblyFactory.count()
         const customerCount = await prisma.kunde.count()
         const orderCount = await prisma.auftrag.count()
+        const baugruppenCount = await prisma.baugruppe.count()
+        const baugruppentypenCount = await prisma.baugruppentyp.count()
         
         console.log(`✅ Database seeded successfully!`)
         console.log(`   - Factories: ${newFactoryCount}`)
         console.log(`   - Customers: ${customerCount}`)
         console.log(`   - Orders: ${orderCount}`)
+        console.log(`   - Baugruppen: ${baugruppenCount}`)
+        console.log(`   - Baugruppentypen: ${baugruppentypenCount}`)
         
         if (newFactoryCount === 0) {
           throw new Error('Seeding completed but no factories were created')
+        }
+        if (baugruppentypenCount === 0) {
+          throw new Error('Seeding completed but no Baugruppentypen were created')
         }
       } catch (seedError) {
         console.error('❌ Seeding failed:', seedError)
@@ -414,23 +437,101 @@ async function createSchemaManually() {
   console.log('✅ Database schema creation completed')
 }
 
-// Minimal seed function for production fallback
+// Enhanced minimal seed function for production fallback
 async function minimalSeed() {
   try {
-    console.log('🌱 Running minimal seed...')
+    console.log('🌱 Running enhanced minimal seed...')
     
-    // Create a minimal factory
+    // Create factory
     const factory = await prisma.reassemblyFactory.create({
       data: {
-        name: 'Default Factory',
+        name: 'Stuttgart Porsche Reassembly Center',
         kapazität: 50,
         targetBatchAverage: 65
       }
     })
     
-    console.log('✅ Minimal seed completed with factory:', factory.name)
+    // Create Baugruppentypen
+    const baugruppentypen = await Promise.all([
+      prisma.baugruppentyp.create({
+        data: { bezeichnung: "BGT-PS-Chassis", factoryId: factory.id }
+      }),
+      prisma.baugruppentyp.create({
+        data: { bezeichnung: "BGT-PS-Karosserie", factoryId: factory.id }
+      }),
+      prisma.baugruppentyp.create({
+        data: { bezeichnung: "BGT-PS-Antrieb", factoryId: factory.id }
+      })
+    ])
+    
+    // Create some Baugruppen
+    await Promise.all([
+      prisma.baugruppe.create({
+        data: {
+          bezeichnung: "BG-PS-Chassis",
+          artikelnummer: "CHS-001",
+          variantenTyp: "basicAndPremium",
+          factoryId: factory.id,
+          baugruppentypId: baugruppentypen[0].id
+        }
+      }),
+      prisma.baugruppe.create({
+        data: {
+          bezeichnung: "BG-PS-Karosserie",
+          artikelnummer: "KAR-001", 
+          variantenTyp: "basic",
+          factoryId: factory.id,
+          baugruppentypId: baugruppentypen[1].id
+        }
+      })
+    ])
+    
+    // Create customer
+    const customer = await prisma.kunde.create({
+      data: {
+        vorname: "Max",
+        nachname: "Mustermann", 
+        email: "max@example.com"
+      }
+    })
+    
+    // Create product  
+    const product = await prisma.produkt.create({
+      data: {
+        bezeichnung: "Porsche 911",
+        seriennummer: "P911-001",
+        factoryId: factory.id,
+        baugruppentypen: {
+          connect: baugruppentypen.map(bgt => ({ id: bgt.id }))
+        }
+      }
+    })
+    
+    // Create product variant
+    const variant = await prisma.produktvariante.create({
+      data: {
+        bezeichnung: "911 Carrera",
+        typ: "basic",
+        produktId: product.id,
+        links: {}
+      }
+    })
+    
+    // Create order
+    await prisma.auftrag.create({
+      data: {
+        kundeId: customer.id,
+        produktvarianteId: variant.id,
+        phase: "AUFTRAGSANNAHME",
+        factoryId: factory.id
+      }
+    })
+    
+    console.log('✅ Enhanced minimal seed completed!')
+    console.log('   - Factory:', factory.name)
+    console.log('   - Baugruppentypen:', baugruppentypen.length)
   } catch (error) {
-    console.error('❌ Minimal seed failed:', error)
+    console.error('❌ Enhanced minimal seed failed:', error)
     throw error
   }
 }
