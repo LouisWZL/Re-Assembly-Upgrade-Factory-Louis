@@ -38,7 +38,7 @@ export async function GET() {
     }
     
     // Get detailed factory info if available
-    let factories = []
+    let factories: any[] = []
     if (hasSchema) {
       try {
         factories = await prisma.reassemblyFactory.findMany({
@@ -61,7 +61,7 @@ export async function GET() {
     }
     
     // Get detailed product info if available
-    let products = []
+    let products: any[] = []
     if (hasSchema) {
       try {
         products = await prisma.produkt.findMany({
