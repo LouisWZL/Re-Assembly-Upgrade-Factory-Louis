@@ -152,6 +152,29 @@ export function DebugInfo() {
     }
   }
 
+  const cleanupDuplicates = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/cleanup-duplicates', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Cleanup result:', result)
+        await fetchDebugData() // Refresh data after cleanup
+      } else {
+        const errorText = await response.text()
+        console.error('Cleanup failed:', errorText)
+      }
+    } catch (error) {
+      console.error('Cleanup error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -200,6 +223,15 @@ export function DebugInfo() {
                     title="Ensure Data"
                   >
                     ✓
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={cleanupDuplicates}
+                    disabled={loading}
+                    title="Clean Duplicates"
+                  >
+                    🧹
                   </Button>
                 </div>
               </div>
