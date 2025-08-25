@@ -232,6 +232,31 @@ export function DebugInfo() {
     }
   }
 
+  const forceCreateSchema = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/force-create-schema', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Force create schema result:', result)
+        alert(result.message + '\n\nCheck console for details.')
+        await fetchDebugData() // Refresh data after schema creation
+      } else {
+        const errorText = await response.text()
+        console.error('Force create schema failed:', errorText)
+        alert('Schema creation failed! Check console.')
+      }
+    } catch (error) {
+      console.error('Force create schema error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -307,6 +332,16 @@ export function DebugInfo() {
                     title="Force Schema"
                   >
                     🗄️
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={forceCreateSchema}
+                    disabled={loading}
+                    title="Force Create Schema"
+                    className="bg-red-50 hover:bg-red-100"
+                  >
+                    🚨
                   </Button>
                 </div>
               </div>
