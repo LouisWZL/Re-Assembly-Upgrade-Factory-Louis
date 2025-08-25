@@ -90,7 +90,7 @@ export async function POST() {
       verification = {
         success: true,
         counts,
-        factoryNames: factories.map(f => f.name)
+        factoryNames: factories.map((f: any) => f.name)
       }
     } catch (error: any) {
       verification = {
