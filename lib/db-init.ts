@@ -89,18 +89,10 @@ async function performInitialization(): Promise<boolean> {
       if (process.env.NODE_ENV === 'production') {
         console.error('❌ Database schema missing in production')
         
-        // Try to create the schema using Prisma
-        try {
-          console.log('🔨 Attempting to push schema to database...')
-          const { execSync } = require('child_process')
-          execSync('npx prisma db push --skip-generate', { stdio: 'inherit' })
-          console.log('✅ Schema pushed successfully')
-          needsSeeding = true
-        } catch (pushError) {
-          console.error('❌ Failed to push schema:', pushError)
-          // Continue anyway - maybe the database just needs seeding
-          needsSeeding = true
-        }
+        // In production, assume schema is already pushed during build
+        console.log('⚠️ Database schema might be missing in production')
+        console.log('📝 Assuming schema exists and trying to seed...')
+        needsSeeding = true
       } else {
         throw error
       }

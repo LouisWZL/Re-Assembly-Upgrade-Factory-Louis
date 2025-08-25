@@ -11,6 +11,7 @@ import { OrderProcessGraphViewer } from '@/components/order-process-graph-viewer
 import { OrderDetailsCard } from '@/components/order-details-card'
 import { useOrder } from '@/contexts/order-context'
 import { Skeleton } from '@/components/ui/skeleton'
+import { DatabaseInitializer } from '@/components/database-initializer'
 
 function HomeContent() {
   const { selectedOrder, isLoadingOrder } = useOrder()
@@ -66,8 +67,10 @@ function HomeContent() {
 
 export default function Home() {
   return (
-    <OrderProvider>
-      <HomeContent />
-    </OrderProvider>
+    <DatabaseInitializer>
+      <OrderProvider>
+        <HomeContent />
+      </OrderProvider>
+    </DatabaseInitializer>
   )
 }
