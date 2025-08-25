@@ -209,6 +209,29 @@ export function DebugInfo() {
     }
   }
 
+  const forceSchema = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/force-schema', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Force schema result:', result)
+        await fetchDebugData() // Refresh data after schema creation
+      } else {
+        const errorText = await response.text()
+        console.error('Force schema failed:', errorText)
+      }
+    } catch (error) {
+      console.error('Force schema error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -275,6 +298,15 @@ export function DebugInfo() {
                     title="Fix All Data"
                   >
                     🔧
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={forceSchema}
+                    disabled={loading}
+                    title="Force Schema"
+                  >
+                    🗄️
                   </Button>
                 </div>
               </div>
