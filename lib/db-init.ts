@@ -106,15 +106,38 @@ async function performInitialization(): Promise<boolean> {
       }
     } catch (error) {
       console.error('❌ Error checking database:', error)
+      console.error('Error message:', error instanceof Error ? error.message : String(error))
       
-      // In production, if tables don't exist, we have a problem
-      if (process.env.NODE_ENV === 'production') {
-        console.error('❌ Database schema missing in production')
+      // Tables don't exist - need to create schema
+      if (error instanceof Error && error.message.includes('does not exist in the current database')) {
+        console.log('🔨 Tables do not exist, creating schema...')
         
-        // In production, assume schema is already pushed during build
-        console.log('⚠️ Database schema might be missing in production')
-        console.log('📝 Assuming schema exists and trying to seed...')
-        needsSeeding = true
+        try {
+          // Import and use Prisma CLI functionality
+          const { execSync } = require('child_process')
+          
+          console.log('Running prisma db push...')
+          execSync('npx prisma db push --accept-data-loss --force-reset --skip-generate', { 
+            stdio: 'inherit',
+            env: { ...process.env }
+          })
+          
+          console.log('✅ Database schema created successfully')
+          needsSeeding = true
+        } catch (pushError) {
+          console.error('❌ Failed to create schema with prisma db push:', pushError)
+          
+          // Try alternative approach - create tables manually
+          try {
+            console.log('🔄 Trying alternative schema creation...')
+            await createSchemaManually()
+            console.log('✅ Schema created manually')
+            needsSeeding = true
+          } catch (manualError) {
+            console.error('❌ Manual schema creation failed:', manualError)
+            throw new Error(`Database schema creation failed: ${manualError}`)
+          }
+        }
       } else {
         throw error
       }
@@ -168,6 +191,122 @@ async function performInitialization(): Promise<boolean> {
     
     throw error
   }
+}
+
+// Manual schema creation function as fallback
+async function createSchemaManually() {
+  console.log('🔨 Creating database schema manually...')
+  
+  // Basic SQL to create the essential tables
+  const createTablesSQL = `
+    -- Create ReassemblyFactory table
+    CREATE TABLE IF NOT EXISTS "ReassemblyFactory" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "name" TEXT NOT NULL,
+      "kapazität" INTEGER NOT NULL,
+      "schichtmodell" TEXT NOT NULL DEFAULT 'EINSCHICHT',
+      "anzahlMontagestationen" INTEGER NOT NULL DEFAULT 10,
+      "targetBatchAverage" INTEGER NOT NULL DEFAULT 65,
+      "pflichtUpgradeSchwelle" INTEGER NOT NULL DEFAULT 30,
+      "beschaffung" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Create Kunde table
+    CREATE TABLE IF NOT EXISTS "Kunde" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "vorname" TEXT NOT NULL,
+      "nachname" TEXT NOT NULL,
+      "email" TEXT UNIQUE,
+      "telefon" TEXT,
+      "adresse" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Create Baugruppentyp table
+    CREATE TABLE IF NOT EXISTS "Baugruppentyp" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "bezeichnung" TEXT NOT NULL,
+      "factoryId" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("factoryId") REFERENCES "ReassemblyFactory"("id"),
+      UNIQUE("bezeichnung", "factoryId")
+    );
+
+    -- Create Prozess table
+    CREATE TABLE IF NOT EXISTS "Prozess" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "name" TEXT NOT NULL,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Create Produkt table
+    CREATE TABLE IF NOT EXISTS "Produkt" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "bezeichnung" TEXT NOT NULL,
+      "seriennummer" TEXT NOT NULL UNIQUE,
+      "factoryId" TEXT,
+      "graphData" TEXT,
+      "processGraphData" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("factoryId") REFERENCES "ReassemblyFactory"("id")
+    );
+
+    -- Create Produktvariante table
+    CREATE TABLE IF NOT EXISTS "Produktvariante" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "produktId" TEXT NOT NULL,
+      "bezeichnung" TEXT NOT NULL,
+      "typ" TEXT NOT NULL,
+      "glbFile" TEXT,
+      "links" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("produktId") REFERENCES "Produkt"("id")
+    );
+
+    -- Create Auftrag table
+    CREATE TABLE IF NOT EXISTS "Auftrag" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "kundeId" TEXT NOT NULL,
+      "produktvarianteId" TEXT NOT NULL,
+      "phase" TEXT NOT NULL DEFAULT 'AUFTRAGSANNAHME',
+      "factoryId" TEXT NOT NULL,
+      "terminierung" TEXT,
+      "phaseHistory" TEXT,
+      "graphData" TEXT,
+      "processGraphDataBg" TEXT,
+      "processGraphDataBgt" TEXT,
+      "processSequences" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("kundeId") REFERENCES "Kunde"("id"),
+      FOREIGN KEY ("produktvarianteId") REFERENCES "Produktvariante"("id"),
+      FOREIGN KEY ("factoryId") REFERENCES "ReassemblyFactory"("id")
+    );
+
+    -- Create Liefertermin table
+    CREATE TABLE IF NOT EXISTS "Liefertermin" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "auftragId" TEXT NOT NULL,
+      "typ" TEXT NOT NULL,
+      "datum" DATETIME NOT NULL,
+      "istAktuell" BOOLEAN NOT NULL DEFAULT true,
+      "bemerkung" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY ("auftragId") REFERENCES "Auftrag"("id")
+    );
+  `
+
+  // Execute the SQL
+  await prisma.$executeRawUnsafe(createTablesSQL)
+  console.log('✅ Essential tables created manually')
 }
 
 // Minimal seed function for production fallback
