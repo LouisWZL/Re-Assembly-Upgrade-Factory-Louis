@@ -177,10 +177,10 @@ export async function GET(request: Request) {
       trace, 
       success: true,
       summary: {
-        databaseConnected: trace.steps.some(s => s.step === 1 && s.result === 'SUCCESS'),
-        factoriesFound: trace.steps.find(s => s.step === 2)?.factoryCount || 0,
-        targetFactoryFound: factoryId ? trace.steps.some(s => s.step === 3 && s.result === 'SUCCESS') : 'N/A',
-        configReadiness: trace.steps.find(s => s.step === 6)?.result || 'UNKNOWN'
+        databaseConnected: trace.steps.some((s: any) => s.step === 1 && s.result === 'SUCCESS'),
+        factoriesFound: trace.steps.find((s: any) => s.step === 2)?.factoryCount || 0,
+        targetFactoryFound: factoryId ? trace.steps.some((s: any) => s.step === 3 && s.result === 'SUCCESS') : 'N/A',
+        configReadiness: trace.steps.find((s: any) => s.step === 6)?.result || 'UNKNOWN'
       }
     })
     
