@@ -306,7 +306,7 @@ export function DebugInfo() {
         <CollapsibleContent className="mt-2">
           <Card className="w-96 max-h-96 overflow-auto shadow-lg">
             <CardHeader className="pb-2">
-              <div className="mb-2">
+              <div className="mb-2 space-y-2">
                 <Button 
                   variant="default" 
                   size="sm" 
@@ -315,6 +315,14 @@ export function DebugInfo() {
                   className="w-full bg-green-600 hover:bg-green-700 text-white"
                 >
                   🔄 RESET DATABASE (Like Local)
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={() => window.open('/api/database-viewer', '_blank')}
+                  className="w-full"
+                >
+                  👁️ VIEW DATABASE CONTENTS
                 </Button>
               </div>
               <div className="flex items-center justify-between">

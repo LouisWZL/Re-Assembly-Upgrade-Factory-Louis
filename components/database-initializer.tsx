@@ -25,10 +25,10 @@ export function DatabaseInitializer({ children }: { children: React.ReactNode })
         if (!factoriesResponse.ok) {
           console.error('Failed to fetch factories:', factoriesResponse.status, await factoriesResponse.text())
           
-          // Try force initialization
-          console.log('🔄 Attempting force initialization...')
-          setInitStep('Initializing database...')
-          const forceInitResponse = await fetch('/api/force-init', {
+          // Try complete reset with all data
+          console.log('🔄 Attempting complete database reset with all data...')
+          setInitStep('Creating database with all data...')
+          const forceInitResponse = await fetch('/api/reset-database', {
             method: 'POST',
             cache: 'no-store'
           })
@@ -53,8 +53,8 @@ export function DatabaseInitializer({ children }: { children: React.ReactNode })
           } else {
             console.log('⚠️ No factories found, attempting initialization...')
             
-            // Try force initialization
-            const forceInitResponse = await fetch('/api/force-init', {
+            // Try complete reset with all data
+            const forceInitResponse = await fetch('/api/reset-database', {
               method: 'POST',
               cache: 'no-store'
             })
