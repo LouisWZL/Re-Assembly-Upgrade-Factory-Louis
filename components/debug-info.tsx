@@ -186,6 +186,29 @@ export function DebugInfo() {
     }
   }
 
+  const fixAllData = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/fix-all-data', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Fix all result:', result)
+        await fetchDebugData() // Refresh data after fix
+      } else {
+        const errorText = await response.text()
+        console.error('Fix all failed:', errorText)
+      }
+    } catch (error) {
+      console.error('Fix all error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -243,6 +266,15 @@ export function DebugInfo() {
                     title="Clean Duplicates"
                   >
                     🧹
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={fixAllData}
+                    disabled={loading}
+                    title="Fix All Data"
+                  >
+                    🔧
                   </Button>
                 </div>
               </div>

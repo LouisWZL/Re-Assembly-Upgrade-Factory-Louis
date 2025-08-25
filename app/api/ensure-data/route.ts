@@ -155,21 +155,40 @@ export async function POST() {
       console.log('✅ Product created:', produkt.bezeichnung, 'with', baugruppentypen.length, 'Baugruppentypen')
     }
 
-    // Create product variant if none exist
-    let variante = currentVarianten.find(v => v.produktId === produkt.id)
-    if (!variante) {
-      console.log('🏎️ Creating product variant...')
-      variante = await prisma.produktvariante.create({
+    // Create product variants if none exist (both basic and premium)
+    let varianten = currentVarianten.filter(v => v.produktId === produkt.id)
+    if (varianten.length === 0) {
+      console.log('🏎️ Creating product variants...')
+      
+      // Create basic variant
+      const basicVariant = await prisma.produktvariante.create({
         data: {
-          bezeichnung: '911 Carrera Basic',
+          bezeichnung: `${produkt.bezeichnung} Basic`,
           typ: 'basic',
           produktId: produkt.id,
           links: {}
         }
       })
-      created.varianten = 1
-      console.log('✅ Product variant created:', variante.bezeichnung)
+      created.varianten++
+      console.log('✅ Basic variant created:', basicVariant.bezeichnung)
+      
+      // Create premium variant
+      const premiumVariant = await prisma.produktvariante.create({
+        data: {
+          bezeichnung: `${produkt.bezeichnung} Premium`,
+          typ: 'premium',
+          produktId: produkt.id,
+          links: {}
+        }
+      })
+      created.varianten++
+      console.log('✅ Premium variant created:', premiumVariant.bezeichnung)
+      
+      varianten = [basicVariant, premiumVariant]
     }
+    
+    // Get the first variant for order creation
+    const variante = varianten[0]
 
     // Create order if none exist
     let auftrag = currentAuftraege.find(a => a.factoryId === factory.id)
