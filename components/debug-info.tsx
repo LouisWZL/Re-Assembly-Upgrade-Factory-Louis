@@ -257,6 +257,35 @@ export function DebugInfo() {
     }
   }
 
+  const resetDatabase = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/reset-database', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Reset database result:', result)
+        if (result.success) {
+          alert('✅ Database reset successfully!\n\nYou now have the SAME data as your local setup.')
+        } else {
+          alert('⚠️ Some issues occurred, check console for details.')
+        }
+        await fetchDebugData() // Refresh data
+      } else {
+        const errorText = await response.text()
+        console.error('Reset database failed:', errorText)
+        alert('Reset failed! Check console.')
+      }
+    } catch (error) {
+      console.error('Reset database error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -277,6 +306,17 @@ export function DebugInfo() {
         <CollapsibleContent className="mt-2">
           <Card className="w-96 max-h-96 overflow-auto shadow-lg">
             <CardHeader className="pb-2">
+              <div className="mb-2">
+                <Button 
+                  variant="default" 
+                  size="sm" 
+                  onClick={resetDatabase}
+                  disabled={loading}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white"
+                >
+                  🔄 RESET DATABASE (Like Local)
+                </Button>
+              </div>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-sm">Database Debug Info</CardTitle>
                 <div className="flex gap-2">
@@ -285,63 +325,9 @@ export function DebugInfo() {
                     size="sm" 
                     onClick={fetchDebugData}
                     disabled={loading}
+                    title="Refresh"
                   >
                     <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={forceInit}
-                    disabled={loading}
-                    title="Force Init"
-                  >
-                    <Database className="h-3 w-3" />
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={ensureData}
-                    disabled={loading}
-                    title="Ensure Data"
-                  >
-                    ✓
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={cleanupDuplicates}
-                    disabled={loading}
-                    title="Clean Duplicates"
-                  >
-                    🧹
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={fixAllData}
-                    disabled={loading}
-                    title="Fix All Data"
-                  >
-                    🔧
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={forceSchema}
-                    disabled={loading}
-                    title="Force Schema"
-                  >
-                    🗄️
-                  </Button>
-                  <Button 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={forceCreateSchema}
-                    disabled={loading}
-                    title="Force Create Schema"
-                    className="bg-red-50 hover:bg-red-100"
-                  >
-                    🚨
                   </Button>
                 </div>
               </div>
