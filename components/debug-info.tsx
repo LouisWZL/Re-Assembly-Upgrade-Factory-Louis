@@ -18,6 +18,10 @@ interface DebugData {
     factories: number
     customers: number
     orders: number
+    baugruppentypen?: number
+    baugruppen?: number
+    produkte?: number
+    varianten?: number
   }
   factoryNames?: string[]
   error?: {
@@ -125,6 +129,29 @@ export function DebugInfo() {
     }
   }
 
+  const ensureData = async () => {
+    setLoading(true)
+    try {
+      const response = await fetch('/api/ensure-data', {
+        method: 'POST',
+        cache: 'no-store'
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        console.log('Ensure data result:', result)
+        await fetchDebugData() // Refresh data after ensuring
+      } else {
+        const errorText = await response.text()
+        console.error('Ensure data failed:', errorText)
+      }
+    } catch (error) {
+      console.error('Ensure data error:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (isOpen && !debugData) {
       fetchDebugData()
@@ -161,8 +188,18 @@ export function DebugInfo() {
                     size="sm" 
                     onClick={forceInit}
                     disabled={loading}
+                    title="Force Init"
                   >
                     <Database className="h-3 w-3" />
+                  </Button>
+                  <Button 
+                    variant="outline" 
+                    size="sm" 
+                    onClick={ensureData}
+                    disabled={loading}
+                    title="Ensure Data"
+                  >
+                    ✓
                   </Button>
                 </div>
               </div>
@@ -214,10 +251,22 @@ export function DebugInfo() {
                   {debugData.counts && (
                     <div className="space-y-1">
                       <div className="font-semibold">Record Counts:</div>
-                      <div className="grid grid-cols-3 gap-1 text-xs">
+                      <div className="grid grid-cols-2 gap-1 text-xs">
                         <div>Factories: {debugData.counts.factories}</div>
                         <div>Customers: {debugData.counts.customers}</div>
                         <div>Orders: {debugData.counts.orders}</div>
+                        {debugData.counts.baugruppentypen !== undefined && (
+                          <div>Baugruppentypen: {debugData.counts.baugruppentypen}</div>
+                        )}
+                        {debugData.counts.baugruppen !== undefined && (
+                          <div>Baugruppen: {debugData.counts.baugruppen}</div>
+                        )}
+                        {debugData.counts.produkte !== undefined && (
+                          <div>Produkte: {debugData.counts.produkte}</div>
+                        )}
+                        {debugData.counts.varianten !== undefined && (
+                          <div>Varianten: {debugData.counts.varianten}</div>
+                        )}
                       </div>
                     </div>
                   )}

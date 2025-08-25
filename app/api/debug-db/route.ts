@@ -22,11 +22,19 @@ export async function GET() {
     const factoryCount = await prisma.reassemblyFactory.count()
     const customerCount = await prisma.kunde.count()
     const orderCount = await prisma.auftrag.count()
+    const baugruppentypenCount = await prisma.baugruppentyp.count()
+    const baugruppenCount = await prisma.baugruppe.count()
+    const produkteCount = await prisma.produkt.count()
+    const variantenCount = await prisma.produktvariante.count()
 
     debug.counts = {
       factories: factoryCount,
       customers: customerCount,
-      orders: orderCount
+      orders: orderCount,
+      baugruppentypen: baugruppentypenCount,
+      baugruppen: baugruppenCount,
+      produkte: produkteCount,
+      varianten: variantenCount
     }
 
     // Test factory query
