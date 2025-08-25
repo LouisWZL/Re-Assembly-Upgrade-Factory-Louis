@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 
 export async function GET() {
-  const debug = {
+  const debug: any = {
     environment: process.env.NODE_ENV,
     isVercel: !!process.env.VERCEL,
     databaseUrl: process.env.DATABASE_URL ? 'SET' : 'NOT SET',
