@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/db-init'
+import { prisma } from '@/lib/prisma'
 import { seedDatabase } from '@/prisma/seed-functions'
 
 export async function POST() {

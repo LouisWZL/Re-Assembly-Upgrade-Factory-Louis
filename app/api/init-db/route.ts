@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { connectWithRetry, prisma } from '@/lib/db-config'
+import { connectWithRetry, prisma } from '@/lib/prisma'
 
 export async function POST() {
   try {
