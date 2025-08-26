@@ -72,8 +72,11 @@ export function ConfiguratorSidebarLeft({ factoryId }: ConfiguratorSidebarLeftPr
 
   const fetchProdukte = async () => {
     try {
+      console.log('Fetching products for factory:', factoryId)
       const response = await fetch('/api/factories')
       const data = await response.json()
+      
+      console.log('Factories response:', data)
       
       if (!Array.isArray(data)) {
         console.error('Invalid response format:', data)
@@ -83,8 +86,14 @@ export function ConfiguratorSidebarLeft({ factoryId }: ConfiguratorSidebarLeftPr
       }
       
       const factory = data.find((f: any) => f.id === factoryId)
+      console.log('Found factory:', factory)
+      
       if (factory) {
-        setProdukte(factory.produkte)
+        console.log('Factory products:', factory.produkte)
+        setProdukte(factory.produkte || [])
+      } else {
+        console.error('Factory not found with ID:', factoryId)
+        setProdukte([])
       }
       setLoading(false)
     } catch (error) {

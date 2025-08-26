@@ -162,11 +162,32 @@ export function FactorySelector() {
       <Button
         variant="outline"
         size="icon"
-        onClick={() => {
+        onClick={async () => {
           if (isConfigurator) {
             router.push('/')
           } else {
-            router.push(`/factory-configurator/${selectedFactory}`)
+            try {
+              // Get the first factory automatically
+              const response = await fetch('/api/get-first-factory')
+              const data = await response.json()
+              
+              if (response.ok && data.factory) {
+                router.push(`/factory-configurator/${data.factory.id}`)
+              } else {
+                // Fallback to selected factory if available
+                if (selectedFactory) {
+                  router.push(`/factory-configurator/${selectedFactory}`)
+                } else {
+                  console.error('No factory available for configuration')
+                }
+              }
+            } catch (error) {
+              console.error('Error getting first factory:', error)
+              // Fallback to selected factory if available
+              if (selectedFactory) {
+                router.push(`/factory-configurator/${selectedFactory}`)
+              }
+            }
           }
         }}
         disabled={!currentFactory}

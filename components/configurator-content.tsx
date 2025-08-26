@@ -62,7 +62,7 @@ interface Produkt {
   id: string
   bezeichnung: string
   seriennummer: string
-  baugruppentypen: Baugruppentyp[]
+  baugruppentypen?: Baugruppentyp[]
   varianten: Variante[]
 }
 
@@ -171,14 +171,19 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
           setAllProzesse(Array.from(prozesseMap.values()))
         }
         
-        // Sammle Baugruppentypen vom Produkt
-        const baugruppentypMap = new Map<string, Baugruppentyp>()
-        factory.produkte.forEach((produkt: Produkt) => {
-          produkt.baugruppentypen?.forEach((typ: Baugruppentyp) => {
-            baugruppentypMap.set(typ.id, typ)
+        // Sammle Baugruppentypen von der Factory
+        if (factory.baugruppentypen && Array.isArray(factory.baugruppentypen)) {
+          setAllBaugruppentypen(factory.baugruppentypen)
+        } else {
+          // Fallback: Sammle Baugruppentypen aus den Baugruppen
+          const baugruppentypMap = new Map<string, Baugruppentyp>()
+          baugruppenData.forEach((baugruppe: Baugruppe) => {
+            if (baugruppe.baugruppentyp) {
+              baugruppentypMap.set(baugruppe.baugruppentyp.id, baugruppe.baugruppentyp)
+            }
           })
-        })
-        setAllBaugruppentypen(Array.from(baugruppentypMap.values()))
+          setAllBaugruppentypen(Array.from(baugruppentypMap.values()))
+        }
       }
     } catch (error) {
       console.error('Error fetching factory data:', error)
