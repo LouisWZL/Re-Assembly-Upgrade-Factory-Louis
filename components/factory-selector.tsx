@@ -168,24 +168,37 @@ export function FactorySelector() {
           } else {
             try {
               // Get the first factory automatically
-              const response = await fetch('/api/get-first-factory')
+              console.log('Getting first factory for navigation...')
+              const response = await fetch('/api/get-first-factory', {
+                cache: 'no-store',
+                headers: { 'Cache-Control': 'no-cache' }
+              })
               const data = await response.json()
               
+              console.log('Get first factory response:', data)
+              
               if (response.ok && data.factory) {
+                console.log('Navigating to factory:', data.factory.id)
                 router.push(`/factory-configurator/${data.factory.id}`)
               } else {
+                console.error('Failed to get first factory:', data)
                 // Fallback to selected factory if available
                 if (selectedFactory) {
+                  console.log('Using selected factory as fallback:', selectedFactory)
                   router.push(`/factory-configurator/${selectedFactory}`)
                 } else {
                   console.error('No factory available for configuration')
+                  alert('No factory found in database. Please check database initialization.')
                 }
               }
             } catch (error) {
               console.error('Error getting first factory:', error)
               // Fallback to selected factory if available
               if (selectedFactory) {
+                console.log('Using selected factory after error:', selectedFactory)
                 router.push(`/factory-configurator/${selectedFactory}`)
+              } else {
+                alert('Failed to load factory configuration. Check console for details.')
               }
             }
           }

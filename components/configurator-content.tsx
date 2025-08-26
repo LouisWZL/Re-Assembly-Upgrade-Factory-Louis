@@ -136,28 +136,36 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
 
   const fetchFactoryData = async () => {
     try {
+      console.log('🏭 ConfiguratorContent: Fetching factory data for ID:', factoryId)
+      
       const [factoryResponse, baugruppenResponse] = await Promise.all([
-        fetch('/api/factories'),
-        fetch(`/api/baugruppen?factoryId=${factoryId}`)
+        fetch('/api/factories', { cache: 'no-store' }),
+        fetch(`/api/baugruppen?factoryId=${factoryId}`, { cache: 'no-store' })
       ])
       
       const factoryData = await factoryResponse.json()
       const baugruppenData = await baugruppenResponse.json()
       
+      console.log('🏭 ConfiguratorContent: Factory response:', factoryData)
+      console.log('🏭 ConfiguratorContent: Baugruppen response:', baugruppenData)
+      
       // Check if data is an array
       if (!Array.isArray(factoryData)) {
-        console.error('Invalid factory response format:', factoryData)
+        console.error('❌ Invalid factory response format:', factoryData)
         return
       }
       
       const factory = factoryData.find((f: any) => f.id === factoryId)
+      console.log('🏭 ConfiguratorContent: Found factory:', factory)
       
       if (factory) {
         setFactoryData(factory)
+        console.log('✅ ConfiguratorContent: Factory set with products:', factory.produkte?.length || 0)
         
         // Set Baugruppen from API response
         if (baugruppenData && Array.isArray(baugruppenData)) {
           setAllBaugruppen(baugruppenData)
+          console.log('✅ ConfiguratorContent: Set', baugruppenData.length, 'Baugruppen')
           
           // Sammle Prozesse aus den Baugruppen
           const prozesseMap = new Map<string, Prozess>()
@@ -169,11 +177,13 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
             }
           })
           setAllProzesse(Array.from(prozesseMap.values()))
+          console.log('✅ ConfiguratorContent: Set', prozesseMap.size, 'Prozesse')
         }
         
         // Sammle Baugruppentypen von der Factory
         if (factory.baugruppentypen && Array.isArray(factory.baugruppentypen)) {
           setAllBaugruppentypen(factory.baugruppentypen)
+          console.log('✅ ConfiguratorContent: Set', factory.baugruppentypen.length, 'Baugruppentypen from factory')
         } else {
           // Fallback: Sammle Baugruppentypen aus den Baugruppen
           const baugruppentypMap = new Map<string, Baugruppentyp>()
@@ -183,10 +193,14 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
             }
           })
           setAllBaugruppentypen(Array.from(baugruppentypMap.values()))
+          console.log('✅ ConfiguratorContent: Set', baugruppentypMap.size, 'Baugruppentypen from Baugruppen (fallback)')
         }
+      } else {
+        console.error('❌ Factory not found with ID:', factoryId)
+        console.error('Available factory IDs:', factoryData.map((f: any) => f.id))
       }
     } catch (error) {
-      console.error('Error fetching factory data:', error)
+      console.error('❌ Error fetching factory data:', error)
     }
   }
 
@@ -280,7 +294,28 @@ export function ConfiguratorContent({ factoryId }: ConfiguratorContentProps) {
 
   // Home View
   if (currentView === 'home') {
-    return <ConfiguratorWelcome />
+    return (
+      <div>
+        <ConfiguratorWelcome />
+        {allBaugruppentypen.length === 0 && allBaugruppen.length === 0 && (
+          <div className="mt-8 p-4 bg-red-50 border border-red-200 rounded-md">
+            <h3 className="text-red-800 font-semibold">⚠️ Factory Configuration Debug</h3>
+            <p className="text-red-600 text-sm mt-2">
+              Current Factory ID: <code>{factoryId}</code><br/>
+              Baugruppentypen loaded: {allBaugruppentypen.length}<br/>
+              Baugruppen loaded: {allBaugruppen.length}<br/>
+              Factory data: {factoryData ? `${factoryData.name} with ${factoryData.produkte?.length || 0} products` : 'None'}
+            </p>
+            <button 
+              onClick={() => window.location.reload()}
+              className="mt-2 px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
+            >
+              Reload Configuration
+            </button>
+          </div>
+        )}
+      </div>
+    )
   }
 
   // Baugruppen View
