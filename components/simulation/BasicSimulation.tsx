@@ -6,9 +6,7 @@ import { SidebarRight } from "@/components/sidebar-right"
 import { SidebarInset } from '@/components/ui/sidebar'
 import { OrderProvider } from '@/contexts/order-context'
 import { OrderGraphViewer } from '@/components/order-graph-viewer'
-import { OrderProcessGraphViewer } from '@/components/order-process-graph-viewer'
 import { PhaseTimeline } from '@/components/phase-timeline'
-import { OrderDetailsCard } from '@/components/order-details-card'
 import { useOrder } from '@/contexts/order-context'
 import { Skeleton } from '@/components/ui/skeleton'
 import { SimulationControlsBar } from './SimulationControlsBar'
@@ -47,9 +45,7 @@ function BasicSimulationContent({ simulationTime, isPlaying }: BasicSimulationPr
             ) : (
               // Normale Anzeige
               <>
-                <OrderDetailsCard order={selectedOrder} />
                 <OrderGraphViewer order={selectedOrder} />
-                <OrderProcessGraphViewer order={selectedOrder} />
               </>
             )}
           </div>

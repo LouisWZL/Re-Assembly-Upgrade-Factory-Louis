@@ -2,7 +2,19 @@
 
 import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
-import { AuftragsPhase, ReAssemblyTyp, VariantenTyp, Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
+
+// Define types as constants for SQLite compatibility  
+type AuftragsPhase = 
+  | 'AUFTRAGSANNAHME'
+  | 'INSPEKTION' 
+  | 'REASSEMBLY_START'
+  | 'REASSEMBLY_ENDE'
+  | 'QUALITAETSPRUEFUNG'
+  | 'AUFTRAGSABSCHLUSS'
+
+type ReAssemblyTyp = 'PFLICHT' | 'UPGRADE'
+type VariantenTyp = 'basic' | 'premium'
 import { initializeCustomers, getRandomKunde } from './kunde.actions'
 import { createOrderGraphFromProduct, getConstrainedZustand, findCompatibleReplacementBaugruppe, transformProcessGraphToOrderGraph, generateProcessSequences } from '@/lib/order-graph-utils'
 
@@ -172,12 +184,12 @@ async function createSingleOrder(
       baugruppenInstances = transformation.baugruppenInstances.map(bi => ({
         baugruppeId: bi.baugruppeId,
         zustand: bi.zustand,
-        reAssemblyTyp: bi.zustand < pflichtUpgradeSchwelle ? ReAssemblyTyp.PFLICHT : undefined,
+        reAssemblyTyp: bi.zustand < pflichtUpgradeSchwelle ? 'PFLICHT' : undefined,
         austauschBaugruppeId: undefined
       }))
       
       // Check if we have at least one PFLICHT reassembly
-      const hasPflichtReAssembly = baugruppenInstances.some(bi => bi.reAssemblyTyp === ReAssemblyTyp.PFLICHT)
+      const hasPflichtReAssembly = baugruppenInstances.some(bi => bi.reAssemblyTyp === 'PFLICHT')
       
       // Randomly select assemblies for UPGRADE reassembly (from those without PFLICHT)
       const eligibleForReAssembly = baugruppenInstances.filter(bi => !bi.reAssemblyTyp)
@@ -199,7 +211,7 @@ async function createSingleOrder(
         const selected = eligibleForReAssembly.splice(randomIndex, 1)[0]
         const index = baugruppenInstances.findIndex(bi => bi.baugruppeId === selected.baugruppeId)
         if (index !== -1) {
-          baugruppenInstances[index].reAssemblyTyp = ReAssemblyTyp.UPGRADE
+          baugruppenInstances[index].reAssemblyTyp = 'UPGRADE'
         }
       }
       
@@ -210,7 +222,7 @@ async function createSingleOrder(
           const currentBaugruppe = factory.baugruppen.find(bg => bg.id === baugruppenInstances[i].baugruppeId)
           
           if (currentBaugruppe) {
-            if (baugruppenInstances[i].reAssemblyTyp === ReAssemblyTyp.PFLICHT) {
+            if (baugruppenInstances[i].reAssemblyTyp === 'PFLICHT') {
               // For PFLICHT: Use the same Baugruppe as replacement
               baugruppenInstances[i].austauschBaugruppeId = currentBaugruppe.id
             } else {
@@ -233,7 +245,7 @@ async function createSingleOrder(
     // Initialize phase history for new order
     const initialPhaseHistory = [{
       fromPhase: null,
-      toPhase: AuftragsPhase.AUFTRAGSANNAHME,
+      toPhase: 'AUFTRAGSANNAHME' as AuftragsPhase,
       timestamp: new Date().toISOString(),
       simulationTime: new Date().toISOString()
     }]
@@ -246,7 +258,7 @@ async function createSingleOrder(
           kundeId: kundeResult.data.id,
           produktvarianteId: randomVariante.id,
           factoryId: factoryId,
-          phase: AuftragsPhase.AUFTRAGSANNAHME,
+          phase: 'AUFTRAGSANNAHME' as AuftragsPhase,
           phaseHistory: initialPhaseHistory,
           graphData: graphData as any,
           processGraphDataBg: null as any, // Will be updated after creation

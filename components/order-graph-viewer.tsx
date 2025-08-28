@@ -7,7 +7,8 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-import { ReAssemblyTyp } from '@prisma/client'
+// Define ReAssemblyTyp as constants for SQLite compatibility
+type ReAssemblyTyp = 'PFLICHT' | 'UPGRADE'
 import { BaugruppenDetailsTable } from '@/components/baugruppen-details-table'
 import { ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
 
@@ -460,7 +461,7 @@ export function OrderGraphViewer({ order }: OrderGraphViewerProps) {
                 <div>
                   <Label className="text-muted-foreground">Re-Assembly-Typ</Label>
                   <Badge 
-                    variant={selectedBaugruppe.reAssemblyTyp === ReAssemblyTyp.PFLICHT ? 'destructive' : 'default'}
+                    variant={selectedBaugruppe.reAssemblyTyp === 'PFLICHT' ? 'destructive' : 'default'}
                     className="mt-1"
                   >
                     {selectedBaugruppe.reAssemblyTyp}

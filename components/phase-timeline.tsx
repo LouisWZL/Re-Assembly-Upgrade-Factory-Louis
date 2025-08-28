@@ -2,11 +2,19 @@
 
 import { useEffect, useRef, useState } from 'react'
 import * as joint from '@joint/plus'
-import { AuftragsPhase } from '@prisma/client'
 import { useOrder } from '@/contexts/order-context'
 import { useFactory } from '@/contexts/factory-context'
 import { getTimelineData, getTransitionSummary } from '@/app/actions/phase-timeline.actions'
 import '@joint/plus/joint-plus.css'
+
+// Define phase types as constants for SQLite compatibility
+type AuftragsPhase = 
+  | 'AUFTRAGSANNAHME'
+  | 'INSPEKTION' 
+  | 'REASSEMBLY_START'
+  | 'REASSEMBLY_ENDE'
+  | 'QUALITAETSPRUEFUNG'
+  | 'AUFTRAGSABSCHLUSS'
 
 // Token configuration for animations
 const TOKEN_CONFIG = {
@@ -24,7 +32,7 @@ export function PhaseTimeline({ simulationTime, isPlaying }: PhaseTimelineProps)
   const paperRef = useRef<HTMLDivElement>(null)
   const graphRef = useRef<joint.dia.Graph | null>(null)
   const paperInstanceRef = useRef<joint.dia.Paper | null>(null)
-  const phaseShapesRef = useRef<Map<AuftragsPhase, joint.shapes.standard.Rectangle>>(new Map())
+  const phaseShapesRef = useRef<Map<string, joint.shapes.standard.Rectangle>>(new Map())
   const linksRef = useRef<Map<string, joint.shapes.standard.Link>>(new Map())
   const { selectedOrder } = useOrder()
   const { activeFactory } = useFactory()
@@ -32,22 +40,22 @@ export function PhaseTimeline({ simulationTime, isPlaying }: PhaseTimelineProps)
 
   // Phase order
   const phaseOrder = [
-    AuftragsPhase.AUFTRAGSANNAHME,
-    AuftragsPhase.INSPEKTION,
-    AuftragsPhase.REASSEMBLY_START,
-    AuftragsPhase.REASSEMBLY_ENDE,
-    AuftragsPhase.QUALITAETSPRUEFUNG,
-    AuftragsPhase.AUFTRAGSABSCHLUSS
+    'AUFTRAGSANNAHME',
+    'INSPEKTION',
+    'REASSEMBLY_START',
+    'REASSEMBLY_ENDE',
+    'QUALITAETSPRUEFUNG',
+    'AUFTRAGSABSCHLUSS'
   ]
 
   // Phase labels in German
-  const phaseLabels: Record<AuftragsPhase, string> = {
-    [AuftragsPhase.AUFTRAGSANNAHME]: 'Auftragsannahme',
-    [AuftragsPhase.INSPEKTION]: 'Inspektion',
-    [AuftragsPhase.REASSEMBLY_START]: 'Re-Assembly Start',
-    [AuftragsPhase.REASSEMBLY_ENDE]: 'Re-Assembly Ende',
-    [AuftragsPhase.QUALITAETSPRUEFUNG]: 'Qualitätsprüfung',
-    [AuftragsPhase.AUFTRAGSABSCHLUSS]: 'Auftragsabschluss'
+  const phaseLabels: Record<string, string> = {
+    'AUFTRAGSANNAHME': 'Auftragsannahme',
+    'INSPEKTION': 'Inspektion',
+    'REASSEMBLY_START': 'Re-Assembly Start',
+    'REASSEMBLY_ENDE': 'Re-Assembly Ende',
+    'QUALITAETSPRUEFUNG': 'Qualitätsprüfung',
+    'AUFTRAGSABSCHLUSS': 'Auftragsabschluss'
   }
 
   // Initialize JointJS

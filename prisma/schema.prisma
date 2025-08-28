@@ -1,9 +1,5 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider = "prisma-client-js"
-  // output   = "../lib/generated/prisma"
 }
 
 datasource db {
@@ -11,314 +7,256 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Enum für Auftragsphasen
-enum AuftragsPhase {
-  AUFTRAGSANNAHME      // Auftrag erhalten
-  INSPEKTION           // Produkt erhalten und Inspektion durchführen
-  REASSEMBLY_START     // Re-Assembly beginnt
-  REASSEMBLY_ENDE      // Re-Assembly abgeschlossen
-  QUALITAETSPRUEFUNG   // Qualitätsprüfung durchführen
-  AUFTRAGSABSCHLUSS    // Auftrag abgeschlossen
-}
-
-
-// Enum für ReAssembly-Typen
-enum ReAssemblyTyp {
-  PFLICHT // Aufgrund schlechtem Zustand der Baugruppe
-  UPGRADE // Kundenwunsch-Upgrade
-}
-
-
-
-enum VariantenTyp {
-  basic
-  premium
-  basicAndPremium
-}
-
-enum Schichtmodell {
-  EINSCHICHT      // 8 Stunden
-  ZWEISCHICHT     // 16 Stunden
-  DREISCHICHT     // 24 Stunden
-}
-
-
-// Baugruppentyp (Assembly Type)
 model Baugruppentyp {
-  id              String              @id @default(cuid())
-  bezeichnung     String              // z.B. "Karosserie", "Fahrwerk", "Interieur", "Elektronik"
-  factory         ReassemblyFactory   @relation(fields: [factoryId], references: [id])
-  factoryId       String
-  produkte        Produkt[]           // Produkte die diesen Baugruppentyp haben
-  baugruppen      Baugruppe[]         // Baugruppen dieses Typs
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  
+  id          String            @id @default(cuid())
+  bezeichnung String
+  factoryId   String
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  baugruppen  Baugruppe[]
+  factory     ReassemblyFactory @relation(fields: [factoryId], references: [id])
+  produkte    Produkt[]         @relation("BaugruppentypToProdukt")
+
   @@unique([bezeichnung, factoryId])
 }
 
-// Reassembly Factory
 model ReassemblyFactory {
-  id                    String              @id @default(cuid())
-  name                  String
-  kapazität             Int                 // Begrenzt wie viele Produkte gleichzeitig in der Halle sein können
-  schichtmodell         Schichtmodell       @default(EINSCHICHT)
-  anzahlMontagestationen Int                @default(10)
-  targetBatchAverage    Int                 @default(65) // Durchschnittlicher Zustand der Baugruppen in %
-  pflichtUpgradeSchwelle Int                @default(30) // Schwelle für automatische Pflicht-Upgrades in %
-  beschaffung           Json?               // Beschaffungs-Historie
-  auftraege             Auftrag[]
-  produkte              Produkt[]           // Produkte der Reassembly Factory
-  baugruppentypen       Baugruppentyp[]     // Baugruppentypen der Factory
-  baugruppen            Baugruppe[]         // Baugruppen der Factory
-  createdAt             DateTime            @default(now())
-  updatedAt             DateTime            @updatedAt
+  id                     String          @id @default(cuid())
+  name                   String
+  kapazität             Int
+  schichtmodell          String          @default("EINSCHICHT")
+  anzahlMontagestationen Int             @default(10)
+  targetBatchAverage     Int             @default(65)
+  pflichtUpgradeSchwelle Int             @default(30)
+  beschaffung            Json?
+  createdAt              DateTime        @default(now())
+  updatedAt              DateTime        @updatedAt
+  auftraege              Auftrag[]
+  baugruppen             Baugruppe[]
+  baugruppentypen        Baugruppentyp[]
+  produkte               Produkt[]
 }
 
-
-// Kunde
 model Kunde {
-  id        String     @id @default(cuid())
+  id        String    @id @default(cuid())
   vorname   String
   nachname  String
-  email     String?    @unique
+  email     String?   @unique
   telefon   String?
   adresse   String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   auftraege Auftrag[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
 }
 
-// Auftrag
 model Auftrag {
-  id                    String               @id @default(cuid())
-  kunde                 Kunde                @relation(fields: [kundeId], references: [id])
-  kundeId               String
-  produktvariante       Produktvariante      @relation(fields: [produktvarianteId], references: [id])
-  produktvarianteId     String
-  phase                 AuftragsPhase        @default(AUFTRAGSANNAHME)
-  factory               ReassemblyFactory    @relation(fields: [factoryId], references: [id])
-  factoryId             String
-  liefertermine         Liefertermin[]
-  terminierung          Json?                // Terminierungs-Historie
-  phaseHistory          Json?                // Phasen-Historie mit Zeitstempeln
-  graphData             Json?                // Order-specific assembly graph
-  processGraphDataBg    Json?                // Order-specific process graph (Baugruppen-Ebene)
-  processGraphDataBgt   Json?                // Order-specific process graph (Baugruppentyp-Ebene)
-  processSequences      Json?                // All possible process sequences (both levels)
-  baugruppenInstances   BaugruppeInstance[]  // Assembly instances for this order
-  stationDurations      StationDuration[]    // Station processing times for this order
-  createdAt             DateTime             @default(now())
-  updatedAt             DateTime             @updatedAt
+  id                  String              @id @default(cuid())
+  kundeId             String
+  produktvarianteId   String
+  phase               String              @default("AUFTRAGSANNAHME")
+  factoryId           String
+  terminierung        Json?
+  phaseHistory        Json?
+  graphData           Json?
+  processGraphDataBg  Json?
+  processGraphDataBgt Json?
+  processSequences    Json?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  factory             ReassemblyFactory   @relation(fields: [factoryId], references: [id])
+  produktvariante     Produktvariante     @relation(fields: [produktvarianteId], references: [id])
+  kunde               Kunde               @relation(fields: [kundeId], references: [id])
+  baugruppenInstances BaugruppeInstance[]
+  liefertermine       Liefertermin[]
+  stationDurations    StationDuration[]
 }
 
-// Liefertermin
 model Liefertermin {
-  id           String          @id @default(cuid())
-  auftrag      Auftrag         @relation(fields: [auftragId], references: [id])
-  auftragId    String
-  typ          String                  // Typ als String statt Enum
-  datum        DateTime
-  istAktuell   Boolean         @default(true) // Markiert den aktuell gültigen Termin
-  bemerkung    String?         // Grund für Änderung etc.
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  id         String   @id @default(cuid())
+  auftragId  String
+  typ        String
+  datum      DateTime
+  istAktuell Boolean  @default(true)
+  bemerkung  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  auftrag    Auftrag  @relation(fields: [auftragId], references: [id])
 }
 
-// Produkt zb "Volkswagen Polo"
 model Produkt {
-  id              String              @id @default(cuid())
-  bezeichnung     String              // z.B. "Volkswagen Polo"
-  seriennummer    String              @unique
-  factory         ReassemblyFactory?  @relation(fields: [factoryId], references: [id])
-  factoryId       String?
-  varianten       Produktvariante[]
-  baugruppentypen Baugruppentyp[]     // Welche Baugruppentypen dieses Produkt hat
-  graphData       Json?               // JointJS Graph JSON data (Produktstruktur)
-  processGraphData Json?              // JointJS Process Graph JSON data (Prozessstruktur)
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
+  id               String             @id @default(cuid())
+  bezeichnung      String
+  seriennummer     String             @unique
+  factoryId        String?
+  graphData        Json?
+  processGraphData Json?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+  factory          ReassemblyFactory? @relation(fields: [factoryId], references: [id])
+  varianten        Produktvariante[]
+  baugruppentypen  Baugruppentyp[]    @relation("BaugruppentypToProdukt")
 }
 
-// Produktvariante zb "Polo GTI 2017"
 model Produktvariante {
-  id              String            @id @default(cuid())
-  produkt         Produkt           @relation(fields: [produktId], references: [id])
-  produktId       String
-  bezeichnung     String            // z.B. "Polo GTI 2017"
-  typ             VariantenTyp      // basic, premium oder basicAndPremium
-  glbFile         String?           // Pfad zur GLB-Datei für 3D-Modell der Variante
-  links           Json?             // JointJS Verbindungen zwischen Baugruppen
-  auftraege       Auftrag[]         // Alle Aufträge für diese Produktvariante
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  id          String    @id @default(cuid())
+  produktId   String
+  bezeichnung String
+  typ         String
+  glbFile     String?
+  links       Json?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  auftraege   Auftrag[]
+  produkt     Produkt   @relation(fields: [produktId], references: [id])
 }
 
-
-// Baugruppe: Definition einer Baugruppe (z.B. "Motor V6", "Getriebe Automatik")
 model Baugruppe {
-  id                          String               @id @default(cuid())
-  bezeichnung                 String
-  artikelnummer               String               @unique
-  variantenTyp                VariantenTyp         // Für welche Varianten diese Baugruppe verfügbar ist
-  verfuegbar                  Int                  @default(0) // Anzahl verfügbarer Baugruppen
-  factory                     ReassemblyFactory    @relation(fields: [factoryId], references: [id])
-  factoryId                   String
-  baugruppentyp               Baugruppentyp?       @relation(fields: [baugruppentypId], references: [id])
-  baugruppentypId             String?
-  demontagezeit               Int?                 // in Minuten. Wie lange dauert es, diese Baugruppe zu demontieren?
-  montagezeit                 Int?                 // in Minuten. Wie lange dauert es, diese Baugruppe zu montieren?
-  prozesse                    Prozess[]            // Prozesse die dieser Baugruppe zugeordnet sind
-  originalBaugruppenInstances BaugruppeInstance[]  @relation("OriginalBaugruppe") // Instances where this is the original assembly
-  austauschBaugruppenInstances BaugruppeInstance[] @relation("AustauschBaugruppe") // Instances where this is the replacement assembly
-  createdAt                   DateTime             @default(now())
-  updatedAt                   DateTime             @updatedAt
+  id                           String              @id @default(cuid())
+  bezeichnung                  String
+  artikelnummer                String              @unique
+  variantenTyp                 String
+  verfuegbar                   Int                 @default(0)
+  factoryId                    String
+  baugruppentypId              String?
+  demontagezeit                Int?
+  montagezeit                  Int?
+  createdAt                    DateTime            @default(now())
+  updatedAt                    DateTime            @updatedAt
+  baugruppentyp                Baugruppentyp?      @relation(fields: [baugruppentypId], references: [id])
+  factory                      ReassemblyFactory   @relation(fields: [factoryId], references: [id])
+  austauschBaugruppenInstances BaugruppeInstance[] @relation("AustauschBaugruppe")
+  originalBaugruppenInstances  BaugruppeInstance[] @relation("OriginalBaugruppe")
+  prozesse                     Prozess[]           @relation("BaugruppeToProzess")
 }
 
-// BaugruppeInstance: Instance einer Baugruppe für einen spezifischen Auftrag
 model BaugruppeInstance {
-  id                    String           @id @default(cuid())
-  baugruppe             Baugruppe        @relation("OriginalBaugruppe", fields: [baugruppeId], references: [id])
-  baugruppeId           String
-  austauschBaugruppe    Baugruppe?       @relation("AustauschBaugruppe", fields: [austauschBaugruppeId], references: [id])
-  austauschBaugruppeId  String?
-  auftrag               Auftrag          @relation(fields: [auftragId], references: [id])
-  auftragId             String
-  zustand               Int              // Zustand von 0-100 (0 = sehr schlecht, 100 = sehr gut)
-  reAssemblyTyp         ReAssemblyTyp?   // PFLICHT wenn zustand < 30, UPGRADE für zufällige 0-2, sonst null
-  createdAt             DateTime         @default(now())
-  updatedAt             DateTime         @updatedAt
+  id                   String     @id @default(cuid())
+  baugruppeId          String
+  austauschBaugruppeId String?
+  auftragId            String
+  zustand              Int
+  reAssemblyTyp        String?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  auftrag              Auftrag    @relation(fields: [auftragId], references: [id])
+  austauschBaugruppe   Baugruppe? @relation("AustauschBaugruppe", fields: [austauschBaugruppeId], references: [id])
+  baugruppe            Baugruppe  @relation("OriginalBaugruppe", fields: [baugruppeId], references: [id])
 }
 
-// Prozess: Operationen wie montieren, einölen, schleifen etc.
 model Prozess {
-  id                   String               @id @default(cuid())
-  name                 String               // z.B. "Montieren", "Einölen", "Schleifen"
-  baugruppen           Baugruppe[]          // Baugruppen denen dieser Prozess zugeordnet ist
-  createdAt            DateTime             @default(now())
-  updatedAt            DateTime             @updatedAt
+  id         String      @id @default(cuid())
+  name       String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  baugruppen Baugruppe[] @relation("BaugruppeToProzess")
 }
 
-// Advanced Simulation Tables - for enhanced tracking
-
-// Production Step Timings for detailed assembly tracking
 model ProductionStepTiming {
-  id                   String              @id @default(cuid())
-  orderId              String              // UUID of the order
-  componentType        String              // Type of component being processed
-  stationId            String              // ID of the production station
-  lineNumber           Int                 // Production line (1 or 2)
-  simulationTimeMinutes Int                @default(0) // Time in simulation minutes
-  simulationStartTime  DateTime            // When simulation started
-  startTime            DateTime            // When this step started
-  endTime              DateTime?           // When this step ended (null if ongoing)
-  durationMinutes      Int?                // Calculated duration
-  stepType             String              @default("assembly") // 'assembly' or 'disassembly'
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
+  id                    String    @id @default(cuid())
+  orderId               String
+  componentType         String
+  stationId             String
+  lineNumber            Int
+  simulationTimeMinutes Int       @default(0)
+  simulationStartTime   DateTime
+  startTime             DateTime
+  endTime               DateTime?
+  durationMinutes       Int?
+  stepType              String    @default("assembly")
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   @@index([orderId])
   @@index([stationId])
 }
 
-// Demontage Timings for detailed disassembly tracking  
 model DemontageTimings {
-  id                    String             @id @default(cuid())
-  orderId               String             // UUID of the order
-  componentType         String             // Type of component being processed
-  stationId             String             // ID of the disassembly station
-  startTime             DateTime           // When disassembly started
-  endTime               DateTime?          // When disassembly ended (null if ongoing)
-  durationMinutes       Int?               // Calculated duration
-  simulationTimeMinutes Int                @default(0) // Time in simulation minutes
-  createdAt             DateTime           @default(now())
-  updatedAt             DateTime           @updatedAt
+  id                    String    @id @default(cuid())
+  orderId               String
+  componentType         String
+  stationId             String
+  startTime             DateTime
+  endTime               DateTime?
+  durationMinutes       Int?
+  simulationTimeMinutes Int       @default(0)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   @@index([orderId])
   @@index([stationId])
 }
 
-// Enhanced Order Management for Advanced Simulation
 model AdvancedOrder {
-  id                   String              @id @default(cuid())
-  displayId            String?             // Human-readable order number
-  customerName         String              // Customer full name
-  productVariantName   String              // Product variant name
-  productVariantType   String              // 'basic' or 'premium'
-  currentPhase         String              // Current processing phase
-  status               String              @default("active") // 'active', 'completed', 'cancelled'
-  deliveryDate         DateTime            // Expected delivery date
-  totalProcessingTime  Int                 @default(0) // Total processing time in minutes
-  completedAt          DateTime?           // When order was completed
-  reassemblyReason     String?             // Reason for reassembly if applicable
-  requiresReassembly   Boolean             @default(false) // Whether order needs reassembly
-  assignedLineNumber   Int?                // Which production line (1 or 2)
-  needsQualityRework   Boolean             @default(false) // Whether needs quality rework
-  createdAt            DateTime            @default(now())
-  updatedAt            DateTime            @updatedAt
-
-  // Relations
-  processSteps         AdvancedProcessStep[]
-  components           AdvancedComponent[]
+  id                  String                @id @default(cuid())
+  displayId           String?
+  customerName        String
+  productVariantName  String
+  productVariantType  String
+  currentPhase        String
+  status              String                @default("active")
+  deliveryDate        DateTime
+  totalProcessingTime Int                   @default(0)
+  completedAt         DateTime?
+  reassemblyReason    String?
+  requiresReassembly  Boolean               @default(false)
+  assignedLineNumber  Int?
+  needsQualityRework  Boolean               @default(false)
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  components          AdvancedComponent[]
+  processSteps        AdvancedProcessStep[]
 
   @@index([currentPhase])
   @@index([status])
 }
 
-// Process Steps for Advanced Orders
 model AdvancedProcessStep {
-  id                    String             @id @default(cuid())
-  orderId               String             // Reference to AdvancedOrder
-  phase                 String             // Processing phase
-  startedAt             DateTime           // When phase started
-  completedAt           DateTime?          // When phase completed
-  durationMinutes       Int?               // Phase duration
-  wasRework             Boolean            @default(false) // Whether this was rework
-  disruptionOccurred    Boolean            @default(false) // Whether disruption happened
-  disruptionDelayMinutes Int               @default(0) // Delay caused by disruption
-  createdAt             DateTime           @default(now())
-  updatedAt             DateTime           @updatedAt
-
-  // Relations
-  order                 AdvancedOrder       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                     String        @id @default(cuid())
+  orderId                String
+  phase                  String
+  startedAt              DateTime
+  completedAt            DateTime?
+  durationMinutes        Int?
+  wasRework              Boolean       @default(false)
+  disruptionOccurred     Boolean       @default(false)
+  disruptionDelayMinutes Int           @default(0)
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+  order                  AdvancedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
   @@index([phase])
 }
 
-// Components for Advanced Orders
 model AdvancedComponent {
-  id                      String           @id @default(cuid())
-  orderId                 String           // Reference to AdvancedOrder
-  componentType           String           // Type of component (FAHRWERK, INTERIEUR, etc.)
-  conditionPercentage     Int              // Condition from 0-100%
-  reassemblyType          String?          // 'PFLICHT', 'WUNSCH', or null
-  replacementComponentId  String?          // ID of replacement component if any
-  createdAt               DateTime         @default(now())
-  updatedAt               DateTime         @updatedAt
-
-  // Relations
-  order                   AdvancedOrder    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  id                     String        @id @default(cuid())
+  orderId                String
+  componentType          String
+  conditionPercentage    Int
+  reassemblyType         String?
+  replacementComponentId String?
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
+  order                  AdvancedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
 
   @@index([orderId])
   @@index([componentType])
 }
 
-// Station Duration Tracking for Orders
 model StationDuration {
-  id                    String           @id @default(cuid())
-  auftrag               Auftrag          @relation(fields: [auftragId], references: [id], onDelete: Cascade)
-  auftragId             String           
-  stationId             String           // Station identifier (e.g., 'inspection', 'demontage-bgt1')
-  stationName           String           // Human-readable station name
-  stationType           String           // 'MAIN' or 'SUB'
-  expectedDuration      Float            // Expected duration in minutes
-  actualDuration        Float?           // Actual duration in minutes
-  stochasticVariation   Float            @default(0) // Stochastic variation percentage (0-1)
-  startedAt             DateTime?        // When processing started
-  completedAt           DateTime?        // When processing completed
-  createdAt             DateTime         @default(now())
-  updatedAt             DateTime         @updatedAt
+  id                  String    @id @default(cuid())
+  auftragId           String
+  stationId           String
+  stationName         String
+  stationType         String
+  expectedDuration    Float
+  actualDuration      Float?
+  stochasticVariation Float     @default(0)
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  auftrag             Auftrag   @relation(fields: [auftragId], references: [id], onDelete: Cascade)
 
   @@index([auftragId])
   @@index([stationId])

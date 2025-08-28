@@ -12,7 +12,8 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { ReAssemblyTyp } from '@prisma/client'
+// Define ReAssemblyTyp as constants for SQLite compatibility
+type ReAssemblyTyp = 'PFLICHT' | 'UPGRADE'
 
 interface BaugruppenDetailsTableProps {
   baugruppenInstances?: Array<{
@@ -83,7 +84,7 @@ export function BaugruppenDetailsTable({ baugruppenInstances, pflichtUpgradeSchw
     
     return (
       <Badge 
-        variant={reAssemblyTyp === ReAssemblyTyp.PFLICHT ? 'destructive' : 'default'}
+        variant={reAssemblyTyp === 'PFLICHT' ? 'destructive' : 'default'}
         className="text-xs"
       >
         {reAssemblyTyp}

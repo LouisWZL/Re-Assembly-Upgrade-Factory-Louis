@@ -3,9 +3,12 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Settings, Package, Box, Workflow } from 'lucide-react'
 import { useFactory } from '@/contexts/factory-context'
+import { useView } from '@/contexts/view-context'
 
 export function ConfiguratorWelcome() {
   const { activeFactory } = useFactory()
+  const { setCurrentView } = useView()
+  
   const sections = [
     {
       icon: Settings,
@@ -13,6 +16,7 @@ export function ConfiguratorWelcome() {
       description: 'Konfigurieren Sie die Kapazität Ihrer Re-Assembly Factory sowie das Schichtmodell und die Montagestationen.',
       color: 'text-blue-600 dark:text-blue-400',
       bgColor: 'bg-blue-50 dark:bg-blue-950/30',
+      view: 'einstellungen' as const,
     },
     {
       icon: Package,
@@ -20,6 +24,7 @@ export function ConfiguratorWelcome() {
       description: 'Erstellen Sie Produkte mit Basis- und Premiumvarianten für Ihre Produktionslinien.',
       color: 'text-green-600 dark:text-green-400',
       bgColor: 'bg-green-50 dark:bg-green-950/30',
+      view: 'produkte' as const,
     },
     {
       icon: Box,
@@ -27,6 +32,7 @@ export function ConfiguratorWelcome() {
       description: 'Verwalten Sie Baugruppentypen und einzelne Baugruppen für Ihre Produkte.',
       color: 'text-purple-600 dark:text-purple-400',
       bgColor: 'bg-purple-50 dark:bg-purple-950/30',
+      view: 'baugruppen' as const,
     },
     {
       icon: Workflow,
@@ -34,6 +40,7 @@ export function ConfiguratorWelcome() {
       description: 'Ordnen Sie den vorhandenen Produkten die entsprechenden Baugruppentypen zu und definieren Sie Prozessabläufe.',
       color: 'text-orange-600 dark:text-orange-400',
       bgColor: 'bg-orange-50 dark:bg-orange-950/30',
+      view: 'produkte' as const, // Prozesse is the same as produkte view
     },
   ]
 
@@ -53,7 +60,11 @@ export function ConfiguratorWelcome() {
           {sections.map((section) => {
             const Icon = section.icon
             return (
-              <Card key={section.title} className="border-2 hover:shadow-lg transition-shadow">
+              <Card 
+                key={section.title} 
+                className="border-2 hover:shadow-lg transition-all cursor-pointer hover:border-primary/50 hover:scale-[1.02]"
+                onClick={() => setCurrentView(section.view)}
+              >
                 <CardHeader>
                   <div className="flex items-start gap-4">
                     <div className={`p-3 rounded-lg ${section.bgColor}`}>
@@ -82,6 +93,15 @@ export function ConfiguratorWelcome() {
             <li>Definieren Sie <strong>Baugruppen</strong> für Ihre Produktkomponenten</li>
             <li>Nutzen Sie den <strong>Prozesse</strong> Bereich für die Prozessmodellierung mit JointJS</li>
           </ol>
+        </div>
+
+        <div className="mt-12 pt-8 border-t border-muted-foreground/20">
+          <div className="text-center text-sm text-muted-foreground">
+            <p className="font-bold mb-1">Supervised by Manuel Lauer</p>
+            <p className="mb-3">M.Sc. RWTH, M.Sc. RWTH</p>
+            <p className="mb-1 text-blue-600 font-medium">Lehrstuhl für Produktionssystematik</p>
+            <p>Mitarbeiter: Amr Musa M.Sc. RWTH & Louis Becker Cand. M.Sc. RWTH</p>
+          </div>
         </div>
       </div>
     </div>

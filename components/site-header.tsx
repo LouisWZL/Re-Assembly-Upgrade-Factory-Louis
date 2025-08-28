@@ -126,14 +126,14 @@ export function SiteHeader({ onSimulationUpdate }: SiteHeaderProps) {
         {/* Main Navigation Tabs */}
         <Tabs value={getCurrentTab()} className="flex-1">
           <TabsList className="grid w-full max-w-2xl grid-cols-3 bg-gray-100">
-            <TabsTrigger value="auftragsübersicht" className="data-[state=active]:bg-white" asChild>
-              <Link href="/">Auftragsübersicht</Link>
-            </TabsTrigger>
             <TabsTrigger value="factory-configurator" className="data-[state=active]:bg-white" asChild>
               <Link href={`/factory-configurator/${activeFactory?.id || ''}`}>Factory Konfiguration</Link>
             </TabsTrigger>
             <TabsTrigger value="simulation" className="data-[state=active]:bg-white" asChild>
               <Link href="/simulation">Simulation</Link>
+            </TabsTrigger>
+            <TabsTrigger value="auftragsübersicht" className="data-[state=active]:bg-white" asChild>
+              <Link href="/">Auftragsübersicht</Link>
             </TabsTrigger>
           </TabsList>
         </Tabs>

@@ -3,12 +3,20 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { CalendarDays, Package, User, Clock, Truck } from 'lucide-react'
-import { AuftragsPhase } from '@prisma/client'
+
+// Define phase types as constants for SQLite compatibility
+type AuftragsPhase = 
+  | 'AUFTRAGSANNAHME'
+  | 'INSPEKTION' 
+  | 'REASSEMBLY_START'
+  | 'REASSEMBLY_ENDE'
+  | 'QUALITAETSPRUEFUNG'
+  | 'AUFTRAGSABSCHLUSS'
 
 interface OrderDetailsCardProps {
   order: {
     id: string
-    phase: AuftragsPhase
+    phase: string
     createdAt: Date | string
     kunde?: {
       vorname: string
@@ -25,22 +33,22 @@ interface OrderDetailsCardProps {
   } | null
 }
 
-const phaseLabels: Record<AuftragsPhase, string> = {
-  [AuftragsPhase.AUFTRAGSANNAHME]: 'Auftragsannahme',
-  [AuftragsPhase.INSPEKTION]: 'Inspektion',
-  [AuftragsPhase.REASSEMBLY_START]: 'Re-Assembly Start',
-  [AuftragsPhase.REASSEMBLY_ENDE]: 'Re-Assembly Ende',
-  [AuftragsPhase.QUALITAETSPRUEFUNG]: 'Qualitätsprüfung',
-  [AuftragsPhase.AUFTRAGSABSCHLUSS]: 'Auftragsabschluss'
+const phaseLabels: Record<string, string> = {
+  'AUFTRAGSANNAHME': 'Auftragsannahme',
+  'INSPEKTION': 'Inspektion',
+  'REASSEMBLY_START': 'Re-Assembly Start',
+  'REASSEMBLY_ENDE': 'Re-Assembly Ende',
+  'QUALITAETSPRUEFUNG': 'Qualitätsprüfung',
+  'AUFTRAGSABSCHLUSS': 'Auftragsabschluss'
 }
 
-const phaseColors: Record<AuftragsPhase, string> = {
-  [AuftragsPhase.AUFTRAGSANNAHME]: 'bg-blue-100 text-blue-800',
-  [AuftragsPhase.INSPEKTION]: 'bg-yellow-100 text-yellow-800',
-  [AuftragsPhase.REASSEMBLY_START]: 'bg-purple-100 text-purple-800',
-  [AuftragsPhase.REASSEMBLY_ENDE]: 'bg-indigo-100 text-indigo-800',
-  [AuftragsPhase.QUALITAETSPRUEFUNG]: 'bg-orange-100 text-orange-800',
-  [AuftragsPhase.AUFTRAGSABSCHLUSS]: 'bg-green-100 text-green-800'
+const phaseColors: Record<string, string> = {
+  'AUFTRAGSANNAHME': 'bg-blue-100 text-blue-800',
+  'INSPEKTION': 'bg-yellow-100 text-yellow-800',
+  'REASSEMBLY_START': 'bg-purple-100 text-purple-800',
+  'REASSEMBLY_ENDE': 'bg-indigo-100 text-indigo-800',
+  'QUALITAETSPRUEFUNG': 'bg-orange-100 text-orange-800',
+  'AUFTRAGSABSCHLUSS': 'bg-green-100 text-green-800'
 }
 
 export function OrderDetailsCard({ order }: OrderDetailsCardProps) {

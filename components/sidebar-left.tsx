@@ -43,7 +43,14 @@ import { toast } from "sonner"
 import { useFactory } from "@/contexts/factory-context"
 import { useOrder } from "@/contexts/order-context"
 import { getAuftraege, getAuftragDetails, generateOrders, deleteAllOrdersForFactory, deleteSingleOrder } from "@/app/actions/auftrag.actions"
-import { AuftragsPhase } from "@prisma/client"
+// Define phase types as constants for SQLite compatibility
+type AuftragsPhase = 
+  | 'AUFTRAGSANNAHME'
+  | 'INSPEKTION' 
+  | 'REASSEMBLY_START'
+  | 'REASSEMBLY_ENDE'
+  | 'QUALITAETSPRUEFUNG'
+  | 'AUFTRAGSABSCHLUSS'
 import {
   Accordion,
   AccordionContent,
@@ -434,10 +441,10 @@ export function SidebarLeft({
         <div className="flex items-center gap-2">
           <Button
             size="sm"
-            variant="destructive"
+            variant="outline"
             onClick={handleDeleteAllOrders}
             disabled={deleting || !activeFactory || orders.length === 0}
-            className="flex-1"
+            className="flex-1 border-[#1a48a5] text-[#1a48a5] bg-white hover:bg-[#1a48a5]/5 disabled:border-muted disabled:text-muted-foreground"
           >
             {deleting ? (
               <>
@@ -475,14 +482,14 @@ export function SidebarLeft({
                   <Phone className="h-4 w-4" />
                   <span>Auftragsannahme</span>
                   <span className="text-muted-foreground">
-                    ({orders.filter(o => o.phase === AuftragsPhase.AUFTRAGSANNAHME).length})
+                    ({orders.filter(o => o.phase === 'AUFTRAGSANNAHME').length})
                   </span>
                 </div>
               </AccordionTrigger>
               <AccordionContent>
                 <PaginatedTable
                   data={orders}
-                  phase={AuftragsPhase.AUFTRAGSANNAHME}
+                  phase={'AUFTRAGSANNAHME' as AuftragsPhase}
                   onOrderClick={handleOrderClick}
                   onOrderDelete={handleDeleteSingleOrder}
                 />

@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { SidebarLeft } from "@/components/sidebar-left"
-import { SidebarRight } from "@/components/sidebar-right"
+// import { SidebarRight } from "@/components/sidebar-right" // Temporarily hidden - KPIs available in simulation
 import { SiteHeader } from '@/components/site-header'
 import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { OrderProvider } from '@/contexts/order-context'
@@ -58,7 +58,7 @@ function HomeContent() {
               </div>
             </div>
           </SidebarInset>
-          <SidebarRight />
+          {/* <SidebarRight /> */} {/* Temporarily hidden - KPIs available in simulation */}
         </div>
       </SidebarProvider>
     </div>

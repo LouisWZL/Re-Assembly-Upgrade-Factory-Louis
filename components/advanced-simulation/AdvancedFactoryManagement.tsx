@@ -181,7 +181,6 @@ export function AdvancedFactoryManagement() {
             orders={orders}
             completedOrders={completedOrders}
             stations={stations}
-            simulationStartTime={simulationStartTime}
             onClearData={handleClearData}
           />
         </TabsContent>

@@ -2,7 +2,10 @@
  * Utility functions for transforming product graphs to order-specific graphs
  */
 
-import { VariantenTyp, Baugruppe } from '@prisma/client'
+import { Baugruppe } from '@prisma/client'
+
+// Define types as constants for SQLite compatibility
+type VariantenTyp = 'basic' | 'premium'
 
 interface GraphCell {
   id: string

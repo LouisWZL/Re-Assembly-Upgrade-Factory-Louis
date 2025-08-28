@@ -1,7 +1,14 @@
 'use server'
 
 import { prisma } from '@/lib/prisma'
-import { AuftragsPhase } from '@prisma/client'
+// Define types as constants for SQLite compatibility
+type AuftragsPhase = 
+  | 'AUFTRAGSANNAHME'
+  | 'INSPEKTION' 
+  | 'REASSEMBLY_START'
+  | 'REASSEMBLY_ENDE'
+  | 'QUALITAETSPRUEFUNG'
+  | 'AUFTRAGSABSCHLUSS'
 
 interface PhaseTransition {
   auftragId: string
