@@ -96,7 +96,6 @@ interface SchedulingStrategy {
   selectNext: (waitingQueue: SimulationOrder[], currentTime: Date) => SimulationOrder | null;
 }
 
-import { TerminierungModal } from './TerminierungModal';
 import { AdvancedKPIDashboard } from './AdvancedKPIDashboard';
 
 export function RealDataFactorySimulation() {
@@ -129,20 +128,12 @@ export function RealDataFactorySimulation() {
   const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
   const [factoryData, setFactoryData] = useState<any>(null);
   
-  // Terminierung modal state
-  const [terminierungModalOpen, setTerminierungModalOpen] = useState(false);
-  const [terminierungModalType, setTerminierungModalType] = useState<'grobterminierung' | 'durchlaufterminierung' | 'feinterminierung'>('grobterminierung');
   
   // View state for simulation vs data dashboard
   const [currentView, setCurrentView] = useState<'simulation' | 'kpi'>('simulation');
   
   // No local scheduling configuration - using context
   
-  // Handle terminierung square clicks
-  const handleTerminierungClick = useCallback((type: 'grobterminierung' | 'durchlaufterminierung' | 'feinterminierung') => {
-    setTerminierungModalType(type);
-    setTerminierungModalOpen(true);
-  }, []);
   
   // Scheduling strategies implementation
   const schedulingStrategies: { [key in SchedulingAlgorithm]: SchedulingStrategy } = {
@@ -357,8 +348,8 @@ export function RealDataFactorySimulation() {
         
         setActiveOrders(simulationOrders);
         
-        // Set simulation start time
-        setSimulationStartTime(new Date());
+        // Don't set simulation start time here - wait for user to press Start
+        // setSimulationStartTime(new Date());
         
         // Create flow diagram after state is set
         setTimeout(() => {
@@ -771,27 +762,20 @@ export function RealDataFactorySimulation() {
     const demontageWaitingNode = flowNodes.find(n => n.id === 'demontage-waiting');
     
     if (orderAcceptanceNode) {
-      // 1. Grobterminierung - positioned between start and Auftragsannahme
+      // 1. Circle connector between start and Auftragsannahme
       flowNodes.push({
-        id: 'grobterminierung',
+        id: 'circle-1',
         type: 'default',
-        position: { x: orderAcceptanceNode.position.x - 125, y: orderAcceptanceNode.position.y + 20 },
+        position: { x: orderAcceptanceNode.position.x - 100, y: orderAcceptanceNode.position.y + 35 },
         data: {
-          label: (
-            <div 
-              className="text-center cursor-pointer hover:bg-blue-600 transition-colors rounded p-1" 
-              onClick={() => handleTerminierungClick('grobterminierung')}
-            >
-              <div className="text-[8px] font-bold text-white leading-tight">Grob-terminierung</div>
-            </div>
-          )
+          label: ''
         },
         style: {
-          background: '#3b82f6',
-          border: '2px solid #1d4ed8',
-          borderRadius: '6px',
-          width: 80,
-          height: 40
+          background: '#ffffff',
+          border: '2px solid #1a48a5',
+          borderRadius: '50%',
+          width: 30,
+          height: 30
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
@@ -801,28 +785,21 @@ export function RealDataFactorySimulation() {
     }
     
     if (orderAcceptanceNode && inspectionNode) {
-      // 2. Durchlaufterminierung - positioned between Auftragsannahme and Inspektion
-      const midX = (orderAcceptanceNode.position.x + 180 + inspectionNode.position.x) / 2 - 40; // Center between stations, adjust for square width
+      // 2. Circle connector between Auftragsannahme and Inspektion
+      const midX = (orderAcceptanceNode.position.x + 180 + inspectionNode.position.x) / 2 - 15; // Center between stations
       flowNodes.push({
-        id: 'durchlaufterminierung',
+        id: 'circle-2',
         type: 'default',
-        position: { x: midX, y: orderAcceptanceNode.position.y + 20 },
+        position: { x: midX, y: orderAcceptanceNode.position.y + 35 },
         data: {
-          label: (
-            <div 
-              className="text-center cursor-pointer hover:bg-blue-600 transition-colors rounded p-1" 
-              onClick={() => handleTerminierungClick('durchlaufterminierung')}
-            >
-              <div className="text-[8px] font-bold text-white leading-tight">Durchlauf-terminierung</div>
-            </div>
-          )
+          label: ''
         },
         style: {
-          background: '#3b82f6',
-          border: '2px solid #1d4ed8',
-          borderRadius: '6px',
-          width: 80,
-          height: 40
+          background: '#ffffff',
+          border: '2px solid #1a48a5',
+          borderRadius: '50%',
+          width: 30,
+          height: 30
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
@@ -832,28 +809,21 @@ export function RealDataFactorySimulation() {
     }
       
     if (inspectionNode && demontageWaitingNode) {
-      // 3. Feinterminierung - positioned between Inspektion and Demontage Waiting
-      const midX = (inspectionNode.position.x + 180 + demontageWaitingNode.position.x) / 2 - 40; // Center between stations, adjust for square width
+      // 3. Circle connector between Inspektion and Demontage Waiting
+      const midX = (inspectionNode.position.x + 180 + demontageWaitingNode.position.x) / 2 - 15; // Center between stations
       flowNodes.push({
-        id: 'feinterminierung',
+        id: 'circle-3',
         type: 'default',
-        position: { x: midX, y: inspectionNode.position.y + 20 },
+        position: { x: midX, y: inspectionNode.position.y + 35 },
         data: {
-          label: (
-            <div 
-              className="text-center cursor-pointer hover:bg-blue-600 transition-colors rounded p-1" 
-              onClick={() => handleTerminierungClick('feinterminierung')}
-            >
-              <div className="text-[8px] font-bold text-white leading-tight">Fein-terminierung</div>
-            </div>
-          )
+          label: ''
         },
         style: {
-          background: '#3b82f6',
-          border: '2px solid #1d4ed8',
-          borderRadius: '6px',
-          width: 80,
-          height: 40
+          background: '#ffffff',
+          border: '2px solid #1a48a5',
+          borderRadius: '50%',
+          width: 30,
+          height: 30
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
@@ -865,9 +835,11 @@ export function RealDataFactorySimulation() {
     // CRITICAL: Create all main process flow connections FIRST
     // Main station connections (must be complete for simulation to work)
     const mainStationEdges = [
-      { id: 'grobterminierung-order-acceptance', source: 'grobterminierung', target: 'order-acceptance' },
-      { id: 'order-acceptance-inspection', source: 'order-acceptance', target: 'inspection' },
-      { id: 'inspection-demontage-waiting', source: 'inspection', target: 'demontage-waiting' },
+      { id: 'circle-1-order-acceptance', source: 'circle-1', target: 'order-acceptance' },
+      { id: 'order-acceptance-circle-2', source: 'order-acceptance', target: 'circle-2' },
+      { id: 'circle-2-inspection', source: 'circle-2', target: 'inspection' },
+      { id: 'inspection-circle-3', source: 'inspection', target: 'circle-3' },
+      { id: 'circle-3-demontage-waiting', source: 'circle-3', target: 'demontage-waiting' },
       { id: 'demontage-waiting-demontage-title', source: 'demontage-waiting', target: 'demontage-title' },
       { id: 'demontage-title-demontage', source: 'demontage-title', target: 'demontage' },
       { id: 'demontage-reassembly', source: 'demontage', target: 'reassembly', animated: true },
@@ -1015,8 +987,14 @@ export function RealDataFactorySimulation() {
             order.isWaiting = false;
           }
           
-          order.progress += deltaMinutes;
+          const prevProgress = order.progress;
           const requiredTime = order.stationDurations[order.currentStation].actual || currentStationData.processingTime;
+          order.progress = Math.min(order.progress + deltaMinutes, requiredTime); // Cap progress at required time
+          
+          // Debug if we hit the cap
+          if (prevProgress + deltaMinutes > requiredTime && order.progress === requiredTime) {
+            console.log(`Progress capped for ${order.kundeName} at ${order.currentStation}: was going to be ${(prevProgress + deltaMinutes).toFixed(2)}, capped at ${requiredTime.toFixed(2)}`);
+          }
           
           // Debug logging for demontage-waiting progress
           if (order.currentStation === 'demontage-waiting') {
@@ -1282,12 +1260,29 @@ export function RealDataFactorySimulation() {
         });
       }
       
+      // Return empty data if simulation hasn't started
+      if (!simulationStartTime) {
+        return allSubStations.map(station => ({
+          name: `${station.parent === 'demontage' ? 'Disassembly' : 'Assembly'}: ${station.name || 'Unknown'}`,
+          station: station.name || 'Unknown',
+          utilizationRate: 0,
+          processingTime: 0,
+          totalTime: 0
+        }));
+      }
+      
       const currentTime = simulationTime.getTime();
       const simulationDurationMs = currentTime - simulationStartTime.getTime();
-      const simulationDurationMinutes = Math.max(simulationDurationMs / (1000 * 60), 0.1); // Minimum 0.1 minutes to avoid division by zero
+      const simulationDurationMinutes = Math.max(simulationDurationMs / (1000 * 60), 0.01); // Minimum 0.01 minutes
       
-      console.log('Simulation duration:', simulationDurationMinutes, 'minutes');
-      console.log('Completed orders:', completedOrders.length);
+      console.log('BAR CHART - Simulation timing:', {
+        currentTime: new Date(currentTime).toISOString(),
+        startTime: new Date(simulationStartTime.getTime()).toISOString(),
+        durationMs: simulationDurationMs,
+        durationMinutes: simulationDurationMinutes.toFixed(2),
+        completedOrders: completedOrders.length,
+        activeOrders: activeOrders.length
+      });
       
       return allSubStations.map(station => {
         if (!station?.id) {
@@ -1301,27 +1296,57 @@ export function RealDataFactorySimulation() {
         }
         
         // Calculate total processing time for this station from all completed orders
+        const completedOrdersDebug: any[] = [];
         const totalProcessingTime = (completedOrders || []).reduce((sum: number, order: any) => {
           const stationDuration = order?.stationDurations?.[station.id];
           const actualTime = stationDuration?.actual || 0;
+          if (actualTime > 0) {
+            completedOrdersDebug.push({ orderId: order.id, actualTime });
+          }
           return sum + actualTime;
         }, 0);
         
         // Also include time from currently active orders at this station
+        const activeOrdersDebug: any[] = [];
         const activeProcessingTime = (activeOrders || []).reduce((sum: number, order: any) => {
           if (order.currentStation === station.id && !order.isWaiting) {
-            // Add the time this order has already spent at this station
-            return sum + (order.progress || 0);
+            const progress = order.progress || 0;
+            if (progress > 0) {
+              activeOrdersDebug.push({ orderId: order.id, progress });
+            }
+            return sum + progress;
           }
           return sum;
         }, 0);
         
         const totalStationTime = totalProcessingTime + activeProcessingTime;
         
-        // Calculate utilization percentage
+        // Calculate utilization percentage - capped at 100%
         const utilizationRate = simulationDurationMinutes > 0 
           ? Math.min((totalStationTime / simulationDurationMinutes) * 100, 100)
           : 0;
+          
+        // Debug impossible utilization
+        if (utilizationRate > 100) {
+          console.error(`🚨 BAR CHART IMPOSSIBLE UTILIZATION: Station ${station.id}:`, {
+            totalStationTime: totalStationTime.toFixed(1) + 'min',
+            simulationDuration: simulationDurationMinutes.toFixed(1) + 'min',
+            completedOrdersTime: totalProcessingTime.toFixed(1) + 'min',
+            activeOrdersTime: activeProcessingTime.toFixed(1) + 'min',
+            completedOrdersDetail: completedOrdersDebug,
+            activeOrdersDetail: activeOrdersDebug,
+            ratio: utilizationRate.toFixed(1) + '%'
+          });
+        }
+        
+        // Debug high utilization for tracking
+        if (utilizationRate > 50) {
+          console.log(`BAR CHART Station ${station.id} high utilization:`, {
+            utilizationRate: utilizationRate.toFixed(1) + '%',
+            totalTime: totalStationTime.toFixed(1) + 'min',
+            simulationDuration: simulationDurationMinutes.toFixed(1) + 'min'
+          });
+        }
         
         // Determine station type and use the actual station name (Baugruppentyp name)
         const stationType = station.parent === 'demontage' ? 'Disassembly' : 'Assembly';
@@ -1611,16 +1636,21 @@ export function RealDataFactorySimulation() {
       <div className="xl:col-span-3 space-y-4">
         {/* Control Panel */}
         <Card>
-          <CardContent className="flex items-center justify-center py-2">
-            <div className="flex items-center justify-between gap-4 flex-wrap w-full">
-              {/* Control Buttons */}
-              <div className="flex items-center gap-2">
-                <Button
+          <CardContent className="py-3">
+            <div className="flex flex-col gap-3">
+              {/* First Row: Control Buttons and Speed/Time */}
+              <div className="flex items-center justify-between gap-4 flex-wrap">
+                {/* Control Buttons */}
+                <div className="flex items-center gap-2">
+                  <Button
                   onClick={() => {
-                    if (!isRunning) {
-                      // When starting simulation, reset the start time to NOW
-                      setSimulationStartTime(new Date());
-                      console.log('Simulation started at:', new Date().toISOString());
+                    if (!isRunning && !simulationStartTime) {
+                      // Only set start time on FIRST start, not on resume
+                      // Use current simulationTime as the start time to ensure they're synchronized
+                      setSimulationStartTime(simulationTime);
+                      console.log('Simulation FIRST start at:', simulationTime.toISOString());
+                    } else if (!isRunning) {
+                      console.log('Simulation resumed, keeping original start time');
                     }
                     setIsRunning(!isRunning);
                   }}
@@ -1644,8 +1674,10 @@ export function RealDataFactorySimulation() {
                   onClick={() => {
                     setIsRunning(false);
                     setActiveOrders([]);
+                    setCompletedOrders([]);
                     setSimulationTime(new Date());
-                    setSimulationStartTime(new Date());
+                    setSimulationStartTime(null); // Clear start time so next start is a fresh start
+                    console.log('Simulation STOPPED and RESET');
                   }}
                   variant="outline"
                   size="sm"
@@ -1714,6 +1746,65 @@ export function RealDataFactorySimulation() {
                   <span className="font-mono text-sm">
                     {simulationTime.toLocaleString('de-DE')}
                   </span>
+                </div>
+              </div>
+              </div>
+              
+              {/* Second Row: Algorithm Dropdowns */}
+              <div className="flex items-center gap-4">
+                {/* Terminierung Dropdown */}
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-medium">Terminierung:</Label>
+                  <Select
+                    value={currentSchedulingAlgorithm}
+                    onValueChange={(value: SchedulingAlgorithm | string) => {
+                      if (value in SchedulingAlgorithm) {
+                        setCurrentSchedulingAlgorithm(value as SchedulingAlgorithm);
+                      }
+                    }}
+                  >
+                    <SelectTrigger className="w-[200px]">
+                      <SelectValue placeholder="Wähle Algorithmus" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={SchedulingAlgorithm.FIFO}>
+                        FIFO - First In First Out
+                      </SelectItem>
+                      <SelectItem value="empty1" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                      <SelectItem value="empty2" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                      <SelectItem value="empty3" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                
+                {/* Beschaffungsplanung Dropdown */}
+                <div className="flex items-center gap-2">
+                  <Label className="text-sm font-medium">Beschaffungsplanung:</Label>
+                  <Select
+                    value="none"
+                    disabled
+                  >
+                    <SelectTrigger className="w-[200px]">
+                      <SelectValue placeholder="Wähle Algorithmus" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                      <SelectItem value="empty1" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                      <SelectItem value="empty2" disabled>
+                        --- Leer ---
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </div>
@@ -1979,11 +2070,31 @@ export function RealDataFactorySimulation() {
                 );
               }
 
-              // Calculate utilization for each station with safe fallbacks
-              const currentTime = (simulationTime && simulationTime.getTime) ? simulationTime.getTime() : Date.now();
-              const startTime = (simulationStartTime && simulationStartTime.getTime) ? simulationStartTime.getTime() : currentTime - 1000;
+              // Skip utilization calculation if simulation hasn't started
+              if (!simulationStartTime) {
+                return (
+                  <div 
+                    key={station.id} 
+                    className="p-1 border rounded bg-gray-50"
+                  >
+                    <div className="text-[7px] font-medium text-gray-600 leading-tight">
+                      {(station.id?.includes('demontage') || station.parent === 'demontage') ? 'Disassembly' : 'Assembly'}
+                    </div>
+                    <div className="text-[8px] font-semibold text-gray-800 leading-tight truncate" title={station.name || 'Unknown Station'}>
+                      {station.name || 'Unknown'}
+                    </div>
+                    <div className="text-[10px] text-gray-400 mt-1">
+                      0%
+                    </div>
+                  </div>
+                );
+              }
+              
+              // Calculate utilization for each station
+              const currentTime = simulationTime.getTime();
+              const startTime = simulationStartTime.getTime();
               const simulationDurationMs = Math.max(currentTime - startTime, 1000); // At least 1 second
-              const simulationDurationMinutes = Math.max(simulationDurationMs / (1000 * 60), 0.1);
+              const simulationDurationMinutes = simulationDurationMs / (1000 * 60);
               
               // Debug logging to track timing
               console.log('Utilization calculation timing:', {
@@ -2045,11 +2156,27 @@ export function RealDataFactorySimulation() {
                         }
                       });
                       
-                      // Debug logging for troubleshooting
+                      // Enhanced debugging for troubleshooting
+                      if (totalProcessingTime > 0) {
+                        console.log(`Station ${station.id} (${station.name}):`, {
+                          totalProcessingTime: totalProcessingTime.toFixed(1),
+                          simulationDurationMinutes: simulationDurationMinutes.toFixed(1),
+                          countedOrders: countedOrders.size,
+                          utilizationRate: ((totalProcessingTime / simulationDurationMinutes) * 100).toFixed(1) + '%'
+                        });
+                      }
+                      
                       if (totalProcessingTime > simulationDurationMinutes) {
-                        console.warn(`Station ${station.id}: Total processing time (${totalProcessingTime.toFixed(1)}min) exceeds simulation duration (${simulationDurationMinutes.toFixed(1)}min) - possible double counting!`);
+                        console.error(`🚨 IMPOSSIBLE UTILIZATION: Station ${station.id}:`, {
+                          totalProcessingTime: totalProcessingTime.toFixed(1) + 'min',
+                          simulationDuration: simulationDurationMinutes.toFixed(1) + 'min',
+                          countedOrders: Array.from(countedOrders),
+                          ratio: ((totalProcessingTime / simulationDurationMinutes) * 100).toFixed(1) + '%'
+                        });
                       }
 
+                      // Pure mathematical calculation: cumulative processing time / total simulation time
+                      // Capped at 100% to prevent display issues
                       const utilizationRate = simulationDurationMinutes > 0 
                         ? Math.min((totalProcessingTime / simulationDurationMinutes) * 100, 100)
                         : 0;
@@ -2210,12 +2337,6 @@ export function RealDataFactorySimulation() {
         </DialogContent>
       </Dialog>
 
-      {/* Terminierung Modal */}
-      <TerminierungModal 
-        isOpen={terminierungModalOpen}
-        onClose={() => setTerminierungModalOpen(false)}
-        type={terminierungModalType}
-      />
     </div>
   );
 }

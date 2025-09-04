@@ -41,7 +41,7 @@ interface SimulationContextType {
   completedOrders: SimulationOrder[];
   activeOrders: SimulationOrder[];
   stations: SimulationStation[];
-  simulationStartTime: Date;
+  simulationStartTime: Date | null;
   isRunning: boolean;
   speed: number;
   simulationTime: Date;
@@ -51,7 +51,7 @@ interface SimulationContextType {
   setActiveOrders: (orders: SimulationOrder[]) => void;
   setStations: (stations: SimulationStation[]) => void;
   clearAllData: () => void;
-  setSimulationStartTime: (time: Date) => void;
+  setSimulationStartTime: (time: Date | null) => void;
   setIsRunning: (running: boolean) => void;
   setSpeed: (speed: number) => void;
   setSimulationTime: (time: Date) => void;
@@ -65,7 +65,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
   const [completedOrders, setCompletedOrders] = useState<SimulationOrder[]>([]);
   const [activeOrders, setActiveOrders] = useState<SimulationOrder[]>([]);
   const [stations, setStations] = useState<SimulationStation[]>([]);
-  const [simulationStartTime, setSimulationStartTime] = useState<Date>(new Date());
+  const [simulationStartTime, setSimulationStartTime] = useState<Date | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [speed, setSpeed] = useState<number>(1);
   const [simulationTime, setSimulationTime] = useState<Date>(new Date());
@@ -87,7 +87,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
     setCompletedOrders([]);
     setActiveOrders([]);
     setStations([]);
-    setSimulationStartTime(new Date());
+    setSimulationStartTime(null);
     setIsRunning(false);
     setSpeed(1);
     setSimulationTime(new Date());
