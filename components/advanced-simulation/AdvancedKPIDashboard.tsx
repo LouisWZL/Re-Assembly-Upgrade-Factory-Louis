@@ -1,6 +1,11 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Download } from 'lucide-react';
+import { exportToCSV } from '@/lib/csv-export';
+import { getOrdersForExport } from '@/app/actions/export.actions';
+import { toast } from 'sonner';
+import { useFactory } from '@/contexts/factory-context';
 
 import { AdvancedOrder, ProductionStation } from '@/types/advanced-factory';
 
@@ -35,6 +40,7 @@ export function AdvancedKPIDashboard({
   stations,
   onClearData
 }: AdvancedKPIDashboardProps) {
+  const { activeFactory } = useFactory();
   
   // Calculate KPIs
   const totalProcessingTime = completedOrders.reduce((sum, order) => {
@@ -58,19 +64,33 @@ export function AdvancedKPIDashboard({
 
   const totalWaitingOrders = stations.reduce((sum, station) => sum + ((station as any).waitingQueue?.length || 0), 0);
 
+  const handleExportOrders = async () => {
+    try {
+      const result = await getOrdersForExport(activeFactory?.id);
+      if (result.success && result.data) {
+        const timestamp = new Date().toISOString().split('T')[0];
+        exportToCSV(result.data, `auftraege_export_${timestamp}.csv`);
+        toast.success('Aufträge erfolgreich exportiert');
+      } else {
+        toast.error('Fehler beim Exportieren der Aufträge');
+      }
+    } catch (error) {
+      console.error('Export error:', error);
+      toast.error('Fehler beim Exportieren der Aufträge');
+    }
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">KPI Dashboard</h2>
         <div className="flex items-center gap-2">
           <Button 
-            onClick={() => {
-              // Dummy export functionality
-              console.log('Export data functionality - placeholder');
-            }}
+            onClick={handleExportOrders}
             variant="outline"
           >
-            Export
+            <Download className="h-4 w-4 mr-2" />
+            Aufträge exportieren (CSV)
           </Button>
           <Button onClick={onClearData} variant="outline">
             Daten löschen
