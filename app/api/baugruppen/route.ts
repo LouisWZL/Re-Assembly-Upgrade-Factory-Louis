@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 
 export async function GET(request: NextRequest) {
   try {
+    // Ensure database is initialized to avoid race conditions on serverless
+    await ensureDatabaseInitialized()
+
     const searchParams = request.nextUrl.searchParams
     const factoryId = searchParams.get('factoryId')
     
