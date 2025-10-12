@@ -1,11 +1,12 @@
 'use server'
 
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { Prisma } from '@prisma/client'
 
 export async function getProduktvariante(varianteId: string) {
   try {
+    await ensureDatabaseInitialized()
     const variante = await prisma.produktvariante.findUnique({
       where: { id: varianteId },
       include: {
@@ -26,6 +27,7 @@ export async function getProduktvariante(varianteId: string) {
 
 export async function getProduktvarianten(produktId: string) {
   try {
+    await ensureDatabaseInitialized()
     const varianten = await prisma.produktvariante.findMany({
       where: { produktId },
       orderBy: { typ: 'asc' } // basic first, then premium
@@ -46,6 +48,7 @@ export async function updateProduktvariante(
   }
 ) {
   try {
+    await ensureDatabaseInitialized()
     const updatedVariante = await prisma.produktvariante.update({
       where: { id: varianteId },
       data: {
@@ -84,6 +87,7 @@ export async function uploadVarianteGlbFile(
   glbFileUrl: string
 ) {
   try {
+    await ensureDatabaseInitialized()
     const updatedVariante = await prisma.produktvariante.update({
       where: { id: varianteId },
       data: { glbFile: glbFileUrl },
@@ -110,6 +114,7 @@ export async function uploadVarianteGlbFile(
 
 export async function deleteVarianteGlbFile(varianteId: string) {
   try {
+    await ensureDatabaseInitialized()
     const updatedVariante = await prisma.produktvariante.update({
       where: { id: varianteId },
       data: { glbFile: null },

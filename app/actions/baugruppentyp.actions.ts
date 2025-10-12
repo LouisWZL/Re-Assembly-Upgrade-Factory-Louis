@@ -1,6 +1,6 @@
 "use server"
 
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { Prisma } from '@prisma/client'
 import { removeShapeFromGraph, graphContainsBaugruppentyp, updateShapeInGraph } from '@/lib/graph-utils'
@@ -10,6 +10,7 @@ export async function createBaugruppentyp(data: {
   factoryId: string
 }) {
   try {
+    await ensureDatabaseInitialized()
     const baugruppentyp = await prisma.baugruppentyp.create({
       data: {
         bezeichnung: data.bezeichnung,
@@ -49,6 +50,7 @@ export async function updateBaugruppentyp(id: string, data: {
   bezeichnung?: string
 }) {
   try {
+    await ensureDatabaseInitialized()
     // Update the Baugruppentyp
     const baugruppentyp = await prisma.baugruppentyp.update({
       where: { id },
@@ -124,6 +126,7 @@ export async function updateBaugruppentyp(id: string, data: {
 
 export async function deleteBaugruppentyp(id: string) {
   try {
+    await ensureDatabaseInitialized()
     // First, delete all Baugruppen that use this Baugruppentyp
     await prisma.baugruppe.deleteMany({
       where: { baugruppentypId: id }

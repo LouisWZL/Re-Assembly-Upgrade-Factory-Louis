@@ -1,6 +1,6 @@
 'use server'
 
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { Prisma } from '@prisma/client'
 import { extractBaugruppentypenFromGraph } from '@/lib/graph-utils'
@@ -8,6 +8,7 @@ import { generateProcessGraph } from '@/lib/process-graph-generator'
 
 export async function getProdukt(produktId: string) {
   try {
+    await ensureDatabaseInitialized()
     const produkt = await prisma.produkt.findUnique({
       where: { id: produktId },
       include: {
@@ -33,6 +34,7 @@ export async function getProdukt(produktId: string) {
 
 export async function updateProduktGraph(produktId: string, graphData: any) {
   try {
+    await ensureDatabaseInitialized()
     // Extract Baugruppentyp IDs from the graph
     const baugruppentypenIds = extractBaugruppentypenFromGraph(graphData)
     
@@ -80,6 +82,7 @@ export async function updateProduktGraph(produktId: string, graphData: any) {
 
 export async function getProduktWithProcessGraph(produktId: string) {
   try {
+    await ensureDatabaseInitialized()
     const produkt = await prisma.produkt.findUnique({
       where: { id: produktId },
       select: {
@@ -104,6 +107,7 @@ export async function getProduktWithProcessGraph(produktId: string) {
 
 export async function updateProduktProcessGraph(produktId: string, processGraphData: any) {
   try {
+    await ensureDatabaseInitialized()
     // Update the product with the process graph data
     const updatedProdukt = await prisma.produkt.update({
       where: { id: produktId },
@@ -133,6 +137,7 @@ export async function createProdukt(
   }
 ) {
   try {
+    await ensureDatabaseInitialized()
     // Check if factory already has a product
     const existingProdukt = await prisma.produkt.findFirst({
       where: { factoryId }
@@ -210,6 +215,7 @@ export async function updateProdukt(
   }
 ) {
   try {
+    await ensureDatabaseInitialized()
     // Check if new seriennummer already exists (excluding current product)
     const existing = await prisma.produkt.findFirst({
       where: {
@@ -285,6 +291,7 @@ export async function updateProdukt(
 
 export async function deleteProdukt(produktId: string) {
   try {
+    await ensureDatabaseInitialized()
     // Get product with all relations
     const produkt = await prisma.produkt.findUnique({
       where: { id: produktId },
@@ -375,6 +382,7 @@ export async function deleteProdukt(produktId: string) {
 
 export async function getProdukte(factoryId: string) {
   try {
+    await ensureDatabaseInitialized()
     const produkte = await prisma.produkt.findMany({
       where: { factoryId },
       include: {

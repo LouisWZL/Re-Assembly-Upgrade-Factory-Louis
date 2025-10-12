@@ -1,6 +1,6 @@
 "use server"
 
-import { prisma } from '@/lib/prisma'
+import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
 import { Prisma } from '@prisma/client'
 
@@ -14,6 +14,7 @@ export async function createBaugruppe(data: {
   montagezeit?: number | null
 }) {
   try {
+    await ensureDatabaseInitialized()
     const baugruppe = await prisma.baugruppe.create({
       data: {
         bezeichnung: data.bezeichnung,
@@ -69,6 +70,7 @@ export async function updateBaugruppe(id: string, data: {
   montagezeit?: number | null
 }) {
   try {
+    await ensureDatabaseInitialized()
     // No need to check for Produktvarianten since the relationship no longer exists
     
     const updateData: any = {
@@ -127,6 +129,7 @@ export async function updateBaugruppe(id: string, data: {
 
 export async function deleteBaugruppe(id: string) {
   try {
+    await ensureDatabaseInitialized()
     // Check if Baugruppe is used by any BaugruppeInstance (in orders)
     const instanceCount = await prisma.baugruppeInstance.count({
       where: {
@@ -172,6 +175,7 @@ export async function deleteBaugruppe(id: string) {
 
 export async function getBaugruppen(factoryId?: string) {
   try {
+    await ensureDatabaseInitialized()
     const baugruppen = await prisma.baugruppe.findMany({
       where: factoryId ? { factoryId } : undefined,
       include: {
@@ -200,6 +204,7 @@ export async function getBaugruppen(factoryId?: string) {
 
 export async function getBaugruppe(id: string) {
   try {
+    await ensureDatabaseInitialized()
     const baugruppe = await prisma.baugruppe.findUnique({
       where: { id },
       include: {
@@ -231,6 +236,7 @@ export async function getBaugruppe(id: string) {
 
 export async function getBaugruppenByTyp(baugruppentypId: string) {
   try {
+    await ensureDatabaseInitialized()
     const baugruppen = await prisma.baugruppe.findMany({
       where: {
         baugruppentypId
