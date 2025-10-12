@@ -3,7 +3,7 @@
  * Beschreibung: Demo-Auftragsabwicklungsalgorithmus mit 7er-Batch-Verarbeitung und Kapazitätsprüfung
  */
 
-import { AuftragsPhase } from '@prisma/client'
+import { AuftragsPhase } from '@/types/enums'
 import { AuftragsabwicklungAlgorithmus } from '../types'
 
 const auftragsabwicklung1: AuftragsabwicklungAlgorithmus = {

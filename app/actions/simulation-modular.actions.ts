@@ -2,7 +2,7 @@
 
 import { prisma } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
-import { Schichtmodell } from '@prisma/client'
+import { Schichtmodell } from '@/types/enums'
 import { addTerminierung, addBeschaffung, createAutoOrders } from './simulation.actions'
 import { updateAuftragPhaseWithHistory } from './auftrag.actions'
 import { auftragsabwicklungAlgorithmen, terminierungAlgorithmen, beschaffungAlgorithmen } from '@/components/simulation/registry'

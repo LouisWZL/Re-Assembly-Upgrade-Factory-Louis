@@ -3,7 +3,7 @@
  * Beschreibung: 
  */
 
-import { AuftragsPhase } from '@prisma/client'
+import { AuftragsPhase } from '@/types/enums'
 import { AuftragsabwicklungAlgorithmus } from '../types'
 
 const auftragsabwicklung2: AuftragsabwicklungAlgorithmus = {

@@ -2,7 +2,7 @@
 
 import { prisma } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
-import { AuftragsPhase, Schichtmodell } from '@prisma/client'
+import { AuftragsPhase, Schichtmodell } from '@/types/enums'
 
 // Types für Terminierung und Beschaffung
 interface Terminierung {

@@ -1,4 +1,5 @@
-import { ReassemblyFactory, Auftrag, AuftragsPhase } from '@prisma/client'
+import { ReassemblyFactory, Auftrag } from '@prisma/client'
+import { AuftragsPhase } from '@/types/enums'
 
 // Interface für Auftragsabwicklungs-Algorithmus
 export interface AuftragsabwicklungAlgorithmus {

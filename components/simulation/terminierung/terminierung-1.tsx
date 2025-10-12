@@ -3,7 +3,7 @@
  * Beschreibung: Demo-Terminierungsalgorithmus mit Zeitschienen und Terminen
  */
 
-import { AuftragsPhase } from '@prisma/client'
+import { AuftragsPhase } from '@/types/enums'
 import { TerminierungAlgorithmus } from '../types'
 
 // Hilfsfunktionen für Terminierung
