@@ -12,14 +12,14 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-// Define ReAssemblyTyp as constants for SQLite compatibility
+// Define ReAssemblyTyp as string union, but accept string from DB
 type ReAssemblyTyp = 'PFLICHT' | 'UPGRADE'
 
 interface BaugruppenDetailsTableProps {
   baugruppenInstances?: Array<{
     id: string
     zustand: number
-    reAssemblyTyp?: ReAssemblyTyp | null
+    reAssemblyTyp?: string | null
     baugruppe: {
       id: string
       bezeichnung: string
@@ -79,7 +79,7 @@ export function BaugruppenDetailsTable({ baugruppenInstances, pflichtUpgradeSchw
     return 'bg-green-500'
   }
   
-  const getReAssemblyTypBadge = (reAssemblyTyp?: ReAssemblyTyp | null) => {
+  const getReAssemblyTypBadge = (reAssemblyTyp?: string | null) => {
     if (!reAssemblyTyp) return <span className="text-muted-foreground">-</span>
     
     return (

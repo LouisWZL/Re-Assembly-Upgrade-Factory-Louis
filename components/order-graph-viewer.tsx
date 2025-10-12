@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
-// Define ReAssemblyTyp as constants for SQLite compatibility
+// Define ReAssemblyTyp as a string to match DB (SQLite stores string)
 type ReAssemblyTyp = 'PFLICHT' | 'UPGRADE'
 import { BaugruppenDetailsTable } from '@/components/baugruppen-details-table'
 import { ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
@@ -21,7 +21,7 @@ interface BaugruppeDetail {
   artikelnummer: string
   variantenTyp: string
   zustand: number
-  reAssemblyTyp?: ReAssemblyTyp | null
+  reAssemblyTyp?: string | null
 }
 
 interface OrderGraphViewerProps {
@@ -38,7 +38,7 @@ interface OrderGraphViewerProps {
     baugruppenInstances?: Array<{
       id: string
       zustand: number
-      reAssemblyTyp?: ReAssemblyTyp | null
+      reAssemblyTyp?: string | null
       baugruppe: {
         id: string
         bezeichnung: string
