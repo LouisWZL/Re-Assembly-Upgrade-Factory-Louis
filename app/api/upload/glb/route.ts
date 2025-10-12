@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { writeFile } from 'fs/promises'
+import { writeFile, mkdir, readFile } from 'fs/promises'
+import fs from 'fs'
 import path from 'path'
 
 export async function POST(request: NextRequest) {
@@ -37,26 +38,79 @@ export async function POST(request: NextRequest) {
     // Create unique filename
     const timestamp = Date.now()
     const uniqueFilename = `${timestamp}-${file.name}`
-    const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'glb')
-    const filePath = path.join(uploadDir, uniqueFilename)
 
-    // Save file
-    await writeFile(filePath, buffer)
+    // Detect Vercel/runtime env where public dir is read-only
+    const isVercel = !!process.env.VERCEL || process.env.NODE_ENV === 'production'
 
-    // Return the public URL
-    const publicUrl = `/uploads/glb/${uniqueFilename}`
+    if (isVercel) {
+      // Use /tmp for ephemeral, writable storage on Vercel
+      const tmpUploadDir = path.join('/tmp', 'uploads', 'glb')
+      await mkdir(tmpUploadDir, { recursive: true })
+      const tmpFilePath = path.join(tmpUploadDir, uniqueFilename)
+      await writeFile(tmpFilePath, buffer)
 
-    return NextResponse.json({
-      success: true,
-      url: publicUrl,
-      filename: uniqueFilename
-    })
+      // Return API URL that streams from /tmp
+      const apiUrl = `/api/upload/glb?filename=${encodeURIComponent(uniqueFilename)}`
+      return NextResponse.json({ success: true, url: apiUrl, filename: uniqueFilename })
+    } else {
+      // Local/dev: write into public so it’s directly served
+      const uploadDir = path.join(process.cwd(), 'public', 'uploads', 'glb')
+      await mkdir(uploadDir, { recursive: true })
+      const filePath = path.join(uploadDir, uniqueFilename)
+      await writeFile(filePath, buffer)
+
+      const publicUrl = `/uploads/glb/${uniqueFilename}`
+      return NextResponse.json({ success: true, url: publicUrl, filename: uniqueFilename })
+    }
   } catch (error) {
     console.error('Error uploading file:', error)
     return NextResponse.json(
       { error: 'Fehler beim Hochladen der Datei' },
       { status: 500 }
     )
+  }
+}
+
+// Stream a GLB file back. In Vercel we serve from /tmp, locally from public/uploads/glb
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const filename = searchParams.get('filename')
+
+    if (!filename) {
+      return NextResponse.json({ error: 'Dateiname fehlt' }, { status: 400 })
+    }
+
+    // Security check - prevent directory traversal
+    if (filename.includes('..') || filename.includes('/')) {
+      return NextResponse.json({ error: 'Ungültiger Dateiname' }, { status: 400 })
+    }
+
+    const tmpPath = path.join('/tmp', 'uploads', 'glb', filename)
+    const publicPath = path.join(process.cwd(), 'public', 'uploads', 'glb', filename)
+
+    let filePath: string | null = null
+    if (fs.existsSync(tmpPath)) {
+      filePath = tmpPath
+    } else if (fs.existsSync(publicPath)) {
+      filePath = publicPath
+    }
+
+    if (!filePath) {
+      return NextResponse.json({ error: 'Datei nicht gefunden' }, { status: 404 })
+    }
+
+    const data = await readFile(filePath)
+    return new NextResponse(data, {
+      status: 200,
+      headers: {
+        'Content-Type': 'model/gltf-binary',
+        'Content-Disposition': `inline; filename="${filename}"`
+      }
+    })
+  } catch (error) {
+    console.error('Error reading file:', error)
+    return NextResponse.json({ error: 'Fehler beim Laden der Datei' }, { status: 500 })
   }
 }
 
@@ -81,9 +135,15 @@ export async function DELETE(request: NextRequest) {
     }
 
     const { unlink } = await import('fs/promises')
-    const filePath = path.join(process.cwd(), 'public', 'uploads', 'glb', filename)
-    
-    await unlink(filePath)
+    // Try removing from /tmp first (Vercel), then from public (local)
+    const tmpPath = path.join('/tmp', 'uploads', 'glb', filename)
+    const publicPath = path.join(process.cwd(), 'public', 'uploads', 'glb', filename)
+
+    if (fs.existsSync(tmpPath)) {
+      await unlink(tmpPath)
+    } else if (fs.existsSync(publicPath)) {
+      await unlink(publicPath)
+    }
 
     return NextResponse.json({
       success: true,

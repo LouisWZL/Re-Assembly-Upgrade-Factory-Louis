@@ -109,7 +109,12 @@ async function performInitialization(): Promise<boolean> {
       console.error('Error message:', error instanceof Error ? error.message : String(error))
       
       // Tables don't exist - need to create schema
-      if (error instanceof Error && error.message.includes('does not exist in the current database')) {
+      if (
+        error instanceof Error && (
+          error.message.includes('does not exist in the current database') ||
+          error.message.includes('no such table')
+        )
+      ) {
         console.log('🔨 Tables do not exist, creating schema...')
         
         try {
