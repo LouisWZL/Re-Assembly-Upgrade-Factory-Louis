@@ -4,8 +4,9 @@
 
 import { Baugruppe } from '@prisma/client'
 
-// Define types as constants for SQLite compatibility
+// Define variant types: product variant vs. component variant
 type VariantenTyp = 'basic' | 'premium'
+type BaugruppeVariantenTyp = 'basic' | 'premium' | 'basicAndPremium'
 
 interface GraphCell {
   id: string
@@ -79,7 +80,7 @@ export function getConstrainedZustand(
  * Check if a Baugruppe is compatible with a product variant type
  */
 export function isBaugruppeCompatibleWithVariant(
-  baugruppeVariantenTyp: VariantenTyp,
+  baugruppeVariantenTyp: string | BaugruppeVariantenTyp,
   produktvarianteTyp: VariantenTyp
 ): boolean {
   if (baugruppeVariantenTyp === 'basicAndPremium') {
