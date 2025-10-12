@@ -6,6 +6,7 @@ import auftragsabwicklung5 from './auftragsabwicklung/auftragsabwicklung-5'
 import auftragsabwicklung6 from './auftragsabwicklung/auftragsabwicklung-6'
 import auftragsabwicklung7 from './auftragsabwicklung/auftragsabwicklung-7'
 import auftragsabwicklung8 from './auftragsabwicklung/auftragsabwicklung-8'
+import auftragsabwicklung9 from './auftragsabwicklung/auftragsabwicklung-9'
 
 import terminierung1 from './terminierung/terminierung-1'
 import terminierung2 from './terminierung/terminierung-2'
@@ -33,7 +34,8 @@ export const auftragsabwicklungAlgorithmen = [
   auftragsabwicklung5,
   auftragsabwicklung6,
   auftragsabwicklung7,
-  auftragsabwicklung8
+  auftragsabwicklung8,
+  auftragsabwicklung9
 ]
 
 export const terminierungAlgorithmen = [

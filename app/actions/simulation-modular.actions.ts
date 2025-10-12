@@ -18,7 +18,11 @@ export async function processModularSimulation(
   batchSize: number,
   auftragsabwicklungIndex: number,
   terminierungIndex: number,
-  beschaffungIndex: number
+  beschaffungIndex: number,
+  demSlots?: number,
+  monSlots?: number,
+  flexShare?: number,
+  setupTimeHours?: number
 ) {
   try {
     // 1. Factory-Daten laden
@@ -53,7 +57,12 @@ export async function processModularSimulation(
     
     // 2. Auftragsabwicklung ausführen
     const auftragsabwicklung = auftragsabwicklungAlgorithmen[auftragsabwicklungIndex]
-    const { updates } = await auftragsabwicklung.process(factory, simulationTime, factoryId)
+    const { updates } = await auftragsabwicklung.process(factory, simulationTime, factoryId, {
+      demSlots,
+      monSlots,
+      flexShare,
+      setupTimeHours
+    })
     
     // 3. Updates in Datenbank speichern mit History
     for (const update of updates) {

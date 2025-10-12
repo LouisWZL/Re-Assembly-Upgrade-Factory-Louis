@@ -15,6 +15,10 @@ interface SimulationProps {
   auftragsabwicklungIndex: number
   terminierungIndex: number
   beschaffungIndex: number
+  demSlots?: number
+  monSlots?: number
+  flexShare?: number
+  setupTimeHours?: number
   onTimeUpdate: (time: Date) => void
 }
 
@@ -28,6 +32,10 @@ export function Simulation({
   auftragsabwicklungIndex,
   terminierungIndex,
   beschaffungIndex,
+  demSlots,
+  monSlots,
+  flexShare,
+  setupTimeHours,
   onTimeUpdate
 }: SimulationProps) {
   const [simulationTime, setSimulationTime] = useState(new Date())
@@ -52,7 +60,11 @@ export function Simulation({
         batchSize,
         auftragsabwicklungIndex,
         terminierungIndex,
-        beschaffungIndex
+        beschaffungIndex,
+        demSlots,
+        monSlots,
+        flexShare,
+        setupTimeHours
       )
       
       return result

@@ -54,6 +54,11 @@ export function SimulationControlsBar({ simulationTime, isPlaying, onSimulationU
   const [auftragsabwicklungIndex, setAuftragsabwicklungIndex] = useState(0)
   const [terminierungIndex, setTerminierungIndex] = useState(0)
   const [beschaffungIndex, setBeschaffungIndex] = useState(0)
+  // New: capacity & flexibility controls
+  const [demSlots, setDemSlots] = useState(4)
+  const [monSlots, setMonSlots] = useState(6)
+  const [flexSharePct, setFlexSharePct] = useState([50]) // percent 0..100
+  const [setupTimeHours, setSetupTimeHours] = useState(2)
   const { activeFactory } = useFactory()
 
   // Sync with parent props
@@ -245,6 +250,86 @@ export function SimulationControlsBar({ simulationTime, isPlaying, onSimulationU
                 </div>
               </PopoverContent>
             </Popover>
+            {/* Capacity & Flexibility */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <div className="flex items-center gap-2 cursor-pointer">
+                  <Settings className="h-3.5 w-3.5 text-muted-foreground" />
+                  <Label className="text-sm cursor-pointer">Slots & Flex</Label>
+                </div>
+              </PopoverTrigger>
+              <PopoverContent className="w-96">
+                <div className="grid gap-4">
+                  <div className="space-y-2">
+                    <h4 className="font-medium leading-none">Kapazität & Flexibilität</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Einstellungen gelten für den modularen Algorithmus „FCFS Flex Slots“
+                    </p>
+                  </div>
+                  <div className="grid gap-3">
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="dem-slots">DEM Slots</Label>
+                      <Input
+                        id="dem-slots"
+                        type="number"
+                        value={demSlots}
+                        onChange={(e) => setDemSlots(Number(e.target.value))}
+                        className="col-span-2 h-8"
+                        disabled={playing}
+                        min={0}
+                        max={50}
+                      />
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="mon-slots">MON Slots</Label>
+                      <Input
+                        id="mon-slots"
+                        type="number"
+                        value={monSlots}
+                        onChange={(e) => setMonSlots(Number(e.target.value))}
+                        className="col-span-2 h-8"
+                        disabled={playing}
+                        min={1}
+                        max={50}
+                      />
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label>Flex Anteil</Label>
+                      <div className="col-span-2 flex items-center gap-2">
+                        <Slider
+                          value={flexSharePct}
+                          onValueChange={(v) => setFlexSharePct(v)}
+                          min={0}
+                          max={100}
+                          step={5}
+                          className="w-48"
+                          disabled={playing}
+                        />
+                        <span className="text-sm text-muted-foreground w-10">{flexSharePct[0]}%</span>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 items-center gap-4">
+                      <Label htmlFor="setup-time">Setup (h)</Label>
+                      <Input
+                        id="setup-time"
+                        type="number"
+                        value={setupTimeHours}
+                        onChange={(e) => setSetupTimeHours(Number(e.target.value))}
+                        className="col-span-2 h-8"
+                        disabled={playing}
+                        min={0}
+                        max={12}
+                      />
+                    </div>
+                  </div>
+                  {playing && (
+                    <p className="text-xs text-amber-600">
+                      Pausieren Sie die Simulation um die Werte zu ändern
+                    </p>
+                  )}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
 
           {/* Center: Play controls */}
@@ -336,6 +421,10 @@ export function SimulationControlsBar({ simulationTime, isPlaying, onSimulationU
           auftragsabwicklungIndex={auftragsabwicklungIndex}
           terminierungIndex={terminierungIndex}
           beschaffungIndex={beschaffungIndex}
+          demSlots={demSlots}
+          monSlots={monSlots}
+          flexShare={flexSharePct[0] / 100}
+          setupTimeHours={setupTimeHours}
           onTimeUpdate={setCurrentSimulationTime}
         />
       )}

@@ -8,7 +8,13 @@ export interface AuftragsabwicklungAlgorithmus {
   process: (
     factory: any,
     simulationTime: Date,
-    factoryId: string
+    factoryId: string,
+    options?: {
+      demSlots?: number
+      monSlots?: number
+      flexShare?: number // 0..1
+      setupTimeHours?: number
+    }
   ) => Promise<{
     updates: Array<{
       id: string
