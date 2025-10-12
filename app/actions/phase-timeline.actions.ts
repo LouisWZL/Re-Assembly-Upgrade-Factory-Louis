@@ -100,26 +100,33 @@ export async function getPhaseCounts(factoryId: string) {
     })
 
     const phaseCounts: PhaseCount[] = stats.map(stat => ({
-      phase: stat.phase,
+      phase: stat.phase as AuftragsPhase,
       count: stat._count.phase
     }))
 
     // Ensure all phases are represented
-    const allPhases = Object.values(AuftragsPhase)
+    const allPhases: AuftragsPhase[] = [
+      'AUFTRAGSANNAHME',
+      'INSPEKTION',
+      'REASSEMBLY_START',
+      'REASSEMBLY_ENDE',
+      'QUALITAETSPRUEFUNG',
+      'AUFTRAGSABSCHLUSS'
+    ]
     for (const phase of allPhases) {
       if (!phaseCounts.find(pc => pc.phase === phase)) {
-        phaseCounts.push({ phase: phase as AuftragsPhase, count: 0 })
+        phaseCounts.push({ phase, count: 0 })
       }
     }
 
     // Sort by phase order
-    const phaseOrder = [
-      AuftragsPhase.AUFTRAGSANNAHME,
-      AuftragsPhase.INSPEKTION,
-      AuftragsPhase.REASSEMBLY_START,
-      AuftragsPhase.REASSEMBLY_ENDE,
-      AuftragsPhase.QUALITAETSPRUEFUNG,
-      AuftragsPhase.AUFTRAGSABSCHLUSS
+    const phaseOrder: AuftragsPhase[] = [
+      'AUFTRAGSANNAHME',
+      'INSPEKTION',
+      'REASSEMBLY_START',
+      'REASSEMBLY_ENDE',
+      'QUALITAETSPRUEFUNG',
+      'AUFTRAGSABSCHLUSS'
     ]
     
     phaseCounts.sort((a, b) => 
