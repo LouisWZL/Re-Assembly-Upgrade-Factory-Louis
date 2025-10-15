@@ -1,7 +1,7 @@
 // @ts-nocheck
 'use client'
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useFactory } from '@/contexts/factory-context';
 import { useSimulation } from '@/contexts/simulation-context';
 import { useRouter } from 'next/navigation';
@@ -13,9 +13,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info } from 'lucide-react';
 import { toast } from 'sonner';
-import { 
+import {
   ReactFlow,
   Node, 
   Edge, 
@@ -26,6 +27,7 @@ import {
   useEdgesState,
   Position
 } from '@xyflow/react';
+import { PhaseNode } from './nodes/PhaseNode'
 import '@xyflow/react/dist/style.css';
 import {
   Dialog,
@@ -41,9 +43,10 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
+  Tooltip as RechartsTooltip,
   Legend,
-  ResponsiveContainer
+  ResponsiveContainer,
+  Cell
 } from 'recharts';
 
 interface SimulationStation {
@@ -122,11 +125,175 @@ export function RealDataFactorySimulation() {
   } = useSimulation();
   const router = useRouter();
   const [loading, setLoading] = useState(true);
-  const [lastRealTime, setLastRealTime] = useState(Date.now());
+  const lastRealTimeRef = useRef(Date.now());
+  const simulationStartTimeRef = useRef<Date | null>(simulationStartTime);
+  const simulationTimeRef = useRef<Date>(simulationTime);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    simulationStartTimeRef.current = simulationStartTime;
+  }, [simulationStartTime]);
+
+  useEffect(() => {
+    simulationTimeRef.current = simulationTime;
+  }, [simulationTime]);
   
   // Local simulation data
   const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
   const [factoryData, setFactoryData] = useState<any>(null);
+  
+  // Phase capacity & flexibility controls
+  const [demSlots, setDemSlots] = useState<number>(4)
+  const [monSlots, setMonSlots] = useState<number>(6)
+  const [demFlexSharePct, setDemFlexSharePct] = useState<number>(50)
+  const [monFlexSharePct, setMonFlexSharePct] = useState<number>(50)
+  const [setupTimeHours, setSetupTimeHours] = useState<number>(0)
+  const [aggregateView] = useState<boolean>(true)
+  const [initDebugLogs, setInitDebugLogs] = useState<string[]>([])
+  const [initError, setInitError] = useState<string | null>(null)
+  const [dispatcherLogs, setDispatcherLogs] = useState<string[]>([])
+  const dispatcherLogsRef = useRef<string[]>([])
+  const [pickSlotDebugLogs, setPickSlotDebugLogs] = useState<string[]>([])
+  const pickSlotDebugLogsRef = useRef<string[]>([])
+
+  // Gantt chart hover states
+  const [hoveredOrderRow, setHoveredOrderRow] = useState<string | null>(null)
+  const [hoveredDemSlot, setHoveredDemSlot] = useState<number | null>(null)
+  const [hoveredMonSlot, setHoveredMonSlot] = useState<number | null>(null)
+
+  // Phase slot state (approximation of rigid/flexible slots)
+  type SlotState = { flex: boolean; specialization?: string | null; currentType?: string | null; idleSince?: number | null; busy?: boolean }
+  const demSlotsRef = useRef<SlotState[]>([])
+  const monSlotsRef = useRef<SlotState[]>([])
+  // Map orderId+phase -> slot index
+  const orderPhaseSlotMapRef = useRef<Record<string, number>>({})
+
+  const normalizeOperationKey = (value?: string | null) => {
+  if (!value) return ''
+  const str = value
+    .toString()
+    .replace(/^demontage[-\s]+/i, '')
+    .replace(/^montage[-\s]+/i, '')
+    .replace(/^bgt-(?:ps|au|vw)-/i, '')
+    .replace(/^bgt-/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+
+  if (str.includes(':')) {
+    const parts = str.split(':')
+    return parts[parts.length - 1].trim()
+  }
+  if (str.includes('-')) {
+    const parts = str.split('-')
+    return parts[parts.length - 1].trim()
+  }
+  return str
+}
+
+  // Helper: minutes since simulation start
+  const getSimMinutes = useCallback(() => {
+    if (!simulationStartTimeRef.current) return 0
+    const diffMs = simulationTimeRef.current.getTime() - simulationStartTimeRef.current.getTime()
+    return Math.max(0, Math.floor(diffMs / 60000))
+  }, [])
+
+  // Initialize slots based on current used types
+  const initPhaseSlots = useCallback((usedDemTypes: string[], usedMonTypes: string[]) => {
+    const makeSlots = (total: number, flexSharePct: number, usedTypes: string[]) => {
+      const flexCount = Math.max(0, Math.round((flexSharePct / 100) * total))
+      const rigidCount = Math.max(0, total - flexCount)
+      // Determine rigid specializations from top types
+      const counts: Record<string, number> = {}
+      usedTypes.forEach(t => { counts[t] = (counts[t] || 0) + 1 })
+      const topTypes = Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([t])=>t)
+      const slots: SlotState[] = []
+      for (let i=0;i<rigidCount;i++) {
+        const specRaw = topTypes.length ? topTypes[i % topTypes.length] : (usedTypes[0] || null)
+        const spec = specRaw ? normalizeOperationKey(specRaw) : null
+        slots.push({ flex: false, specialization: spec, currentType: null, idleSince: 0, busy: false })
+      }
+      for (let i=0;i<flexCount;i++) {
+        slots.push({ flex: true, specialization: null, currentType: null, idleSince: null, busy: false })
+      }
+      return slots
+    }
+    demSlotsRef.current = makeSlots(demSlots, demFlexSharePct, usedDemTypes)
+    monSlotsRef.current = makeSlots(monSlots, monFlexSharePct, usedMonTypes)
+    orderPhaseSlotMapRef.current = {}
+  }, [demSlots, monSlots, demFlexSharePct, monFlexSharePct])
+
+  // Pick a slot for a given phase and op type (returns slot index or -1)
+  const pickSlot = useCallback((phase: 'DEMONTAGE'|'REASSEMBLY', opType: string) => {
+    const slots = phase === 'DEMONTAGE' ? demSlotsRef.current : monSlotsRef.current
+    const nowMin = getSimMinutes()
+    const setupMinutes = Math.max(0, Math.round(setupTimeHours * 60))
+    const desiredKey = normalizeOperationKey(opType)
+
+    pickSlotDebugLogsRef.current = []
+    pickSlotDebugLogsRef.current.push(`🎯 pickSlot: phase=${phase} opType=${opType} desiredKey=${desiredKey} setupMin=${setupMinutes} nowMin=${nowMin}`)
+
+    for (let i = 0; i < slots.length; i++) {
+      const slot = slots[i]
+      pickSlotDebugLogsRef.current.push(`  S${i}: busy=${slot.busy} flex=${slot.flex} spec=${slot.specialization} currType=${slot.currentType} idleSince=${slot.idleSince}`)
+
+      if (slot.busy) {
+        pickSlotDebugLogsRef.current.push(`    ❌ skip: busy`)
+        continue
+      }
+
+      const slotSpecKey = normalizeOperationKey(slot.specialization)
+      const slotCurrentKey = normalizeOperationKey(slot.currentType)
+      pickSlotDebugLogsRef.current.push(`    specKey=${slotSpecKey} currentKey=${slotCurrentKey}`)
+
+      if (!slot.flex) {
+        pickSlotDebugLogsRef.current.push(`    rigid slot`)
+        if (desiredKey && slotSpecKey !== desiredKey) {
+          pickSlotDebugLogsRef.current.push(`    ❌ skip: rigid mismatch (${slotSpecKey} !== ${desiredKey})`)
+          continue
+        }
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH rigid slot!`)
+        slot.busy = true
+        slot.currentType = opType
+        slot.idleSince = null
+        return i
+      }
+
+      const sameOrUnassigned = !slot.currentType || slotCurrentKey === desiredKey || !desiredKey
+      pickSlotDebugLogsRef.current.push(`    flex slot: sameOrUnassigned=${sameOrUnassigned} (!currType=${!slot.currentType} || match=${slotCurrentKey === desiredKey} || !desired=${!desiredKey})`)
+      if (sameOrUnassigned) {
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (same/unassigned)!`)
+        slot.busy = true
+        slot.currentType = opType
+        slot.idleSince = null
+        return i
+      }
+
+      const idleSince = slot.idleSince == null ? nowMin : slot.idleSince
+      const idleDuration = Math.max(0, nowMin - idleSince)
+      pickSlotDebugLogsRef.current.push(`    idleSince=${idleSince} idleDuration=${idleDuration} setupMinutes=${setupMinutes}`)
+
+      if (idleDuration >= setupMinutes) {
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (setup elapsed)!`)
+        slot.busy = true
+        slot.currentType = opType
+        slot.idleSince = null
+        return i
+      }
+      pickSlotDebugLogsRef.current.push(`    ❌ skip: setup not elapsed (${idleDuration} < ${setupMinutes})`)
+    }
+
+    pickSlotDebugLogsRef.current.push(`  ❌ NO SLOT FOUND`)
+    return -1
+  }, [getSimMinutes, setupTimeHours])
+
+  const releaseSlot = useCallback((phase: 'DEMONTAGE'|'REASSEMBLY', slotIdx: number) => {
+    const slots = phase === 'DEMONTAGE' ? demSlotsRef.current : monSlotsRef.current
+    const s = slots[slotIdx]
+    if (!s) return
+    s.busy = false
+    s.idleSince = getSimMinutes()
+  }, [getSimMinutes])
   
   
   // View state for simulation vs data dashboard
@@ -199,7 +366,13 @@ export function RealDataFactorySimulation() {
   // Flow diagram nodes and edges
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  
+
+  // Custom node types for React Flow
+  const nodeTypes = useMemo(() => ({ phaseNode: PhaseNode }), []);
+
+  // Debug info toggle
+  const [showDebugInfo, setShowDebugInfo] = useState(true);
+
   // Station configuration dialog
   const [selectedStation, setSelectedStation] = useState<SimulationStation | null>(null);
   const [stationDialogOpen, setStationDialogOpen] = useState(false);
@@ -208,6 +381,52 @@ export function RealDataFactorySimulation() {
   // Inspection settings
   const [inspectionDialogOpen, setInspectionDialogOpen] = useState(false);
   const [reassemblyPercentage, setReassemblyPercentage] = useState(25); // Default 25% need reassembly
+
+  // Local event log for Gantt (START/END of sub-ops)
+  const simEventsRef = useRef<Array<{ t:number; order_id:string; activity:string; slot?: number | null }>>([])
+  const pushEvent = useCallback((activity: string, orderId: string, slot?: number | null) => {
+    simEventsRef.current.push({ t: getSimMinutes(), order_id: orderId, activity, slot: (slot ?? null) })
+  }, [getSimMinutes])
+
+  // Main phase active trackers to enforce capacity=1
+  const mainActiveRef = useRef<{ [stationId: string]: { orderId: string; remaining: number; total: number } | null }>({})
+
+  // Gantt refresh gating: re-render every 10 minutes of simulation time
+  const [ganttRefreshKey, setGanttRefreshKey] = useState(0)
+  const lastGanttBucketRef = useRef<number>(-1)
+  const [debugRefreshKey, setDebugRefreshKey] = useState(0)
+  useEffect(() => {
+    const min = getSimMinutes()
+    const bucket = Math.floor(min / 10)
+    if (bucket !== lastGanttBucketRef.current) {
+      lastGanttBucketRef.current = bucket
+      setGanttRefreshKey(k => k + 1)
+    }
+    // Refresh debug panel every second (in real time)
+    const debugInterval = setInterval(() => {
+      if (isRunning) {
+        setDebugRefreshKey(k => k + 1)
+      }
+    }, 1000)
+    return () => clearInterval(debugInterval)
+  }, [simulationTime, getSimMinutes, isRunning])
+
+  // Main phase queues and DEM ready gating
+  const mainQueuesRef = useRef<{ acceptance: string[]; inspection: string[]; qualityShipping: string[] }>({ acceptance: [], inspection: [], qualityShipping: [] })
+  const demReadySetRef = useRef<Set<string>>(new Set())
+
+  // Keep a ref mirror of activeOrders to avoid stale closures inside tight loops
+  const activeOrdersRef = useRef(activeOrders)
+  useEffect(() => { activeOrdersRef.current = activeOrders }, [activeOrders])
+
+  // FCFS dispatcher data structures (aggregate mode)
+  type OpItem = { label: string; duration: number; display?: string; typeKey?: string }
+  type Bundle = { orderId: string; ops: OpItem[]; locked?: boolean }
+  const demQueueRef = useRef<Bundle[]>([])
+  const monQueueRef = useRef<Bundle[]>([])
+  const demActivesRef = useRef<Array<{ orderId: string; label: string; slotIdx: number; remaining: number; total: number }>>([])
+  const monActivesRef = useRef<Array<{ orderId: string; label: string; slotIdx: number; remaining: number; total: number }>>([])
+  const monBundlesMapRef = useRef<Record<string, OpItem[]>>({})
 
   // Load factory data
   useEffect(() => {
@@ -230,11 +449,9 @@ export function RealDataFactorySimulation() {
         const mainStations: SimulationStation[] = [
           { id: 'order-acceptance', name: 'Auftragsannahme', type: 'MAIN', phase: 'AUFTRAGSANNAHME', processingTime: 5, stochasticVariation: 0.2, currentOrder: null, waitingQueue: [], capacity: 1 },
           { id: 'inspection', name: 'Inspektion', type: 'MAIN', phase: 'INSPEKTION', processingTime: 15, stochasticVariation: 0.3, currentOrder: null, waitingQueue: [], capacity: 1 },
-          { id: 'demontage-waiting', name: 'Warteschlange Demontage', type: 'MAIN', phase: 'DEMONTAGE', processingTime: 2, stochasticVariation: 0.1, currentOrder: null, waitingQueue: [], capacity: 1 },
           { id: 'demontage', name: 'Demontage', type: 'MAIN', phase: 'DEMONTAGE', processingTime: 0, stochasticVariation: 0.25, currentOrder: null, waitingQueue: [], capacity: 1 },
           { id: 'reassembly', name: 'Re-Assembly', type: 'MAIN', phase: 'REASSEMBLY', processingTime: 0, stochasticVariation: 0.25, currentOrder: null, waitingQueue: [], capacity: 1 },
-          { id: 'quality', name: 'Qualitätsprüfung', type: 'MAIN', phase: 'QUALITAETSPRUEFUNG', processingTime: 20, stochasticVariation: 0.4, currentOrder: null, waitingQueue: [], capacity: 1 },
-          { id: 'shipping', name: 'Versand', type: 'MAIN', phase: 'VERSAND', processingTime: 10, stochasticVariation: 0.2, currentOrder: null, waitingQueue: [], capacity: 1 }
+          { id: 'quality-shipping', name: 'Qualitätsprüfung und Versand', type: 'MAIN', phase: 'QUALITAETSPRUEFUNG_VERSAND', processingTime: 30, stochasticVariation: 0.3, currentOrder: null, waitingQueue: [], capacity: 1 }
         ];
         
         // Filter Baugruppentypen to only include those that are actually used in the process graph
@@ -347,7 +564,7 @@ export function RealDataFactorySimulation() {
         });
         
         setActiveOrders(simulationOrders);
-        
+
         // Don't set simulation start time here - wait for user to press Start
         // setSimulationStartTime(new Date());
         
@@ -355,6 +572,153 @@ export function RealDataFactorySimulation() {
         setTimeout(() => {
           createFlowDiagram(mainStations, demontageSubStations, reassemblySubStations);
         }, 100);
+
+        // Build FCFS queues (aggregate mode)
+        try {
+          // Initialize phase slots based on used types
+          // Use station names instead of IDs for proper matching
+          initPhaseSlots(
+            demontageSubStations.map(s => normalizeOperationKey(s.name || s.baugruppentypId || '')),
+            reassemblySubStations.map(s => normalizeOperationKey(s.name || s.baugruppentypId || ''))
+          )
+          const makeOps = (steps: string[], which: 'DEM'|'MON'): OpItem[] => {
+            const ops: OpItem[] = []
+            const crossIdx = steps.indexOf('×')
+            const slice = which === 'DEM' ? (crossIdx >= 0 ? steps.slice(0, crossIdx) : steps) : (crossIdx >= 0 ? steps.slice(crossIdx + 1) : [])
+
+            const findStationForStep = (collection: SimulationStation[], step: string) => {
+              const normalizedStep = normalizeOperationKey(step)
+              return collection.find(station => {
+                const candidates = [
+                  station.name,
+                  station.name?.replace(/^Demontage\s+/i, '').replace(/^Montage\s+/i, ''),
+                  station.baugruppentypId,
+                  station.id
+                ].filter(Boolean) as string[]
+
+                return candidates.some(candidate => {
+                  const normalizedCandidate = normalizeOperationKey(candidate)
+                  return candidate === step || normalizedCandidate === normalizedStep
+                })
+              })
+            }
+
+            slice.forEach(step => {
+              if (!step || step === 'I' || step === 'Q' || step === '×') return
+
+              const station = which === 'DEM'
+                ? findStationForStep(demontageSubStations, step)
+                : findStationForStep(reassemblySubStations, step)
+
+              const durationFallback = which === 'DEM' ? 30 : 45
+              const baseDuration = station?.processingTime ?? durationFallback
+              const variation = station?.stochasticVariation ?? 0.3
+              // Apply stochastic variation
+              const randomFactor = (Math.random() - 0.5) * 2 // -1 to 1
+              const variationAmount = baseDuration * variation * randomFactor
+              const duration = Math.max(1, Math.round(baseDuration + variationAmount))
+
+              // Use station name for typeKey to match with slot specializations
+              const rawTypeKey =
+                station?.name ||
+                step
+              const typeKey = normalizeOperationKey(rawTypeKey)
+              const displayLabel = station?.name || step
+
+              ops.push({
+                label: displayLabel,
+                duration,
+                display: displayLabel,
+                typeKey
+              })
+            })
+
+            return ops
+          }
+
+          demQueueRef.current = []
+          monQueueRef.current = []
+          monBundlesMapRef.current = {}
+          demActivesRef.current = []
+          monActivesRef.current = []
+
+          const debugLogs: string[] = []
+          console.log('=== SIMULATION INIT START ===')
+          console.log('demontageSubStations:', demontageSubStations.length)
+          console.log('reassemblySubStations:', reassemblySubStations.length)
+
+          simulationOrders.forEach((simOrder: any) => {
+            // prefer selectedSequence from processSequences
+            let steps: string[] = []
+            try {
+              const ps = typeof simOrder.processSequences === 'string' ? JSON.parse(simOrder.processSequences) : simOrder.processSequences
+              const seqs = ps?.baugruppentypen?.sequences
+              if (Array.isArray(seqs) && seqs.length > 0) {
+                // RANDOMLY select one sequence instead of always taking the first
+                const randomIndex = Math.floor(Math.random() * seqs.length)
+                const pick = seqs[randomIndex]
+                steps = Array.isArray(pick?.steps) ? pick.steps.map((s:any)=>String(s)) : []
+                console.log(`📋 Order ${simOrder.kundeName}: Randomly selected sequence ${randomIndex + 1}/${seqs.length} (${pick.id || 'no-id'}) with steps: ${steps.join(',')}`)
+              }
+            } catch {}
+            if (steps.length === 0 && Array.isArray(simOrder.selectedSequence?.steps)) {
+              steps = simOrder.selectedSequence.steps.map((s:any)=>String(s))
+            }
+            // FALLBACK: If no steps, create a realistic sequence from available stations
+            const needsFallback = steps.length === 0 || (steps.length === 2 && steps[0] === 'I' && steps[1] === 'Q')
+            if (needsFallback) {
+              console.log(`🔧 FALLBACK for ${simOrder.kundeName}: demSubs=${demontageSubStations.length}, monSubs=${reassemblySubStations.length}`)
+              // Use actual baugruppen from the stations
+              const demSteps = demontageSubStations.slice(0, 3).map(s => s.baugruppentypId || s.name)
+              const monSteps = reassemblySubStations.slice(0, 3).map(s => s.baugruppentypId || s.name)
+              steps = ['I', ...demSteps, '×', ...monSteps, 'Q']
+              console.log(`🔧 Generated steps:`, steps)
+            }
+
+            // Ensure all sequences end with 'Q' (Quality-Shipping station)
+            if (steps.length > 0 && steps[steps.length - 1] !== 'Q') {
+              console.log(`⚠️ Sequence for ${simOrder.kundeName} missing 'Q', adding it: ${steps.join(',')}`)
+              steps.push('Q')
+            }
+
+            const demOps = makeOps(steps, 'DEM')
+            const monOps = makeOps(steps, 'MON')
+
+            // DEBUG: Log details to understand why demOps is empty
+            console.log(`📦 Order ${simOrder.id.slice(-4)} (${simOrder.kundeName}):`)
+            console.log('  Original steps:', steps)
+            console.log('  DemOps:', demOps)
+            console.log('  MonOps:', monOps)
+
+            const stepsStr = steps.length > 5 ? `${steps.slice(0,5).join(',')}...` : steps.join(',')
+            const demOpsStr = demOps.length > 0 ? demOps.map(o => o.label).join(', ') : 'NONE'
+            const fallbackFlag = needsFallback ? ' [FALLBACK]' : ''
+            debugLogs.push(`${simOrder.kundeName.slice(0,15)}${fallbackFlag}: steps=[${stepsStr}] → ${demOps.length} demOps`)
+
+            if (demOps.length > 0) demQueueRef.current.push({ orderId: simOrder.id, ops: demOps })
+            if (monOps.length > 0) {
+              monBundlesMapRef.current[simOrder.id] = monOps
+            }
+          })
+          setInitDebugLogs(debugLogs)
+
+          // Show alert with summary - AUSKOMMENTIERT
+          // const summary = `Simulation Init:\n- Orders: ${simulationOrders.length}\n- DemOps created: ${demQueueRef.current.length}\n- MonOps created: ${Object.keys(monBundlesMapRef.current).length}\n\nFirst 3 logs:\n${debugLogs.slice(0, 3).join('\n')}`
+          // console.log(summary)
+          // setTimeout(() => alert(summary), 500)
+
+          // Initialize main phase queues: all orders start at acceptance
+          mainQueuesRef.current = {
+            acceptance: simulationOrders.map((o:any) => o.id),
+            inspection: [],
+            qualityShipping: []
+          }
+          demReadySetRef.current = new Set()
+        } catch (e) {
+          const errorMsg = `FCFS queue build error: ${e instanceof Error ? e.message : String(e)}`
+          console.error(errorMsg, e)
+          setInitError(errorMsg)
+        }
       } else {
         toast.error(result.error || 'Fehler beim Laden der Simulationsdaten');
       }
@@ -396,14 +760,14 @@ export function RealDataFactorySimulation() {
       if (step === 'I') {
         // Inspection
         if (index === 0) {
-          processSequence.push('order-acceptance', 'inspection', 'demontage-waiting');
+          processSequence.push('order-acceptance', 'inspection');
         }
       } else if (step === '×') {
         // Quality check transition - this separates demontage from reassembly
         // No station added, just a marker in the sequence
       } else if (step === 'Q') {
-        // Quality and shipping
-        processSequence.push('quality', 'shipping');
+        // Quality and shipping combined
+        processSequence.push('quality-shipping');
       } else {
         // This is a component step - find corresponding station
         const isBeforeQuality = selectedSequence.steps.indexOf('×') > -1 && index < selectedSequence.steps.indexOf('×');
@@ -470,24 +834,9 @@ export function RealDataFactorySimulation() {
       }
     });
     
-    sequence.push('quality', 'shipping');
-    
-    // Add waiting station before disassembly operations
-    return addWaitingStationBeforeDisassembly(sequence);
-  };
+    sequence.push('quality-shipping');
 
-  // Add waiting list before entering disassembly
-  const addWaitingStationBeforeDisassembly = (sequence: string[]): string[] => {
-    const newSequence = [...sequence];
-    const inspectionIndex = sequence.indexOf('inspection');
-    const demontageIndex = sequence.findIndex(s => s.includes('demontage') && s !== 'demontage-waiting');
-    
-    if (inspectionIndex !== -1 && demontageIndex !== -1) {
-      // Insert waiting station between inspection and first disassembly
-      newSequence.splice(demontageIndex, 0, 'demontage-waiting');
-    }
-    
-    return newSequence;
+    return sequence;
   };
 
   // Keep old function for backward compatibility but mark as deprecated
@@ -517,68 +866,64 @@ export function RealDataFactorySimulation() {
   };
 
   const createFlowDiagram = (
-    mainStations: SimulationStation[], 
-    demontageSubStations: SimulationStation[], 
+    mainStations: SimulationStation[],
+    demontageSubStations: SimulationStation[],
     reassemblySubStations: SimulationStation[]
   ) => {
+    console.log('🎨 createFlowDiagram called with:', {
+      mainStations: mainStations.length,
+      demontageSubStations: demontageSubStations.length,
+      reassemblySubStations: reassemblySubStations.length
+    });
+
     const flowNodes: Node[] = [];
     const flowEdges: Edge[] = [];
-    
+
     // Calculate dynamic heights based on number of sub-stations (vertical layout)
     const demontageHeight = Math.max(350, 120 + demontageSubStations.length * 80 + 40);
     const reassemblyHeight = Math.max(350, 120 + reassemblySubStations.length * 80 + 40);
     
-    // Main stations as horizontal flow
-    mainStations.forEach((station, index) => {
+    // Equal spacing for all nodes
+    const SPACING = 280; // Consistent spacing between all elements
+    const Y = 100; // All nodes at same Y position (top-aligned)
+    const indexById: Record<string, number> = {
+      'order-acceptance': 0,
+      'inspection': 1,
+      'demontage-phase': 2,
+      'reassembly-phase': 3,
+      'quality-shipping': 4,
+    };
+    mainStations.forEach((station) => {
       const isParent = station.id === 'demontage' || station.id === 'reassembly';
-      const isDemontage = station.id === 'demontage';
-      const isReassembly = station.id === 'reassembly';
-      
-      let dynamicHeight = 80;
-      let title = station.name;
-      
-      if (isDemontage) {
-        dynamicHeight = demontageHeight;
-        title = ''; // Empty for floating title
-      } else if (isReassembly) {
-        dynamicHeight = reassemblyHeight;
-        title = ''; // Empty for floating title
-      }
-      
+      if (isParent) return;
+      const idx = indexById[station.id] ?? 0;
       flowNodes.push({
         id: station.id,
-        type: isParent ? 'group' : 'default',
-        position: { x: index * 320, y: 100 },
-        data: { 
+        type: 'default',
+        position: { x: idx * SPACING, y: Y },
+        data: {
           label: (
             <div className="text-center">
-              <div className="font-bold">{title}</div>
-              {!isParent && (
-                <>
-                  <div className="text-xs text-gray-500">Zeit: {station.processingTime} min (±{Math.round(station.stochasticVariation * 100)}%)</div>
-                  <div className="text-xs text-blue-500">Belegt: {station.currentOrder ? '1' : '0'}</div>
-                </>
-              )}
+              <div className="font-bold">{station.name}</div>
+              <div className="text-xs text-gray-500">Zeit: {station.processingTime} min (±{Math.round(station.stochasticVariation * 100)}%)</div>
             </div>
           )
         },
         style: {
-          background: isParent ? '#f0f0f0' : '#ffffff',
+          background: '#ffffff',
           border: '2px solid #1e40af',
           borderRadius: '8px',
-          padding: isParent ? '20px' : '10px',
-          width: isParent ? 220 : 180,
-          height: dynamicHeight
+          padding: '10px',
+          width: 180,
+          height: 80
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left
       });
-      
-      // Skip automatic edge creation here - we'll create them manually below
     });
     
-    // Add sub-stations for Demontage (process graph style with attractive layout)
-    demontageSubStations.forEach((subStation, index) => {
+    // Add sub-stations for Demontage (only if not aggregated)
+    if (!aggregateView) demontageSubStations.forEach((subStation, index) => {
       const currentOrderName = subStation.currentOrder?.kundeName || 'Frei';
       const waitingCount = subStation.waitingQueue?.length || 0;
       const isOccupied = subStation.currentOrder !== null;
@@ -627,8 +972,8 @@ export function RealDataFactorySimulation() {
       });
     });
     
-    // Add sub-stations for Re-Assembly (process graph style with attractive layout)
-    reassemblySubStations.forEach((subStation, index) => {
+    // Add sub-stations for Re-Assembly (only if not aggregated)
+    if (!aggregateView) reassemblySubStations.forEach((subStation, index) => {
       const currentOrderName = subStation.currentOrder?.kundeName || 'Frei';
       const waitingCount = subStation.waitingQueue?.length || 0;
       const isOccupied = subStation.currentOrder !== null;
@@ -677,68 +1022,37 @@ export function RealDataFactorySimulation() {
       });
     });
 
-    // Add floating title nodes for demontage and reassembly areas
-    if (demontageSubStations.length > 0) {
-      const demontageMainNode = flowNodes.find(n => n.id === 'demontage');
-      if (demontageMainNode) {
-        flowNodes.push({
-          id: 'demontage-title',
-          type: 'default',
-          position: { 
-            x: demontageMainNode.position.x + 50, 
-            y: demontageMainNode.position.y - 40 
-          },
-          data: {
-            label: (
-              <div className="text-center bg-blue-600 text-white px-3 py-1 rounded-md font-bold text-sm shadow-lg">
-                Demontage-Bereich
-              </div>
-            )
-          },
-          style: {
-            background: 'transparent',
-            border: 'none',
-            width: 120,
-            height: 30
-          },
-          sourcePosition: Position.Right,
-          targetPosition: Position.Left,
-          draggable: false,
-          selectable: false
-        });
-      }
-    }
+    // Replace area titles with custom phase nodes using live stats
+    // Place phase nodes using consistent spacing (same as main stations)
+    flowNodes.push({
+      id: 'demontage-phase',
+      type: 'phaseNode',
+      position: { x: indexById['demontage-phase'] * SPACING, y: Y },
+      data: {
+        title: 'Demontage',
+          queue: demQueueRef.current.length || 0,
+          totalSlots: demSlotsRef.current.length || 0,
+          busySlots: (demSlotsRef.current.filter(s => s.busy).length) || 0,
+          slots: demSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+        },
+        draggable: false,
+        selectable: false
+      } as any)
 
-    if (reassemblySubStations.length > 0) {
-      const reassemblyMainNode = flowNodes.find(n => n.id === 'reassembly');
-      if (reassemblyMainNode) {
-        flowNodes.push({
-          id: 'reassembly-title',
-          type: 'default',
-          position: { 
-            x: reassemblyMainNode.position.x + 50, 
-            y: reassemblyMainNode.position.y - 40 
-          },
-          data: {
-            label: (
-              <div className="text-center bg-green-600 text-white px-3 py-1 rounded-md font-bold text-sm shadow-lg">
-                Re-Assembly-Bereich
-              </div>
-            )
-          },
-          style: {
-            background: 'transparent',
-            border: 'none',
-            width: 140,
-            height: 30
-          },
-          sourcePosition: Position.Right,
-          targetPosition: Position.Left,
-          draggable: false,
-          selectable: false
-        });
-      }
-    }
+    flowNodes.push({
+      id: 'reassembly-phase',
+      type: 'phaseNode',
+      position: { x: indexById['reassembly-phase'] * SPACING, y: Y },
+      data: {
+        title: 'Montage',
+        queue: monQueueRef.current.length || 0,
+        totalSlots: monSlotsRef.current.length || 0,
+        busySlots: (monSlotsRef.current.filter(s => s.busy).length) || 0,
+        slots: monSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+      },
+      draggable: false,
+      selectable: false
+    } as any)
     
     // Connect all main stations with proper flow - complete process chain
     // Create connections between all main process boxes
@@ -750,7 +1064,7 @@ export function RealDataFactorySimulation() {
     console.log('Existing node IDs:', existingNodeIds);
     
     // Check if required nodes exist before creating edges
-    const requiredIds = ['order-acceptance', 'inspection', 'demontage-waiting', 'demontage', 'reassembly', 'quality', 'shipping'];
+    const requiredIds = ['order-acceptance', 'inspection', 'demontage-phase', 'reassembly-phase', 'quality-shipping'];
     const missingIds = requiredIds.filter(id => !existingNodeIds.includes(id));
     if (missingIds.length > 0) {
       console.error('Missing node IDs for connections:', missingIds);
@@ -759,8 +1073,7 @@ export function RealDataFactorySimulation() {
     // Add scheduling squares (decorative, not affecting flow) - positioned in the process path
     const orderAcceptanceNode = flowNodes.find(n => n.id === 'order-acceptance');
     const inspectionNode = flowNodes.find(n => n.id === 'inspection');
-    const demontageWaitingNode = flowNodes.find(n => n.id === 'demontage-waiting');
-    
+
     if (orderAcceptanceNode) {
       // 1. Circle connector between start and Auftragsannahme
       flowNodes.push({
@@ -807,10 +1120,12 @@ export function RealDataFactorySimulation() {
         selectable: false
       });
     }
-      
-    if (inspectionNode && demontageWaitingNode) {
-      // 3. Circle connector between Inspektion and Demontage Waiting
-      const midX = (inspectionNode.position.x + 180 + demontageWaitingNode.position.x) / 2 - 15; // Center between stations
+
+    if (inspectionNode) {
+      // 3. Circle connector between Inspektion and Demontage Phase
+      // Position circle-3 between inspection and demontage-phase
+      const demontagePhaseX = indexById['demontage-phase'] * SPACING; // demontage-phase position
+      const midX = (inspectionNode.position.x + 180 + demontagePhaseX) / 2 - 15; // Center between stations
       flowNodes.push({
         id: 'circle-3',
         type: 'default',
@@ -839,14 +1154,9 @@ export function RealDataFactorySimulation() {
       { id: 'order-acceptance-circle-2', source: 'order-acceptance', target: 'circle-2' },
       { id: 'circle-2-inspection', source: 'circle-2', target: 'inspection' },
       { id: 'inspection-circle-3', source: 'inspection', target: 'circle-3' },
-      { id: 'circle-3-demontage-waiting', source: 'circle-3', target: 'demontage-waiting' },
-      { id: 'demontage-waiting-demontage-title', source: 'demontage-waiting', target: 'demontage-title' },
-      { id: 'demontage-title-demontage', source: 'demontage-title', target: 'demontage' },
-      { id: 'demontage-reassembly', source: 'demontage', target: 'reassembly', animated: true },
-      { id: 'demontage-title-reassembly-title', source: 'demontage-title', target: 'reassembly-title', animated: true },
-      { id: 'reassembly-reassembly-title', source: 'reassembly', target: 'reassembly-title', animated: true },
-      { id: 'reassembly-title-quality', source: 'reassembly-title', target: 'quality' },
-      { id: 'quality-shipping', source: 'quality', target: 'shipping' }
+      { id: 'circle-3-demontage-phase', source: 'circle-3', target: 'demontage-phase' },
+      { id: 'demontage-phase-reassembly-phase', source: 'demontage-phase', target: 'reassembly-phase', animated: true },
+      { id: 'reassembly-phase-quality-shipping', source: 'reassembly-phase', target: 'quality-shipping' }
     ];
 
     // Get all available node IDs for validation
@@ -874,30 +1184,42 @@ export function RealDataFactorySimulation() {
       }
     });
     
-    
+
     console.log(`🎯 Final result: ${flowEdges.length} connections created for ${flowNodes.length} nodes`);
-    
+    console.log('📊 Nodes to set:', flowNodes.map(n => ({ id: n.id, type: n.type, position: n.position })));
+    console.log('🔗 Edges to set:', flowEdges.map(e => ({ id: e.id, source: e.source, target: e.target })));
+
     setNodes(flowNodes);
     setEdges(flowEdges);
+
+    console.log('✅ setNodes and setEdges called');
   };
 
   // Simulation engine - now handled in context, but we still need to process orders
   useEffect(() => {
     if (!isRunning) return;
-    
+
+    lastRealTimeRef.current = Date.now();
+
     const interval = setInterval(() => {
       const now = Date.now();
-      const realTimeDelta = now - lastRealTime;
-      const simulationTimeDelta = realTimeDelta * speed;
-      
-      setLastRealTime(now);
-      
-      // Process orders through stations
-      processOrders(simulationTimeDelta / 60000); // Convert to minutes
-    }, 100); // Update every 100ms
-    
+      const realTimeDelta = now - lastRealTimeRef.current;
+      lastRealTimeRef.current = now;
+
+      if (realTimeDelta <= 0) {
+        return;
+      }
+
+      const deltaMinutes = (realTimeDelta / 1000) * speed;
+      if (deltaMinutes <= 0) {
+        return;
+      }
+
+      processOrders(deltaMinutes);
+    }, 100);
+
     return () => clearInterval(interval);
-  }, [isRunning, speed, lastRealTime]);
+  }, [isRunning, speed]);
 
   const calculateStochasticProcessingTime = (baseTime: number, variation: number): number => {
     // Apply stochastic variation using normal distribution approximation
@@ -935,40 +1257,398 @@ export function RealDataFactorySimulation() {
       const updatedOrders: SimulationOrder[] = [];
       const waitingOrdersList: SimulationOrder[] = [];
       
+      // Aggregate dispatcher mode (FCFS sequential per phase)
+      if (aggregateView) {
+        const queueQualityPhase = (orderId: string) => {
+          // Note: demReadySetRef cleanup is now done in the phase completion logic
+          const alreadyQueued = mainQueuesRef.current.qualityShipping.includes(orderId);
+          const activeAtQuality = mainActiveRef.current['quality-shipping']?.orderId === orderId;
+          if (!alreadyQueued && !activeAtQuality) {
+            mainQueuesRef.current.qualityShipping.push(orderId);
+          }
+          setActiveOrders(prev =>
+            prev.map(o =>
+              o.id === orderId
+                ? { ...o, currentStation: 'quality-shipping', isWaiting: true, progress: 0 }
+                : o
+            )
+          );
+        };
+
+        const markWaitingForReassembly = (orderId: string) => {
+          setActiveOrders(prev =>
+            prev.map(o =>
+              o.id === orderId
+                ? { ...o, currentStation: 'reassembly', isWaiting: true, progress: 0 }
+                : o
+            )
+          );
+        };
+
+        // Keep acceptance queue scoped to orders that are actually waiting for this phase
+        mainQueuesRef.current.acceptance = mainQueuesRef.current.acceptance.filter(orderId => {
+          const order = activeOrdersRef.current.find(o => o.id === orderId)
+          return order && !order.completedAt && order.currentStation === 'order-acceptance'
+        })
+        activeOrdersRef.current.forEach(order => {
+          if (order.completedAt) return
+          if (order.currentStation !== 'order-acceptance') return
+          if (mainActiveRef.current['order-acceptance']?.orderId === order.id) return
+          if (!mainQueuesRef.current.acceptance.includes(order.id)) {
+            mainQueuesRef.current.acceptance.push(order.id)
+          }
+        })
+        // Capacity=1 for main phases using active tracker per station
+        const processMainStation = (stationId: string) => {
+          const station = updatedStations.find(s => s.id === stationId)
+          if (!station) return
+          const expected = station.processingTime || 1
+          const active = mainActiveRef.current[stationId]
+
+          if (active) {
+            // progress active order
+            active.remaining = Math.max(0, active.remaining - deltaMinutes)
+            setActiveOrders(prev => prev.map(o => {
+              if (o.id !== active.orderId) return o
+              const sd = { ...(o.stationDurations || {}) }
+              const e = sd[stationId] || {}
+              sd[stationId] = { ...e, expected, actual: expected, startTime: e.startTime || new Date(), completed: active.remaining <= 0 }
+              return { ...o, currentStation: stationId, progress: Math.max(0, (active.total - active.remaining)), stationDurations: sd }
+            }))
+            // reflect in flow node (occupancy)
+            station.currentOrder = activeOrders.find(o => o.id === active.orderId) as any
+            const waiters = activeOrders.filter(o => o.currentStation === stationId && o.id !== active.orderId)
+            station.waitingQueue = waiters as any
+            if (active.remaining <= 0) {
+              // finished
+              const finishedOrderId = active.orderId
+              mainActiveRef.current[stationId] = null
+              // Gantt END
+              const phaseLbl = stationId === 'order-acceptance' ? 'ACCEPTANCE' : stationId === 'inspection' ? 'INSPECTION' : stationId === 'quality-shipping' ? 'QA_SHIPPING' : stationId.toUpperCase()
+              pushEvent(`${phaseLbl}:${phaseLbl}_END`, finishedOrderId, null)
+              // advance order to next logical station
+              const enqueueUnique = (queue: string[], orderId: string) => {
+                if (!queue.includes(orderId)) {
+                  queue.push(orderId)
+                }
+              }
+
+              setActiveOrders(prev => {
+                let updated: SimulationOrder[];
+
+                // Filter out completed orders from quality-shipping
+                if (stationId === 'quality-shipping') {
+                  updated = prev.filter(o => o.id !== finishedOrderId)
+                } else {
+                  updated = prev.map(o => {
+                    if (o.id !== finishedOrderId) return o
+                    if (stationId === 'order-acceptance') {
+                      enqueueUnique(mainQueuesRef.current.inspection, finishedOrderId)
+                      return { ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }
+                    }
+                    if (stationId === 'inspection') {
+                      demReadySetRef.current.add(finishedOrderId)
+                      return { ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }
+                    }
+                    return { ...o }
+                  })
+                }
+
+                // Immediately update the ref to prevent stale reads in the same tick
+                activeOrdersRef.current = updated
+                return updated
+              })
+              // quality-shipping completion to KPI
+              if (stationId === 'quality-shipping') {
+              const ord = activeOrdersRef.current.find(o => o.id === finishedOrderId)
+                if (ord) {
+                  const done = { ...ord, completedAt: new Date(), schedulingAlgorithm: currentSchedulingAlgorithm }
+                  newCompletedOrders.push(done as any)
+                  addCompletedOrder(done as any)
+                }
+              }
+            }
+            return
+          }
+
+          // find next order from queue
+          const q = stationId === 'order-acceptance' ? mainQueuesRef.current.acceptance
+                    : stationId === 'inspection' ? mainQueuesRef.current.inspection
+                    : stationId === 'quality-shipping' ? mainQueuesRef.current.qualityShipping : []
+          const nextId = q.shift()
+          if (nextId) {
+            const next = activeOrdersRef.current.find(o => o.id === nextId)
+            if (!next) return
+            // initialize and hold capacity
+            mainActiveRef.current[stationId] = { orderId: next.id, remaining: expected, total: expected }
+            // ensure stationDurations entry exists
+            setActiveOrders(prev => prev.map(o => {
+              if (o.id !== next.id) return o
+              const sd = { ...(o.stationDurations || {}) }
+              sd[stationId] = sd[stationId] || { expected, actual: expected, startTime: new Date(), completed: false }
+              return { ...o, currentStation: stationId, progress: 0, stationDurations: sd }
+            }))
+            // reflect occupancy in flow node
+            station.currentOrder = next as any
+            station.waitingQueue = [] as any
+            // Gantt START
+            const phaseLbl = stationId === 'order-acceptance' ? 'ACCEPTANCE' : stationId === 'inspection' ? 'INSPECTION' : stationId === 'quality-shipping' ? 'QA_SHIPPING' : stationId.toUpperCase()
+            pushEvent(`${phaseLbl}:${phaseLbl}_START`, next.id, null)
+          }
+        }
+
+        // process main phases sequentially by station
+        ;['order-acceptance','inspection','quality-shipping'].forEach(processMainStation)
+
+        const nowMin = getSimMinutes()
+        // helper to update main nodes' queues count
+        const setPhaseQueueLen = (phaseId: 'demontage'|'reassembly', len: number) => {
+          const node = updatedStations.find(s => s.id === phaseId)
+          if (node) node.waitingQueue = Array.from({length: Math.max(0,len)}, ()=>({}))
+        }
+
+        const tickPhase = (phase: 'DEM'|'MON') => {
+          const queueRef = phase === 'DEM' ? demQueueRef : monQueueRef
+          const activesRef = phase === 'DEM' ? demActivesRef : monActivesRef
+          const mainId = phase === 'DEM' ? 'demontage' : 'reassembly'
+
+          // DEBUG: Log tickPhase calls
+          if (phase === 'DEM') {
+            const msg = `🔄 tickPhase ${phase} @t=${getSimMinutes()} queue=${queueRef.current.length} active=${activesRef.current.length} startTimeRef=${simulationStartTimeRef.current ? 'SET' : 'NULL'}`
+            console.log(msg)
+            dispatcherLogsRef.current.push(msg)
+            if (dispatcherLogsRef.current.length > 50) dispatcherLogsRef.current.shift()
+          }
+
+          // Progress and sync UI for all actives
+          activesRef.current = activesRef.current.map(a => ({ ...a, remaining: Math.max(0, a.remaining - deltaMinutes) }))
+          const mainStation = updatedStations.find(s => s.id === mainId)
+          activesRef.current.forEach((a, idx) => {
+            const progress = Math.max(0, a.total - a.remaining)
+            setActiveOrders(prev => prev.map(o => {
+              if (o.id !== a.orderId) return o
+              const sd = { ...(o.stationDurations || {}) }
+              const e = sd[mainId] || {}
+              sd[mainId] = { ...e, expected: a.total, actual: a.total, startTime: e.startTime || new Date(), completed: a.remaining <= 0 }
+              return { ...o, currentStation: mainId, progress, stationDurations: sd, isWaiting: false }
+            }))
+            if (idx === 0 && mainStation) {
+              mainStation.currentOrder = activeOrdersRef.current.find(o => o.id === a.orderId) as any
+            }
+          })
+
+          // Complete finished actives
+          const finished = activesRef.current.filter(a => a.remaining <= 0)
+          if (finished.length) {
+            finished.forEach(a => {
+              pushEvent(`${phase === 'DEM' ? 'DEMONTAGE' : 'MONTAGE'}:${a.label}_END`, a.orderId, a.slotIdx)
+              releaseSlot(phase === 'DEM' ? 'DEMONTAGE' : 'REASSEMBLY', a.slotIdx)
+              delete orderPhaseSlotMapRef.current[`${a.orderId}:${phase === 'DEM' ? 'demontage-' : 'reassembly-'}`]
+              const idx = queueRef.current.findIndex(b => b.orderId === a.orderId)
+              if (idx >= 0) {
+                const b = queueRef.current[idx]
+                if (b.ops[0]?.label === a.label) b.ops.shift()
+                // Only remove from queue and move to next phase when ALL ops are done
+                if (b.ops.length === 0) {
+                  queueRef.current.splice(idx, 1)
+                  if (phase === 'DEM') {
+                    // Remove from demReady only when ALL demOps are done
+                    demReadySetRef.current.delete(a.orderId)
+                    const monOps = monBundlesMapRef.current[a.orderId] || []
+                    if (monOps.length) {
+                      const alreadyQueued = monQueueRef.current.some(bundle => bundle.orderId === a.orderId)
+                      if (!alreadyQueued) {
+                        monQueueRef.current.push({ orderId: a.orderId, ops: [...monOps] })
+                        markWaitingForReassembly(a.orderId)
+                      }
+                    } else {
+                      queueQualityPhase(a.orderId)
+                    }
+                    delete monBundlesMapRef.current[a.orderId]
+                  } else {
+                    queueQualityPhase(a.orderId)
+                    delete monBundlesMapRef.current[a.orderId]
+                  }
+                }
+              }
+            })
+            activesRef.current = activesRef.current.filter(a => a.remaining > 0)
+          }
+
+          // Start new ops up to free slots by scanning queue
+          for (let i = 0; i < queueRef.current.length; i++) {
+            const b = queueRef.current[i]
+            if (!b.ops || b.ops.length === 0) continue
+            // DEM gating: only start orders that passed inspection
+            if (phase === 'DEM' && !demReadySetRef.current.has(b.orderId)) {
+              const msg = `⚠️ skip ${b.orderId.slice(-4)} - not in demReadySet`
+              console.log(msg)
+              dispatcherLogsRef.current.push(msg)
+              continue
+            }
+            const nxt = b.ops[0]
+            const desiredKey = nxt.typeKey || normalizeOperationKey(nxt.label)
+            const msg1 = `🔍 try ${b.orderId.slice(-4)} op=${nxt.label} key=${desiredKey} @t=${getSimMinutes()}`
+            console.log(msg1)
+            dispatcherLogsRef.current.push(msg1)
+            if (dispatcherLogsRef.current.length > 50) dispatcherLogsRef.current.shift()
+            const slotIdx = pickSlot(
+              phase === 'DEM' ? 'DEMONTAGE' : 'REASSEMBLY',
+              desiredKey
+            )
+            const msg2 = `🎰 pickSlot result: ${slotIdx}`
+            console.log(msg2)
+            dispatcherLogsRef.current.push(msg2)
+            if (slotIdx >= 0) {
+              const displayLabel = nxt.display || nxt.label
+
+              // IMPORTANT: Release previous slot if this order already had one in this phase
+              const phaseKey = `${b.orderId}:${phase === 'DEM' ? 'demontage-' : 'reassembly-'}`
+              const previousSlot = orderPhaseSlotMapRef.current[phaseKey]
+              if (previousSlot !== undefined && previousSlot !== slotIdx) {
+                console.log(`🔓 Releasing previous slot ${previousSlot} for order ${b.orderId.slice(-4)} before assigning new slot ${slotIdx}`)
+                releaseSlot(phase === 'DEM' ? 'DEMONTAGE' : 'REASSEMBLY', previousSlot)
+              }
+
+              pushEvent(
+                `${phase === 'DEM' ? 'DEMONTAGE' : 'MONTAGE'}:${displayLabel}_START`,
+                b.orderId,
+                slotIdx
+              )
+              activesRef.current.push({
+                orderId: b.orderId,
+                label: displayLabel,
+                slotIdx,
+                remaining: nxt.duration,
+                total: nxt.duration,
+              })
+              setActiveOrders(prev => prev.map(o => {
+                if (o.id !== b.orderId) return o
+                const sd = { ...(o.stationDurations || {}) }
+                sd[mainId] = { expected: nxt.duration, actual: nxt.duration, startTime: new Date(), completed: false }
+                return { ...o, currentStation: mainId, progress: 0, stationDurations: sd, isWaiting: false }
+              }))
+              orderPhaseSlotMapRef.current[phaseKey] = slotIdx
+              if (mainStation) {
+                mainStation.currentOrder = activeOrdersRef.current.find(o => o.id === b.orderId) as any
+              }
+            }
+          }
+
+          setPhaseQueueLen(mainId as any, queueRef.current.length)
+
+          if (mainStation) {
+            if (activesRef.current.length === 0) {
+              mainStation.currentOrder = null
+            } else {
+              const activeOrderId = activesRef.current[0]?.orderId
+              const activeOrder = activeOrdersRef.current.find(o => o.id === activeOrderId)
+              mainStation.currentOrder = activeOrder ? (activeOrder as any) : null
+            }
+          }
+        }
+
+        const msg0 = `⏰ About to call tickPhase @t=${getSimMinutes()} demQueue=${demQueueRef.current.length}`
+        console.log(msg0)
+        dispatcherLogsRef.current.push(msg0)
+        if (dispatcherLogsRef.current.length > 50) dispatcherLogsRef.current.shift()
+
+        tickPhase('DEM')
+        tickPhase('MON')
+
+        // Update phase node live stats (deferred to avoid setState during render)
+        setTimeout(() => {
+          try {
+            setNodes(prev => prev.map(n => {
+              if (n.id === 'demontage-phase') {
+                return {
+                  ...n,
+                  data: {
+                    ...(n.data || {}),
+                    queue: demQueueRef.current.length || 0,
+                    totalSlots: demSlotsRef.current.length || 0,
+                    busySlots: (demSlotsRef.current.filter(s => s.busy).length) || 0,
+                    slots: demSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+                  }
+                } as any
+              }
+              if (n.id === 'reassembly-phase') {
+                return {
+                  ...n,
+                  data: {
+                    ...(n.data || {}),
+                    queue: monQueueRef.current.length || 0,
+                    totalSlots: monSlotsRef.current.length || 0,
+                    busySlots: (monSlotsRef.current.filter(s => s.busy).length) || 0,
+                    slots: monSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+                  }
+                } as any
+              }
+              return n
+            }))
+          } catch {}
+        }, 0)
+
+        // Track waiting times for orders in queue (aggregateView mode)
+        activeOrdersRef.current.forEach(order => {
+          if (order.isWaiting && !order.completedAt) {
+            const stationId = order.currentStation
+            if (!order.stationDurations[stationId]) {
+              order.stationDurations[stationId] = {
+                expected: 0,
+                waitingTime: 0,
+                startTime: new Date(),
+                completed: false
+              }
+            }
+            // Increment waiting time
+            order.stationDurations[stationId].waitingTime =
+              (order.stationDurations[stationId].waitingTime || 0) + deltaMinutes
+          }
+        })
+
+        // Sync active orders list (drop completed)
+        try {
+          setActiveOrders(prev => prev.filter(o => !o.completedAt))
+        } catch {}
+
+        // Return without station-level assignment
+        return updatedStations
+      }
+      
+      // Phase utilization snapshot
+      const getActivePhaseCount = (phasePrefix: 'demontage-' | 'reassembly-') =>
+        updatedStations.filter(s => s.id.startsWith(phasePrefix) && s.currentOrder).length
+      
       // First, assign unassigned orders to available stations
       activeOrders.forEach(order => {
         const currentStationData = updatedStations.find(s => s.id === order.currentStation);
-        
-        // Debug logging for demontage-waiting assignment
-        if (order.currentStation === 'demontage-waiting' && currentStationData) {
-          console.log(`Assigning ${order.kundeName} to demontage-waiting:`, {
-            stationHasCurrentOrder: !!currentStationData.currentOrder,
-            orderIsWaiting: order.isWaiting,
-            willAssign: !currentStationData.currentOrder && !order.isWaiting
-          });
-        }
-        
+
         // If order is at a station but not assigned to the station, assign it (unless station is busy)
         if (currentStationData && !currentStationData.currentOrder && !order.isWaiting) {
-          currentStationData.currentOrder = order;
-          console.log(`Assigned ${order.kundeName} to ${currentStationData.name}`);
+          const isDemSub = currentStationData.id.startsWith('demontage-')
+          const isReaSub = currentStationData.id.startsWith('reassembly-')
+          const demFull = isDemSub && getActivePhaseCount('demontage-') >= demSlots
+          const monFull = isReaSub && getActivePhaseCount('reassembly-') >= monSlots
+          if (demFull || monFull) {
+            // Gate by phase capacity: keep in queue
+            currentStationData.waitingQueue = currentStationData.waitingQueue || []
+            if (!currentStationData.waitingQueue.find((o: any) => o.id === order.id)) {
+              currentStationData.waitingQueue.push(order)
+            }
+            order.isWaiting = true
+            console.log(`Capacity gating: queuing ${order.kundeName} at ${currentStationData.id}`)
+          } else {
+            currentStationData.currentOrder = order;
+            console.log(`Assigned ${order.kundeName} to ${currentStationData.name}`);
+          }
         }
       });
       
       // Process orders currently in stations
       activeOrders.forEach(order => {
         const currentStationData = updatedStations.find(s => s.id === order.currentStation);
-        
-        // Debug logging for demontage-waiting
-        if (order.currentStation === 'demontage-waiting') {
-          console.log(`Order ${order.kundeName} at demontage-waiting:`, {
-            isAssignedToStation: currentStationData?.currentOrder?.id === order.id,
-            progress: order.progress,
-            isWaiting: order.isWaiting,
-            nextStation: order.processSequence[order.processSequence.indexOf(order.currentStation) + 1]
-          });
-        }
-        
+
         if (currentStationData && currentStationData.currentOrder?.id === order.id) {
           // Initialize station duration tracking if not already done
           if (!order.stationDurations[order.currentStation]) {
@@ -985,6 +1665,18 @@ export function RealDataFactorySimulation() {
             order.stationStartTime = new Date();
             order.progress = 0;
             order.isWaiting = false;
+            // Log START for sub-ops
+            if (order.currentStation.startsWith('demontage-')) {
+              const lbl = currentStationData.name?.replace('Demontage ', '') || order.currentStation
+              const key = `${order.id}:demontage-`
+              const slotIdx = orderPhaseSlotMapRef.current[key]
+              pushEvent(`DEMONTAGE:${lbl}_START`, order.id, slotIdx ?? null)
+            } else if (order.currentStation.startsWith('reassembly-')) {
+              const lbl = currentStationData.name?.replace('Montage ', '') || order.currentStation
+              const key = `${order.id}:reassembly-`
+              const slotIdx = orderPhaseSlotMapRef.current[key]
+              pushEvent(`MONTAGE:${lbl}_START`, order.id, slotIdx ?? null)
+            }
           }
           
           const prevProgress = order.progress;
@@ -995,12 +1687,7 @@ export function RealDataFactorySimulation() {
           if (prevProgress + deltaMinutes > requiredTime && order.progress === requiredTime) {
             console.log(`Progress capped for ${order.kundeName} at ${order.currentStation}: was going to be ${(prevProgress + deltaMinutes).toFixed(2)}, capped at ${requiredTime.toFixed(2)}`);
           }
-          
-          // Debug logging for demontage-waiting progress
-          if (order.currentStation === 'demontage-waiting') {
-            console.log(`${order.kundeName} demontage-waiting progress: ${order.progress.toFixed(2)}/${requiredTime.toFixed(2)}`);
-          }
-          
+
           if (order.progress >= requiredTime) {
             // Mark station duration as completed
             order.stationDurations[order.currentStation].completed = true;
@@ -1019,79 +1706,157 @@ export function RealDataFactorySimulation() {
                 new Date()
               );
             }
+            // Log END event for sub-ops
+            if (order.currentStation.startsWith('demontage-')) {
+              const lbl = currentStationData.name?.replace('Demontage ', '') || order.currentStation
+              const key = `${order.id}:demontage-`
+              const slotIdx = orderPhaseSlotMapRef.current[key]
+              pushEvent(`DEMONTAGE:${lbl}_END`, order.id, slotIdx ?? null)
+            } else if (order.currentStation.startsWith('reassembly-')) {
+              const lbl = currentStationData.name?.replace('Montage ', '') || order.currentStation
+              const key = `${order.id}:reassembly-`
+              const slotIdx = orderPhaseSlotMapRef.current[key]
+              pushEvent(`MONTAGE:${lbl}_END`, order.id, slotIdx ?? null)
+            }
             
             // Free current station
             currentStationData.currentOrder = null;
+            // Release slot if this was a demontage/reassembly sub-station
+            if (order.currentStation.startsWith('demontage-')) {
+              const key = `${order.id}:demontage-`
+              const idx = orderPhaseSlotMapRef.current[key]
+              if (idx !== undefined) {
+                releaseSlot('DEMONTAGE', idx)
+                delete orderPhaseSlotMapRef.current[key]
+              }
+            } else if (order.currentStation.startsWith('reassembly-')) {
+              const key = `${order.id}:reassembly-`
+              const idx = orderPhaseSlotMapRef.current[key]
+              if (idx !== undefined) {
+                releaseSlot('REASSEMBLY', idx)
+                delete orderPhaseSlotMapRef.current[key]
+              }
+            }
             
             // Try to assign next order from waiting queue to current station using selected scheduling algorithm
             if (currentStationData.waitingQueue.length > 0) {
-              const schedulingStrategy = schedulingStrategies[currentSchedulingAlgorithm as SchedulingAlgorithm];
-              const nextOrder = schedulingStrategy.selectNext(currentStationData.waitingQueue, simulationTime);
-              
-              if (nextOrder) {
-                // Remove the selected order from the waiting queue
-                const orderIndex = currentStationData.waitingQueue.findIndex(o => o.id === nextOrder.id);
-                if (orderIndex >= 0) {
-                  currentStationData.waitingQueue.splice(orderIndex, 1);
-                  currentStationData.currentOrder = nextOrder;
-                  nextOrder.isWaiting = false;
-                  
-                  // CRITICAL FIX: Initialize proper stationDurations when order starts processing
-                  if (!nextOrder.stationDurations[currentStationData.id] || !nextOrder.stationDurations[currentStationData.id].actual) {
-                    const stochasticTime = calculateStochasticProcessingTime(
-                      currentStationData.processingTime, 
-                      currentStationData.stochasticVariation
-                    );
-                    nextOrder.stationDurations[currentStationData.id] = {
-                      ...nextOrder.stationDurations[currentStationData.id], // Keep existing data like waitingTime
-                      expected: currentStationData.processingTime,
-                      actual: stochasticTime,
-                      startTime: new Date(),
-                      completed: false
-                    };
-                    nextOrder.progress = 0; // Reset progress for actual processing
-                    console.log(`Fixed stationDurations for ${nextOrder.kundeName} at ${currentStationData.id}: actual=${stochasticTime}min`);
+              const isDemSub = currentStationData.id.startsWith('demontage-')
+              const isReaSub = currentStationData.id.startsWith('reassembly-')
+              const isMainStation = currentStationData.type === 'MAIN'
+              const demFull = isDemSub && getActivePhaseCount('demontage-') >= demSlots
+              const monFull = isReaSub && getActivePhaseCount('reassembly-') >= monSlots
+              console.log(`🔍 Station ${currentStationData.id} has ${currentStationData.waitingQueue.length} waiting orders, isMainStation=${isMainStation}, demFull=${demFull}, monFull=${monFull}`);
+              // For main stations, always try to dispatch if the station is free
+              // For sub-stations, only dispatch if phase capacity is not full
+              if (isMainStation || !(demFull || monFull)) {
+                const schedulingStrategy = schedulingStrategies[currentSchedulingAlgorithm as SchedulingAlgorithm];
+                const nextOrder = schedulingStrategy.selectNext(currentStationData.waitingQueue, simulationTime);
+                
+                if (nextOrder) {
+                  // Remove the selected order from the waiting queue
+                  const orderIndex = currentStationData.waitingQueue.findIndex(o => o.id === nextOrder.id);
+                  if (orderIndex >= 0) {
+                    currentStationData.waitingQueue.splice(orderIndex, 1);
+                    // Check slot availability for sub stations
+                    const isDemSub2 = currentStationData.id.startsWith('demontage-')
+                    const isReaSub2 = currentStationData.id.startsWith('reassembly-')
+                    const isMainStation2 = currentStationData.type === 'MAIN'
+                    const opLabel2 = currentStationData.name?.replace('Demontage ', '')?.replace('Montage ', '') || currentStationData.id
+                    let pickedSlot2 = -1
+                    if (isDemSub2) pickedSlot2 = pickSlot('DEMONTAGE', opLabel2)
+                    if (isReaSub2) pickedSlot2 = pickSlot('REASSEMBLY', opLabel2)
+                    // Main stations don't need slots, sub-stations need slots
+                    if (isMainStation2 || pickedSlot2 >= 0) {
+                      currentStationData.currentOrder = nextOrder;
+                      nextOrder.isWaiting = false;
+                      if (!isMainStation2) {
+                        const phaseKey2 = isDemSub2 ? 'demontage-' : 'reassembly-'
+                        orderPhaseSlotMapRef.current[`${nextOrder.id}:${phaseKey2}`] = pickedSlot2
+                      }
+                      // Initialize stationDurations when order starts processing
+                      if (!nextOrder.stationDurations[currentStationData.id] || !nextOrder.stationDurations[currentStationData.id].actual) {
+                        const stochasticTime = calculateStochasticProcessingTime(
+                          currentStationData.processingTime,
+                          currentStationData.stochasticVariation
+                        );
+                        nextOrder.stationDurations[currentStationData.id] = {
+                          ...nextOrder.stationDurations[currentStationData.id], // Keep existing data like waitingTime
+                          expected: currentStationData.processingTime,
+                          actual: stochasticTime,
+                          startTime: new Date(),
+                          completed: false
+                        };
+                        nextOrder.progress = 0; // Reset progress for actual processing
+                        console.log(`Fixed stationDurations for ${nextOrder.kundeName} at ${currentStationData.id}: actual=${stochasticTime}min`);
+                      }
+                    } else {
+                      // Put back to queue front if no slot can switch now
+                      currentStationData.waitingQueue.unshift(nextOrder)
+                    }
                   }
-                }
+              } else {
+                console.log(`Capacity gating: not pulling from queue at ${currentStationData.id}`)
               }
+            }
             }
             
             // Simplified logic: just follow the processSequence array in order
             const currentIndex = order.processSequence.indexOf(order.currentStation);
             console.log(`${order.kundeName} completed ${order.currentStation}, current index: ${currentIndex}, sequence length: ${order.processSequence.length}`);
-            
+            console.log(`${order.kundeName} processSequence:`, order.processSequence);
+
             if (currentIndex < order.processSequence.length - 1) {
               const nextStationId = order.processSequence[currentIndex + 1];
               const nextStation = updatedStations.find(s => s.id === nextStationId);
-              
-              console.log(`${order.kundeName} moving from ${order.currentStation} to ${nextStationId}`);
+
+              console.log(`${order.kundeName} moving from ${order.currentStation} to ${nextStationId}`, nextStation ? 'station found' : 'STATION NOT FOUND!');
               
               if (nextStation) {
-                if (nextStation.currentOrder === null) {
-                  // Next station is free, assign immediately
+                const phasePrefix: any = nextStationId.startsWith('demontage-') ? 'demontage-' : (nextStationId.startsWith('reassembly-') ? 'reassembly-' : null)
+                const phaseFull = phasePrefix === 'demontage-' 
+                  ? getActivePhaseCount('demontage-') >= demSlots 
+                  : phasePrefix === 'reassembly-' 
+                    ? getActivePhaseCount('reassembly-') >= monSlots 
+                    : false
+
+                // Determine op type label for slot selection
+                const opLabel = nextStation?.name?.replace('Demontage ', '')?.replace('Montage ', '') || nextStationId
+                // Try to pick a slot when assigning into demontage/reassembly sub-stations
+                let pickedSlot = -1
+                if (nextStationId.startsWith('demontage-')) {
+                  pickedSlot = pickSlot('DEMONTAGE', opLabel)
+                } else if (nextStationId.startsWith('reassembly-')) {
+                  pickedSlot = pickSlot('REASSEMBLY', opLabel)
+                }
+
+                if (!phaseFull && nextStation.currentOrder === null && (pickedSlot >= 0 || (!nextStationId.startsWith('demontage-') && !nextStationId.startsWith('reassembly-')))) {
+                  // Next station is free and phase capacity/slot available
                   nextStation.currentOrder = order;
                   order.currentStation = nextStationId;
                   order.progress = 0;
                   order.isWaiting = false;
+                  if (pickedSlot >= 0) {
+                    orderPhaseSlotMapRef.current[`${order.id}:${phasePrefix}`] = pickedSlot
+                  }
                   console.log(`${order.kundeName} assigned directly to ${nextStationId}`);
                 } else {
-                  // Next station is busy, add to waiting queue
+                  // Busy, phase full or no slot available: enqueue at target station
+                  nextStation.waitingQueue = nextStation.waitingQueue || []
                   nextStation.waitingQueue.push(order);
                   order.currentStation = nextStationId;
                   order.progress = 0;
                   order.isWaiting = true;
-                  // Initialize waiting time tracking - but don't set actual time yet
                   if (!order.stationDurations[nextStationId]) {
                     order.stationDurations[nextStationId] = {
                       expected: nextStation.processingTime,
                       waitingTime: 0,
                       startTime: new Date(),
                       completed: false
-                      // actual time will be set when order actually starts processing
                     };
                   }
                   waitingOrdersList.push(order);
-                  console.log(`${order.kundeName} added to waiting queue of ${nextStationId}`);
+                  const reason = phaseFull ? 'phase capacity' : 'busy/slot'
+                  console.log(`${order.kundeName} added to waiting queue of ${nextStationId} (${reason})`);
                 }
                 updatedOrders.push(order); // Make sure order stays in active list
               } else {
@@ -1159,15 +1924,58 @@ export function RealDataFactorySimulation() {
     updateFlowDiagram();
   };
 
+  // Calculate enriched metrics from Gantt Chart
+  const enrichedCompletedOrdersWithMetrics = useMemo(() => {
+    const events = [...simEventsRef.current]
+    const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
+    const segments: Array<{ order_id:string; activity:string; start:number; end:number; duration:number }>=[]
+
+    // Parse all events to get processing segments
+    for (const ev of events) {
+      const act = ev.activity
+      if (typeof act !== 'string') continue
+      if (act.endsWith('_START')) {
+        const stem = act.slice(0, -6)
+        starts[`${ev.order_id}|${stem}`] = { t: ev.t, activity: stem, order_id: ev.order_id }
+      } else if (act.endsWith('_END')) {
+        const stem = ev.activity.slice(0, -4)
+        const s = starts[`${ev.order_id}|${stem}`]
+        if (s) {
+          segments.push({
+            order_id: ev.order_id,
+            activity: stem,
+            start: s.t,
+            end: ev.t,
+            duration: Math.max(0, ev.t - s.t)
+          })
+          delete starts[`${ev.order_id}|${stem}`]
+        }
+      }
+    }
+
+    return completedOrders.map(order => {
+      const orderSegments = segments.filter(s => s.order_id === order.id).sort((a, b) => a.start - b.start)
+      if (orderSegments.length > 0) {
+        const lastEnd = orderSegments[orderSegments.length - 1].end
+        const leadTime = lastEnd - 0
+        const processingTime = orderSegments.reduce((sum, s) => sum + s.duration, 0)
+        const waitingTime = leadTime - processingTime
+
+        return {
+          ...order,
+          calculatedMetrics: { leadTime, processingTime, waitingTime }
+        }
+      }
+      return order
+    })
+  }, [completedOrders, simEventsRef.current.length])
+
   // Prepare data for stacked bar chart
   const prepareChartData = () => {
-    return completedOrders.map((order: any, index) => {
-      const processingTime = Object.values(order.stationDurations || {})
-        .filter((d: any) => d.completed)
-        .reduce((sum: number, d: any) => sum + (d.actual || 0), 0);
-      const waitingTime = Object.values(order.stationDurations || {})
-        .filter((d: any) => d.completed)
-        .reduce((sum: number, d: any) => sum + (d.waitingTime || 0), 0);
+    return enrichedCompletedOrdersWithMetrics.map((order: any, index) => {
+      const metrics = order.calculatedMetrics;
+      const processingTime = metrics?.processingTime ?? 0;
+      const waitingTime = metrics?.waitingTime ?? 0;
 
       return {
         name: `${order.kundeName || `${order.customer?.firstName} ${order.customer?.lastName}`}`,
@@ -1181,193 +1989,91 @@ export function RealDataFactorySimulation() {
   // Prepare station utilization data
   const prepareStationUtilizationData = () => {
     try {
-      // Ensure we have stations data
-      if (!stations || !Array.isArray(stations) || stations.length === 0) {
-        console.log('No stations data available, stations:', stations);
-        return [];
-      }
-      
-      console.log('All stations available:', stations.map(s => ({ 
-        id: s.id, 
-        name: s.name, 
-        type: s.type, 
-        parent: s.parent || 'no-parent' 
-      })));
-      
-      // Get all sub-stations regardless of filtering - let's see what we actually have
-      const subStations = stations.filter(s => s?.type === 'SUB');
-      console.log('All SUB stations found:', subStations.map(s => ({ 
-        id: s.id, 
-        name: s.name, 
-        parent: s.parent || 'no-parent' 
-      })));
-      
-      const demontageStations = stations.filter(s => s?.type === 'SUB' && s?.parent === 'demontage').slice(0, 6);
-      const reassemblyStations = stations.filter(s => s?.type === 'SUB' && s?.parent === 'reassembly').slice(0, 6);
-      
-      // If no SUB stations with parent, try with different criteria
-      if (demontageStations.length === 0 && reassemblyStations.length === 0) {
-        // Try finding stations by ID pattern
-        const demontageByPattern = stations.filter(s => s?.id?.includes('demontage-')).slice(0, 6);
-        const reassemblyByPattern = stations.filter(s => s?.id?.includes('reassembly-')).slice(0, 6);
-        
-        console.log('Trying pattern match:', {
-          demontageByPattern: demontageByPattern.map(s => ({ id: s.id, name: s.name })),
-          reassemblyByPattern: reassemblyByPattern.map(s => ({ id: s.id, name: s.name }))
-        });
-        
-        if (demontageByPattern.length > 0 || reassemblyByPattern.length > 0) {
-          const allStations = [...demontageByPattern, ...reassemblyByPattern];
-          return allStations.map(station => ({
-            name: `${station.id?.includes('demontage') ? 'Disassembly' : 'Assembly'}: ${station.name || 'Unknown'}`,
-            station: station.name || 'Unknown',
-            utilizationRate: 0,
-            processingTime: 0,
-            totalTime: 0
-          }));
-        }
-      }
-      
-      const allSubStations = [...demontageStations, ...reassemblyStations];
-      
-      console.log('Final station selection:', {
-        demontage: demontageStations.length,
-        reassembly: reassemblyStations.length,
-        total: allSubStations.length,
-        demontageStations: demontageStations.map(s => ({ id: s.id, name: s.name, parent: s.parent })),
-        reassemblyStations: reassemblyStations.map(s => ({ id: s.id, name: s.name, parent: s.parent }))
-      });
-      
-      // If we still have no stations, return empty array
-      if (allSubStations.length === 0) {
-        console.log('No SUB stations found with proper filtering');
-        return [];
-      }
-      
-      // Ensure we have valid simulation times
-      if (!simulationTime || !simulationStartTime) {
-        console.log('No simulation times, returning stations with 0% utilization');
-        return allSubStations.map((station) => {
-          const stationType = station.parent === 'demontage' ? 'Disassembly' : 'Assembly';
-          const stationName = station.name || 'Unknown';
-          return {
-            name: `${stationType}: ${stationName}`,
-            station: stationName,
-            utilizationRate: 0,
-            processingTime: 0,
-            totalTime: 0
-          };
-        });
-      }
-      
-      // Return empty data if simulation hasn't started
+      // Return aggregate data for Demontage and Montage phases based on Gantt events
       if (!simulationStartTime) {
-        return allSubStations.map(station => ({
-          name: `${station.parent === 'demontage' ? 'Disassembly' : 'Assembly'}: ${station.name || 'Unknown'}`,
-          station: station.name || 'Unknown',
-          utilizationRate: 0,
-          processingTime: 0,
-          totalTime: 0
-        }));
+        return [
+          { name: 'Demontage', station: 'Demontage', utilizationRate: 0, processingTime: 0, totalTime: 0 },
+          { name: 'Montage', station: 'Montage', utilizationRate: 0, processingTime: 0, totalTime: 0 }
+        ];
       }
-      
-      const currentTime = simulationTime.getTime();
-      const simulationDurationMs = currentTime - simulationStartTime.getTime();
-      const simulationDurationMinutes = Math.max(simulationDurationMs / (1000 * 60), 0.01); // Minimum 0.01 minutes
-      
-      console.log('BAR CHART - Simulation timing:', {
-        currentTime: new Date(currentTime).toISOString(),
-        startTime: new Date(simulationStartTime.getTime()).toISOString(),
-        durationMs: simulationDurationMs,
-        durationMinutes: simulationDurationMinutes.toFixed(2),
-        completedOrders: completedOrders.length,
-        activeOrders: activeOrders.length
-      });
-      
-      return allSubStations.map(station => {
-        if (!station?.id) {
-          return {
-            name: 'Unknown Station',
-            station: 'Unknown',
-            utilizationRate: 0,
-            processingTime: 0,
-            totalTime: parseFloat(simulationDurationMinutes.toFixed(1))
-          };
-        }
-        
-        // Calculate total processing time for this station from all completed orders
-        const completedOrdersDebug: any[] = [];
-        const totalProcessingTime = (completedOrders || []).reduce((sum: number, order: any) => {
-          const stationDuration = order?.stationDurations?.[station.id];
-          const actualTime = stationDuration?.actual || 0;
-          if (actualTime > 0) {
-            completedOrdersDebug.push({ orderId: order.id, actualTime });
+
+      const simDurationMinutes = getSimMinutes()
+      if (simDurationMinutes <= 0) {
+        return [
+          { name: 'Demontage', station: 'Demontage', utilizationRate: 0, processingTime: 0, totalTime: 0 },
+          { name: 'Montage', station: 'Montage', utilizationRate: 0, processingTime: 0, totalTime: 0 }
+        ];
+      }
+
+      // Calculate from Gantt events
+      const events = [...simEventsRef.current]
+      const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
+      const segments: Array<{ order_id:string; phase:string; start:number; end:number; duration:number }>=[]
+
+      for (const ev of events) {
+        const act = ev.activity
+        if (typeof act !== 'string') continue
+        if (act.endsWith('_START')) {
+          const stem = act.slice(0, -6)
+          const phase = act.startsWith('DEMONTAGE:') ? 'DEMONTAGE' : act.startsWith('MONTAGE:') ? 'MONTAGE' : null
+          if (phase) {
+            starts[`${ev.order_id}|${stem}`] = { t: ev.t, activity: stem, order_id: ev.order_id }
           }
-          return sum + actualTime;
-        }, 0);
-        
-        // Also include time from currently active orders at this station
-        const activeOrdersDebug: any[] = [];
-        const activeProcessingTime = (activeOrders || []).reduce((sum: number, order: any) => {
-          if (order.currentStation === station.id && !order.isWaiting) {
-            const progress = order.progress || 0;
-            if (progress > 0) {
-              activeOrdersDebug.push({ orderId: order.id, progress });
+        } else if (act.endsWith('_END')) {
+          const stem = ev.activity.slice(0, -4)
+          const s = starts[`${ev.order_id}|${stem}`]
+          if (s) {
+            const phase = ev.activity.startsWith('DEMONTAGE:') ? 'DEMONTAGE' : ev.activity.startsWith('MONTAGE:') ? 'MONTAGE' : null
+            if (phase) {
+              segments.push({
+                order_id: ev.order_id,
+                phase,
+                start: s.t,
+                end: ev.t,
+                duration: Math.max(0, ev.t - s.t)
+              })
             }
-            return sum + progress;
+            delete starts[`${ev.order_id}|${stem}`]
           }
-          return sum;
-        }, 0);
-        
-        const totalStationTime = totalProcessingTime + activeProcessingTime;
-        
-        // Calculate utilization percentage - capped at 100%
-        const utilizationRate = simulationDurationMinutes > 0 
-          ? Math.min((totalStationTime / simulationDurationMinutes) * 100, 100)
-          : 0;
-          
-        // Debug impossible utilization
-        if (utilizationRate > 100) {
-          console.error(`🚨 BAR CHART IMPOSSIBLE UTILIZATION: Station ${station.id}:`, {
-            totalStationTime: totalStationTime.toFixed(1) + 'min',
-            simulationDuration: simulationDurationMinutes.toFixed(1) + 'min',
-            completedOrdersTime: totalProcessingTime.toFixed(1) + 'min',
-            activeOrdersTime: activeProcessingTime.toFixed(1) + 'min',
-            completedOrdersDetail: completedOrdersDebug,
-            activeOrdersDetail: activeOrdersDebug,
-            ratio: utilizationRate.toFixed(1) + '%'
-          });
         }
-        
-        // Debug high utilization for tracking
-        if (utilizationRate > 50) {
-          console.log(`BAR CHART Station ${station.id} high utilization:`, {
-            utilizationRate: utilizationRate.toFixed(1) + '%',
-            totalTime: totalStationTime.toFixed(1) + 'min',
-            simulationDuration: simulationDurationMinutes.toFixed(1) + 'min'
-          });
+      }
+
+      const demSegments = segments.filter(s => s.phase === 'DEMONTAGE')
+      const monSegments = segments.filter(s => s.phase === 'MONTAGE')
+
+      const demTotalBusyTime = demSegments.reduce((sum, seg) => sum + seg.duration, 0)
+      const monTotalBusyTime = monSegments.reduce((sum, seg) => sum + seg.duration, 0)
+
+      const demSlotCount = demSlotsRef.current.length || 1
+      const monSlotCount = monSlotsRef.current.length || 1
+
+      const demUtilization = (demTotalBusyTime / (simDurationMinutes * demSlotCount)) * 100
+      const monUtilization = (monTotalBusyTime / (simDurationMinutes * monSlotCount)) * 100
+
+      return [
+        {
+          name: 'Demontage',
+          station: 'Demontage',
+          utilizationRate: parseFloat(demUtilization.toFixed(1)),
+          processingTime: parseFloat(demTotalBusyTime.toFixed(1)),
+          totalTime: parseFloat(simDurationMinutes.toFixed(1)),
+          slotCount: demSlotCount
+        },
+        {
+          name: 'Montage',
+          station: 'Montage',
+          utilizationRate: parseFloat(monUtilization.toFixed(1)),
+          processingTime: parseFloat(monTotalBusyTime.toFixed(1)),
+          totalTime: parseFloat(simDurationMinutes.toFixed(1)),
+          slotCount: monSlotCount
         }
-        
-        // Determine station type and use the actual station name (Baugruppentyp name)
-        const stationType = station.parent === 'demontage' ? 'Disassembly' : 'Assembly';
-        const stationName = station.name || 'Unknown';
-        
-        const result = {
-          name: `${stationType}: ${stationName}`,
-          station: stationName,
-          utilizationRate: parseFloat(utilizationRate.toFixed(1)) || 0,
-          processingTime: parseFloat(totalStationTime.toFixed(1)) || 0,
-          totalTime: parseFloat(simulationDurationMinutes.toFixed(1)) || 0
-        };
-        
-        // Always log station info for debugging
-        console.log(`Station ${station.id}:`, result);
-        
-        return result;
-      });
+      ];
     } catch (error) {
       console.error('Error in prepareStationUtilizationData:', error);
-      return [];
+      return [
+        { name: 'Demontage', station: 'Demontage', utilizationRate: 0, processingTime: 0, totalTime: 0 },
+        { name: 'Montage', station: 'Montage', utilizationRate: 0, processingTime: 0, totalTime: 0 }
+      ];
     }
   };
 
@@ -1620,12 +2326,630 @@ export function RealDataFactorySimulation() {
         </div>
         
         {/* Data Dashboard */}
-        <AdvancedKPIDashboard 
-          orders={activeOrders}
-          completedOrders={completedOrders}
-          stations={stations}
-          onClearData={handleClearAllOrders}
-        />
+        {(() => {
+          // Calculate KPIs from Gantt Chart events
+          const events = [...simEventsRef.current]
+          const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
+          const segments: Array<{ order_id:string; activity:string; start:number; end:number; duration:number }>=[]
+
+          // Parse all events to get processing segments
+          for (const ev of events) {
+            const act = ev.activity
+            if (typeof act !== 'string') continue
+            if (act.endsWith('_START')) {
+              const stem = act.slice(0, -6)
+              starts[`${ev.order_id}|${stem}`] = { t: ev.t, activity: stem, order_id: ev.order_id }
+            } else if (act.endsWith('_END')) {
+              const stem = ev.activity.slice(0, -4)
+              const s = starts[`${ev.order_id}|${stem}`]
+              if (s) {
+                segments.push({
+                  order_id: ev.order_id,
+                  activity: stem,
+                  start: s.t,
+                  end: ev.t,
+                  duration: Math.max(0, ev.t - s.t)
+                })
+                delete starts[`${ev.order_id}|${stem}`]
+              }
+            }
+          }
+
+          // Calculate metrics per order
+          const completedOrderIds = completedOrders.map(o => o.id)
+          let totalProcessingTimeMinutes = 0
+          let totalWaitingTimeMinutes = 0
+          let totalLeadTimeMinutes = 0
+
+          completedOrderIds.forEach(orderId => {
+            // Get all segments for this order, sorted by start time
+            const orderSegments = segments.filter(s => s.order_id === orderId).sort((a, b) => a.start - b.start)
+            if (orderSegments.length === 0) return
+
+            // Lead time = from simulation start (t=0) to last segment end
+            const lastEnd = orderSegments[orderSegments.length - 1].end
+            const leadTime = lastEnd - 0  // Start from simulation start (t=0)
+
+            // Processing time = sum of all segment durations
+            const processingTime = orderSegments.reduce((sum, s) => sum + s.duration, 0)
+
+            // Waiting time = lead time - processing time
+            // This includes: waiting before first segment + all gaps between segments
+            const waitingTime = leadTime - processingTime
+
+            // console.log(`📊 Order ${orderId.slice(-4)}: Lead=${leadTime.toFixed(1)}min, Process=${processingTime.toFixed(1)}min, Wait=${waitingTime.toFixed(1)}min (${orderSegments.length} segments)`)
+
+            totalLeadTimeMinutes += leadTime
+            totalProcessingTimeMinutes += processingTime
+            totalWaitingTimeMinutes += waitingTime
+          })
+
+          const avgProcessingTime = completedOrders.length > 0 ? totalProcessingTimeMinutes / completedOrders.length : 0
+          const avgWaitingTime = completedOrders.length > 0 ? totalWaitingTimeMinutes / completedOrders.length : 0
+          const avgLeadTime = completedOrders.length > 0 ? totalLeadTimeMinutes / completedOrders.length : 0
+
+          // Calculate utilization for Demontage and Montage phases
+          const simDurationMinutes = getSimMinutes()
+          const demSlotCount = demSlotsRef.current.length || 1
+          const monSlotCount = monSlotsRef.current.length || 1
+
+          // Get segments for each phase
+          const demSegments = segments.filter(s => {
+            const ev = events.find(e => e.order_id === s.order_id && e.t === s.start)
+            return ev && typeof ev.activity === 'string' && ev.activity.startsWith('DEMONTAGE:')
+          })
+          const monSegments = segments.filter(s => {
+            const ev = events.find(e => e.order_id === s.order_id && e.t === s.start)
+            return ev && typeof ev.activity === 'string' && ev.activity.startsWith('MONTAGE:')
+          })
+
+          const demTotalBusyTime = demSegments.reduce((sum, seg) => sum + seg.duration, 0)
+          const monTotalBusyTime = monSegments.reduce((sum, seg) => sum + seg.duration, 0)
+
+          const demUtilization = simDurationMinutes > 0 && demSlotCount > 0
+            ? (demTotalBusyTime / (simDurationMinutes * demSlotCount)) * 100
+            : 0
+          const monUtilization = simDurationMinutes > 0 && monSlotCount > 0
+            ? (monTotalBusyTime / (simDurationMinutes * monSlotCount)) * 100
+            : 0
+
+          // Create enriched orders with calculated metrics
+          const enrichedCompletedOrders = completedOrders.map(order => {
+            const orderSegments = segments.filter(s => s.order_id === order.id).sort((a, b) => a.start - b.start)
+            if (orderSegments.length > 0) {
+              // Lead time = from simulation start (t=0) to last segment end
+              const lastEnd = orderSegments[orderSegments.length - 1].end
+              const leadTime = lastEnd - 0  // Start from simulation start (t=0)
+
+              // Processing time = sum of all segment durations
+              const processingTime = orderSegments.reduce((sum, s) => sum + s.duration, 0)
+
+              // Waiting time = lead time - processing time
+              // This includes: waiting before first segment + all gaps between segments
+              const waitingTime = leadTime - processingTime
+
+              // Create station-level data from Gantt segments
+              const ganttStationData: Record<string, { processingTime: number; waitingTime: number; startTime: number }> = {}
+
+              orderSegments.forEach((seg, idx) => {
+                // Map activity to station ID
+                let stationId = 'unknown'
+                if (seg.activity.includes('ACCEPTANCE')) stationId = 'order-acceptance'
+                else if (seg.activity.includes('INSPECTION')) stationId = 'inspection'
+                else if (seg.activity.includes('DEMONTAGE:')) stationId = 'demontage'
+                else if (seg.activity.includes('MONTAGE:')) stationId = 'reassembly'
+                else if (seg.activity.includes('QA')) stationId = 'quality'
+                else if (seg.activity.includes('SHIPPING')) stationId = 'shipping'
+
+                // Calculate waiting time before this segment
+                const waitBefore = idx === 0 ? seg.start : (seg.start - orderSegments[idx - 1].end)
+
+                if (!ganttStationData[stationId]) {
+                  ganttStationData[stationId] = { processingTime: 0, waitingTime: 0, startTime: seg.start }
+                }
+
+                ganttStationData[stationId].processingTime += seg.duration
+                if (waitBefore > 0 && idx > 0) {
+                  // Attribute waiting time to the station where we're waiting to enter
+                  ganttStationData[stationId].waitingTime += waitBefore
+                }
+              })
+
+              return {
+                ...order,
+                calculatedMetrics: {
+                  leadTime,
+                  processingTime,
+                  waitingTime
+                },
+                ganttStationData
+              }
+            }
+            return order
+          })
+
+          return (
+            <AdvancedKPIDashboard
+              orders={activeOrders}
+              completedOrders={enrichedCompletedOrders as any}
+              stations={stations}
+              onClearData={handleClearAllOrders}
+              calculatedKPIs={{
+                avgProcessingTime,
+                avgWaitingTime,
+                avgLeadTime,
+                demUtilization,
+                monUtilization,
+                totalProcessingTime: totalProcessingTimeMinutes,
+                totalWaitingTime: totalWaitingTimeMinutes,
+                totalLeadTime: totalLeadTimeMinutes
+              }}
+            />
+          )
+        })()}
+
+        {/* Simple Gantt (beta): recent segments */}
+        {/* Gantt Tabelle (letzte Segmente) */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Gantt Tabelle – letzte Segmente</CardTitle>
+          </CardHeader>
+          <CardContent key={`gtab-${ganttRefreshKey}`}>
+            {(() => {
+              try {
+                const events = [...simEventsRef.current]
+                const starts: Record<string, { t:number; activity:string; slot?:number|null; order_id:string }> = {}
+                const segments: Array<{ order_id:string; phase:string; sub_op:string; slot?:number|null; start:number; end:number; duration:number }>=[]
+                for (const ev of events) {
+                  const act = ev.activity
+                  if (typeof act !== 'string') continue
+                  if (act.endsWith('_START')) {
+                    const stem = act.slice(0, -6)
+                    starts[`${ev.order_id}|${stem}|${ev.slot ?? 'noslot'}`] = { t: ev.t, activity: stem, slot: ev.slot ?? null, order_id: ev.order_id }
+                  } else if (act.endsWith('_END')) {
+                    const stem = ev.activity.slice(0, -4)
+                    const key = `${ev.order_id}|${stem}|${ev.slot ?? 'noslot'}`
+                    const s = starts[key]
+                    if (s) {
+                      const parts = stem.split(':')
+                      const phase = parts[0] || 'PHASE'
+                      const sub = parts[1] || phase
+                      segments.push({ order_id: ev.order_id, phase, sub_op: sub, slot: ev.slot ?? null, start: s.t, end: ev.t, duration: Math.max(0, ev.t - s.t) })
+                      delete starts[key]
+                    }
+                  }
+                }
+                segments.sort((a,b)=> a.order_id.localeCompare(b.order_id) || a.start - b.start)
+                const recent = segments.slice(-30).reverse()
+                if (recent.length === 0) return <div className="text-sm text-muted-foreground">Noch keine Segmente erfasst.</div>
+                return (
+                  <div className="overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground">
+                          <th className="py-1 pr-2">Order</th>
+                          <th className="py-1 pr-2">Phase</th>
+                          <th className="py-1 pr-2">Sub‑Op</th>
+                          <th className="py-1 pr-2">Slot</th>
+                          <th className="py-1 pr-2">Start</th>
+                          <th className="py-1 pr-2">Ende</th>
+                          <th className="py-1 pr-2">Dauer</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recent.map((seg, i) => (
+                          <tr key={i} className="border-t">
+                            <td className="py-1 pr-2 font-mono">{seg.order_id.slice(0,8)}</td>
+                            <td className="py-1 pr-2">{seg.phase}</td>
+                            <td className="py-1 pr-2">{seg.sub_op}</td>
+                            <td className="py-1 pr-2">{seg.slot ?? '-'}</td>
+                            <td className="py-1 pr-2">{seg.start}m</td>
+                            <td className="py-1 pr-2">{seg.end}m</td>
+                            <td className="py-1 pr-2">{seg.duration}m</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              } catch (e) {
+                console.error('Gantt table render error', e)
+                return <div className="text-sm text-red-500">Fehler beim Rendern der Gantt‑Tabelle.</div>
+              }
+            })()}
+          </CardContent>
+        </Card>
+
+        {/* Gantt Plot */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Gantt – Unter‑Operationen</CardTitle>
+          </CardHeader>
+          <CardContent key={`gplot-${ganttRefreshKey}`}>
+            {(() => {
+              try {
+                const events = [...simEventsRef.current]
+                const starts: Record<string, { t:number; activity:string; slot?:number|null; order_id:string }> = {}
+                const segs: Array<{ order_id:string; phase:string; sub_op:string; slot?:number|null; start:number; end:number; duration:number }>=[]
+                for (const ev of events) {
+                  const act = ev.activity
+                  if (typeof act !== 'string') continue
+                  if (act.endsWith('_START')) {
+                    const stem = act.slice(0, -6)
+                    starts[`${ev.order_id}|${stem}|${ev.slot ?? 'noslot'}`] = { t: ev.t, activity: stem, slot: ev.slot ?? null, order_id: ev.order_id }
+                  } else if (act.endsWith('_END')) {
+                    const stem = ev.activity.slice(0, -4)
+                    const key = `${ev.order_id}|${stem}|${ev.slot ?? 'noslot'}`
+                    const s = starts[key]
+                    if (s) {
+                      const parts = stem.split(':')
+                      const phase = parts[0] || 'PHASE'
+                      const sub = parts[1] || phase
+                      segs.push({ order_id: ev.order_id, phase, sub_op: sub, slot: ev.slot ?? null, start: s.t, end: ev.t, duration: Math.max(0, ev.t - s.t) })
+                      delete starts[key]
+                    }
+                  }
+                }
+                if (segs.length === 0) return <div className="text-sm text-muted-foreground">Noch keine Segmente erfasst.</div>
+                const maxEnd = Math.max(...segs.map(s => s.end)) || 1
+                const grouped: Record<string, typeof segs> = {}
+                segs.forEach(s => { (grouped[s.order_id] ||= []).push(s) })
+                Object.values(grouped).forEach(arr => arr.sort((a,b)=> a.start - b.start))
+                const colorFor = (p: string) => p.startsWith('DEMONTAGE') ? '#2563eb' : p.startsWith('MONTAGE') ? '#16a34a' : '#6b7280'
+
+                // Helper: Get customer name from order_id
+                const getCustomerName = (orderId: string) => {
+                  const order = activeOrders.find(o => o.id === orderId) || completedOrders.find(o => o.id === orderId)
+                  if (order?.kundeName) {
+                    // Shorten name: "Michael Williams" -> "Michael W."
+                    const parts = order.kundeName.split(' ')
+                    if (parts.length >= 2) return `${parts[0]} ${parts[1].charAt(0)}.`
+                    return order.kundeName
+                  }
+                  return orderId.slice(0,8)
+                }
+
+                // Generate time axis ticks
+                const tickInterval = Math.ceil(maxEnd / 10) // Aim for ~10 ticks
+                const ticks: number[] = []
+                for (let t = 0; t <= maxEnd; t += tickInterval) {
+                  ticks.push(t)
+                }
+                if (ticks[ticks.length - 1] < maxEnd) ticks.push(maxEnd)
+
+                return (
+                  <div className="space-y-3">
+                    {Object.entries(grouped).map(([oid, arr], idx) => {
+                      // Collect unique sub-operations for this order
+                      const subOps = [...new Set(arr.map(s => s.sub_op))].join(', ')
+                      return (
+                        <div key={oid} className="relative border rounded p-2 bg-white">
+                          <div className="absolute -left-1 -top-2 text-[10px] font-mono bg-gray-100 px-1 rounded border">
+                            #{idx+1} {getCustomerName(oid)}
+                          </div>
+                          <div className="text-[9px] text-gray-600 mb-1 pl-1">{subOps}</div>
+                          <div className="relative h-8 w-full">
+                            {arr.map((s,i) => {
+                              const barId = `${oid}-${i}`
+                              const isBarHovered = hoveredOrderRow === barId
+                              return (
+                                <div
+                                  key={i}
+                                  className="absolute rounded transition-all cursor-pointer"
+                                  style={{
+                                    left: `${(s.start/maxEnd)*100}%`,
+                                    width: `${(s.duration/maxEnd)*100}%`,
+                                    top: isBarHovered ? 2 : 8,
+                                    height: isBarHovered ? '24px' : '12px',
+                                    background: colorFor(s.phase),
+                                    zIndex: isBarHovered ? 50 : 1,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
+                                  }}
+                                  onMouseEnter={() => setHoveredOrderRow(barId)}
+                                  onMouseLeave={() => setHoveredOrderRow(null)}
+                                  title={`${s.phase}:${s.sub_op}\nStart: ${s.start.toFixed(1)}m\nDauer: ${s.duration.toFixed(1)}m\nEnde: ${s.end.toFixed(1)}m`}
+                                >
+                                  {isBarHovered && (
+                                    <span className="text-[9px] text-black font-semibold px-1 bg-white/90 rounded truncate whitespace-nowrap">
+                                      {s.sub_op}
+                                    </span>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {/* Time Axis */}
+                    <div className="relative w-full h-6 border-t pt-1">
+                      {ticks.map((tick, i) => (
+                        <div
+                          key={i}
+                          className="absolute flex flex-col items-center"
+                          style={{ left: `${(tick/maxEnd)*100}%`, transform: 'translateX(-50%)' }}
+                        >
+                          <div className="w-px h-2 bg-gray-400"></div>
+                          <span className="text-[9px] text-gray-600 font-mono">{tick.toFixed(0)}m</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              } catch (e) {
+                console.error('Gantt render error', e)
+                return <div className="text-sm text-red-500">Fehler beim Rendern des Gantt.</div>
+              }
+            })()}
+          </CardContent>
+        </Card>
+
+        {/* Demontage Slot Capacity Gantt */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Demontage Slot Capacity</CardTitle>
+          </CardHeader>
+          <CardContent key={`dem-slot-gantt-${ganttRefreshKey}`}>
+            {(() => {
+              try {
+                const events = [...simEventsRef.current]
+                const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
+                const segs: Array<{ slot:number; sub_op:string; order_id:string; start:number; end:number; duration:number }>=[]
+
+                // Filter for DEMONTAGE events with slots
+                for (const ev of events) {
+                  const act = ev.activity
+                  if (typeof act !== 'string' || !act.startsWith('DEMONTAGE:') || ev.slot == null) continue
+
+                  if (act.endsWith('_START')) {
+                    const stem = act.slice(0, -6)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    starts[key] = { t: ev.t, activity: stem, order_id: ev.order_id }
+                  } else if (act.endsWith('_END')) {
+                    const stem = ev.activity.slice(0, -4)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    const s = starts[key]
+                    if (s && ev.slot != null) {
+                      const sub = stem.split(':')[1] || stem
+                      segs.push({ slot: ev.slot, sub_op: sub, order_id: ev.order_id, start: s.t, end: ev.t, duration: Math.max(0, ev.t - s.t) })
+                      delete starts[key]
+                    }
+                  }
+                }
+
+                if (segs.length === 0) return <div className="text-sm text-muted-foreground">Noch keine Demontage-Slot-Operationen erfasst.</div>
+
+                const maxEnd = Math.max(...segs.map(s => s.end)) || 1
+                const slotGroups: Record<number, typeof segs> = {}
+                segs.forEach(s => { (slotGroups[s.slot] ||= []).push(s) })
+                Object.values(slotGroups).forEach(arr => arr.sort((a,b)=> a.start - b.start))
+
+                // Helper: Get shortened customer name
+                const getShortCustomerName = (orderId: string) => {
+                  const order = activeOrders.find(o => o.id === orderId) || completedOrders.find(o => o.id === orderId)
+                  if (order?.kundeName) {
+                    const parts = order.kundeName.split(' ')
+                    if (parts.length >= 2) return `${parts[0].charAt(0)}.${parts[1].charAt(0)}.`
+                    return order.kundeName.substring(0, 4)
+                  }
+                  return orderId.slice(-4)
+                }
+
+                const slotIndices = Object.keys(slotGroups).map(Number).sort((a,b)=>a-b)
+
+                // Generate time axis ticks
+                const tickInterval = Math.ceil(maxEnd / 10) // Aim for ~10 ticks
+                const ticks: number[] = []
+                for (let t = 0; t <= maxEnd; t += tickInterval) {
+                  ticks.push(t)
+                }
+                if (ticks[ticks.length - 1] < maxEnd) ticks.push(maxEnd)
+
+                return (
+                  <div className="space-y-2">
+                    {slotIndices.map(slotIdx => {
+                      const arr = slotGroups[slotIdx]
+                      const slotInfo = demSlotsRef.current[slotIdx]
+                      const isFlex = slotInfo?.flex ?? false
+                      return (
+                        <div key={slotIdx} className="relative border rounded p-2 bg-white">
+                          <div className="absolute -left-1 -top-2 text-[10px] font-mono bg-blue-100 px-1 rounded border text-blue-700">
+                            Slot {slotIdx} {isFlex ? '(Flexibel)' : '(Starr)'}
+                          </div>
+                          <div className="relative h-10 w-full">
+                            {arr.map((s,i) => {
+                              const barId = `dem-${slotIdx}-${i}`
+                              const isBarHovered = hoveredDemSlot === barId
+                              return (
+                                <div
+                                  key={i}
+                                  className="absolute rounded flex flex-col items-center justify-center font-medium transition-all cursor-pointer"
+                                  style={{
+                                    left: `${(s.start/maxEnd)*100}%`,
+                                    width: `${(s.duration/maxEnd)*100}%`,
+                                    top: isBarHovered ? 0 : 4,
+                                    height: isBarHovered ? '40px' : '24px',
+                                    background: '#2563eb',
+                                    zIndex: isBarHovered ? 50 : 1
+                                  }}
+                                  onMouseEnter={() => setHoveredDemSlot(barId)}
+                                  onMouseLeave={() => setHoveredDemSlot(null)}
+                                  title={`${s.sub_op} - ${getShortCustomerName(s.order_id)}\nStart: ${s.start.toFixed(1)}m\nDauer: ${s.duration.toFixed(1)}m\nEnde: ${s.end.toFixed(1)}m`}
+                                >
+                                  {isBarHovered && (
+                                    <>
+                                      <span className="text-[10px] text-black font-semibold bg-white/95 px-1 rounded leading-tight">
+                                        {getShortCustomerName(s.order_id)}
+                                      </span>
+                                      <span className="text-[9px] text-black font-medium bg-white/95 px-1 rounded leading-tight mt-0.5">
+                                        {s.sub_op}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {/* Time Axis */}
+                    <div className="relative w-full h-6 border-t pt-1">
+                      {ticks.map((tick, i) => (
+                        <div
+                          key={i}
+                          className="absolute flex flex-col items-center"
+                          style={{ left: `${(tick/maxEnd)*100}%`, transform: 'translateX(-50%)' }}
+                        >
+                          <div className="w-px h-2 bg-gray-400"></div>
+                          <span className="text-[9px] text-gray-600 font-mono">{tick.toFixed(0)}m</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              } catch (e) {
+                console.error('Demontage slot gantt render error', e)
+                return <div className="text-sm text-red-500">Fehler beim Rendern des Demontage-Slot-Gantt.</div>
+              }
+            })()}
+          </CardContent>
+        </Card>
+
+        {/* Montage Slot Capacity Gantt */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Montage Slot Capacity</CardTitle>
+          </CardHeader>
+          <CardContent key={`mon-slot-gantt-${ganttRefreshKey}`}>
+            {(() => {
+              try {
+                const events = [...simEventsRef.current]
+                const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
+                const segs: Array<{ slot:number; sub_op:string; order_id:string; start:number; end:number; duration:number }>=[]
+
+                // Filter for MONTAGE events with slots
+                for (const ev of events) {
+                  const act = ev.activity
+                  if (typeof act !== 'string' || !act.startsWith('MONTAGE:') || ev.slot == null) continue
+
+                  if (act.endsWith('_START')) {
+                    const stem = act.slice(0, -6)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    starts[key] = { t: ev.t, activity: stem, order_id: ev.order_id }
+                  } else if (act.endsWith('_END')) {
+                    const stem = ev.activity.slice(0, -4)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    const s = starts[key]
+                    if (s && ev.slot != null) {
+                      const sub = stem.split(':')[1] || stem
+                      segs.push({ slot: ev.slot, sub_op: sub, order_id: ev.order_id, start: s.t, end: ev.t, duration: Math.max(0, ev.t - s.t) })
+                      delete starts[key]
+                    }
+                  }
+                }
+
+                if (segs.length === 0) return <div className="text-sm text-muted-foreground">Noch keine Montage-Slot-Operationen erfasst.</div>
+
+                const maxEnd = Math.max(...segs.map(s => s.end)) || 1
+                const slotGroups: Record<number, typeof segs> = {}
+                segs.forEach(s => { (slotGroups[s.slot] ||= []).push(s) })
+                Object.values(slotGroups).forEach(arr => arr.sort((a,b)=> a.start - b.start))
+
+                // Helper: Get shortened customer name
+                const getShortCustomerName = (orderId: string) => {
+                  const order = activeOrders.find(o => o.id === orderId) || completedOrders.find(o => o.id === orderId)
+                  if (order?.kundeName) {
+                    const parts = order.kundeName.split(' ')
+                    if (parts.length >= 2) return `${parts[0].charAt(0)}.${parts[1].charAt(0)}.`
+                    return order.kundeName.substring(0, 4)
+                  }
+                  return orderId.slice(-4)
+                }
+
+                const slotIndices = Object.keys(slotGroups).map(Number).sort((a,b)=>a-b)
+
+                // Generate time axis ticks
+                const tickInterval = Math.ceil(maxEnd / 10) // Aim for ~10 ticks
+                const ticks: number[] = []
+                for (let t = 0; t <= maxEnd; t += tickInterval) {
+                  ticks.push(t)
+                }
+                if (ticks[ticks.length - 1] < maxEnd) ticks.push(maxEnd)
+
+                return (
+                  <div className="space-y-2">
+                    {slotIndices.map(slotIdx => {
+                      const arr = slotGroups[slotIdx]
+                      const slotInfo = monSlotsRef.current[slotIdx]
+                      const isFlex = slotInfo?.flex ?? false
+                      return (
+                        <div key={slotIdx} className="relative border rounded p-2 bg-white">
+                          <div className="absolute -left-1 -top-2 text-[10px] font-mono bg-green-100 px-1 rounded border text-green-700">
+                            Slot {slotIdx} {isFlex ? '(Flexibel)' : '(Starr)'}
+                          </div>
+                          <div className="relative h-10 w-full">
+                            {arr.map((s,i) => {
+                              const barId = `mon-${slotIdx}-${i}`
+                              const isBarHovered = hoveredMonSlot === barId
+                              return (
+                                <div
+                                  key={i}
+                                  className="absolute rounded flex flex-col items-center justify-center font-medium transition-all cursor-pointer"
+                                  style={{
+                                    left: `${(s.start/maxEnd)*100}%`,
+                                    width: `${(s.duration/maxEnd)*100}%`,
+                                    top: isBarHovered ? 0 : 4,
+                                    height: isBarHovered ? '40px' : '24px',
+                                    background: '#16a34a',
+                                    zIndex: isBarHovered ? 50 : 1
+                                  }}
+                                  onMouseEnter={() => setHoveredMonSlot(barId)}
+                                  onMouseLeave={() => setHoveredMonSlot(null)}
+                                  title={`${s.sub_op} - ${getShortCustomerName(s.order_id)}\nStart: ${s.start.toFixed(1)}m\nDauer: ${s.duration.toFixed(1)}m\nEnde: ${s.end.toFixed(1)}m`}
+                                >
+                                  {isBarHovered && (
+                                    <>
+                                      <span className="text-[10px] text-black font-semibold bg-white/95 px-1 rounded leading-tight">
+                                        {getShortCustomerName(s.order_id)}
+                                      </span>
+                                      <span className="text-[9px] text-black font-medium bg-white/95 px-1 rounded leading-tight mt-0.5">
+                                        {s.sub_op}
+                                      </span>
+                                    </>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {/* Time Axis */}
+                    <div className="relative w-full h-6 border-t pt-1">
+                      {ticks.map((tick, i) => (
+                        <div
+                          key={i}
+                          className="absolute flex flex-col items-center"
+                          style={{ left: `${(tick/maxEnd)*100}%`, transform: 'translateX(-50%)' }}
+                        >
+                          <div className="w-px h-2 bg-gray-400"></div>
+                          <span className="text-[9px] text-gray-600 font-mono">{tick.toFixed(0)}m</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              } catch (e) {
+                console.error('Montage slot gantt render error', e)
+                return <div className="text-sm text-red-500">Fehler beim Rendern des Montage-Slot-Gantt.</div>
+              }
+            })()}
+          </CardContent>
+        </Card>
+
       </div>
     );
   }
@@ -1636,17 +2960,16 @@ export function RealDataFactorySimulation() {
       <div className="xl:col-span-3 space-y-4">
         {/* Control Panel */}
         <Card>
-          <CardContent className="py-3">
-            <div className="flex flex-col gap-3">
-              {/* First Row: Control Buttons and Speed/Time */}
-              <div className="flex items-center justify-between gap-4 flex-wrap">
-                {/* Control Buttons */}
-                <div className="flex items-center gap-2">
-                  <Button
+          <CardContent className="pt-3 space-y-2">
+            {/* Steuerung Section */}
+            <div className="p-2 bg-gray-50 border rounded space-y-2">
+              <div className="text-xs font-semibold text-gray-700">Steuerung</div>
+
+              {/* Control Buttons */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Button
                   onClick={() => {
                     if (!isRunning && !simulationStartTime) {
-                      // Only set start time on FIRST start, not on resume
-                      // Use current simulationTime as the start time to ensure they're synchronized
                       setSimulationStartTime(simulationTime);
                       console.log('Simulation FIRST start at:', simulationTime.toISOString());
                     } else if (!isRunning) {
@@ -1656,55 +2979,56 @@ export function RealDataFactorySimulation() {
                   }}
                   className={isRunning ? "" : "bg-blue-600 hover:bg-blue-700"}
                   variant={isRunning ? "destructive" : "default"}
+                  size="sm"
                 >
                   {isRunning ? (
                     <>
-                      <Pause className="h-4 w-4 mr-2" />
+                      <Pause className="h-3 w-3 mr-1" />
                       Pause
                     </>
                   ) : (
                     <>
-                      <Play className="h-4 w-4 mr-2" />
+                      <Play className="h-3 w-3 mr-1" />
                       Start
                     </>
                   )}
                 </Button>
-                
+
                 <Button
                   onClick={() => {
                     setIsRunning(false);
                     setActiveOrders([]);
                     setCompletedOrders([]);
                     setSimulationTime(new Date());
-                    setSimulationStartTime(null); // Clear start time so next start is a fresh start
+                    setSimulationStartTime(null);
                     console.log('Simulation STOPPED and RESET');
                   }}
                   variant="outline"
                   size="sm"
                 >
-                  <Square className="h-4 w-4 mr-1" />
+                  <Square className="h-3 w-3 mr-1" />
                   Stop
                 </Button>
-                
+
                 <Button
                   onClick={loadSimulationData}
                   variant="outline"
                   size="sm"
                 >
-                  <RefreshCw className="h-4 w-4 mr-1" />
+                  <RefreshCw className="h-3 w-3 mr-1" />
                   Neu laden
                 </Button>
-                
+
                 <Button
                   onClick={handleCreateNewOrder}
                   className="bg-blue-600 hover:bg-blue-700"
                   disabled={!activeFactory}
                   size="sm"
                 >
-                  <Plus className="h-4 w-4 mr-1" />
+                  <Plus className="h-3 w-3 mr-1" />
                   Neuer Auftrag
                 </Button>
-                
+
                 <Button
                   onClick={handleClearAllOrders}
                   className="bg-white text-[#1a48a5] border-[#1a48a5] hover:bg-[#1a48a5]/5"
@@ -1712,24 +3036,25 @@ export function RealDataFactorySimulation() {
                   disabled={activeOrders.length === 0 && completedOrders.length === 0}
                   size="sm"
                 >
-                  <Trash2 className="h-4 w-4 mr-1" />
+                  <Trash2 className="h-3 w-3 mr-1" />
                   Alle Aufträge löschen
                 </Button>
-                
+
                 <Button
                   onClick={() => setCurrentView('kpi')}
                   className="bg-green-600 hover:bg-green-700"
                   size="sm"
                 >
-                  <BarChart3 className="h-4 w-4 mr-1" />
+                  <BarChart3 className="h-3 w-3 mr-1" />
                   Data
                 </Button>
               </div>
-              
-              {/* Speed and Time Controls */}
-              <div className="flex items-center gap-6">
+
+              {/* Speed, Time and Algorithms */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 pt-1.5 border-t">
+                {/* Speed */}
                 <div className="flex items-center gap-2">
-                  <Label className="text-sm">Geschwindigkeit:</Label>
+                  <Label className="text-xs">Geschwindigkeit:</Label>
                   <Slider
                     value={[speed]}
                     onValueChange={handleSpeedChange}
@@ -1738,23 +3063,20 @@ export function RealDataFactorySimulation() {
                     step={1}
                     className="w-24"
                   />
-                  <span className="text-sm font-medium w-8">{speed}x</span>
+                  <span className="text-xs font-medium w-8">{speed}x</span>
                 </div>
-                
-                <div className="flex items-center gap-2">
-                  <Clock className="h-4 w-4" />
-                  <span className="font-mono text-sm">
+
+                {/* Time */}
+                <div className="flex items-center gap-1.5">
+                  <Clock className="h-3 w-3 text-gray-600" />
+                  <span className="font-mono text-xs">
                     {simulationTime.toLocaleString('de-DE')}
                   </span>
                 </div>
-              </div>
-              </div>
-              
-              {/* Second Row: Algorithm Dropdowns */}
-              <div className="flex items-center gap-4">
-                {/* Terminierung Dropdown */}
-                <div className="flex items-center gap-2">
-                  <Label className="text-sm font-medium">Terminierung:</Label>
+
+                {/* Terminierung */}
+                <div className="space-y-1">
+                  <Label className="text-xs">Terminierung</Label>
                   <Select
                     value={currentSchedulingAlgorithm}
                     onValueChange={(value: SchedulingAlgorithm | string) => {
@@ -1763,7 +3085,7 @@ export function RealDataFactorySimulation() {
                       }
                     }}
                   >
-                    <SelectTrigger className="w-[200px]">
+                    <SelectTrigger className="w-full h-8 text-xs">
                       <SelectValue placeholder="Wähle Algorithmus" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1782,15 +3104,12 @@ export function RealDataFactorySimulation() {
                     </SelectContent>
                   </Select>
                 </div>
-                
-                {/* Beschaffungsplanung Dropdown */}
-                <div className="flex items-center gap-2">
-                  <Label className="text-sm font-medium">Beschaffungsplanung:</Label>
-                  <Select
-                    value="none"
-                    disabled
-                  >
-                    <SelectTrigger className="w-[200px]">
+
+                {/* Beschaffungsplanung */}
+                <div className="space-y-1">
+                  <Label className="text-xs">Beschaffungsplanung</Label>
+                  <Select value="none" disabled>
+                    <SelectTrigger className="w-full h-8 text-xs">
                       <SelectValue placeholder="Wähle Algorithmus" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1808,44 +3127,290 @@ export function RealDataFactorySimulation() {
                 </div>
               </div>
             </div>
+
+            {/* Phase Capacity & Flexibility Settings */}
+            <TooltipProvider>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 p-2 bg-gray-50 border rounded">
+                {/* Demontage Section */}
+                <div className="space-y-2 p-2 bg-white border rounded">
+                  <div className="font-semibold text-xs text-blue-700 border-b pb-1">Demontage</div>
+
+                  {/* Demontage Kapazität */}
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <Label className="text-xs">Kapazität</Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-xs text-xs">Anzahl der parallelen Demontage-Slots (Arbeitsplätze)</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Input
+                      type="number"
+                      className="w-20 h-8 text-xs"
+                      min={0}
+                      max={50}
+                      value={demSlots}
+                      onChange={(e) => setDemSlots(Math.max(0, Number(e.target.value)))}
+                    />
+                  </div>
+
+                  {/* Demontage Flexibilität */}
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <Label className="text-xs">Flexibilitätsgrad</Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-xs text-xs">Prozentsatz der Slots, die flexibel für verschiedene Baugruppen-Typen einsetzbar sind</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Slider
+                        value={[demFlexSharePct]}
+                        onValueChange={(v) => setDemFlexSharePct(v[0])}
+                        min={0}
+                        max={100}
+                        step={5}
+                        className="flex-1"
+                      />
+                      <span className="text-xs font-medium w-10 text-right">{demFlexSharePct}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Montage Section */}
+                <div className="space-y-2 p-2 bg-white border rounded">
+                  <div className="font-semibold text-xs text-green-700 border-b pb-1">Montage</div>
+
+                  {/* Montage Kapazität */}
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <Label className="text-xs">Kapazität</Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-xs text-xs">Anzahl der parallelen Montage-Slots (Arbeitsplätze)</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Input
+                      type="number"
+                      className="w-20 h-8 text-xs"
+                      min={0}
+                      max={50}
+                      value={monSlots}
+                      onChange={(e) => setMonSlots(Math.max(0, Number(e.target.value)))}
+                    />
+                  </div>
+
+                  {/* Montage Flexibilität */}
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <Label className="text-xs">Flexibilitätsgrad</Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p className="max-w-xs text-xs">Prozentsatz der Slots, die flexibel für verschiedene Baugruppen-Typen einsetzbar sind</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Slider
+                        value={[monFlexSharePct]}
+                        onValueChange={(v) => setMonFlexSharePct(v[0])}
+                        min={0}
+                        max={100}
+                        step={5}
+                        className="flex-1"
+                      />
+                      <span className="text-xs font-medium w-10 text-right">{monFlexSharePct}%</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Rüstzeit Section - Full Width */}
+                <div className="md:col-span-2 space-y-1 p-2 bg-white border rounded">
+                  <div className="flex items-center gap-1.5">
+                    <Label className="text-xs">Rüstzeit (Stunden)</Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Info className="h-3 w-3 text-muted-foreground cursor-help" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p className="max-w-xs text-xs">Zeit für Umrüstung zwischen verschiedenen Baugruppen-Typen an einem Slot</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Input
+                    type="number"
+                    className="w-20 h-8 text-xs"
+                    min={0}
+                    max={12}
+                    step={0.5}
+                    value={setupTimeHours}
+                    onChange={(e) => setSetupTimeHours(Math.max(0, Number(e.target.value)))}
+                  />
+                </div>
+              </div>
+            </TooltipProvider>
+
+              {/* Debug Info Panel */}
+              <div className="bg-yellow-50 border border-yellow-200 rounded p-3" key={debugRefreshKey}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-bold text-yellow-900">🔍 Debug Info (Live)</div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => setShowDebugInfo(!showDebugInfo)}
+                  >
+                    {showDebugInfo ? 'Ausblenden' : 'Einblenden'}
+                  </Button>
+                </div>
+
+                {showDebugInfo && (
+                  <div className="space-y-3">
+
+                {/* React Flow Debug Section */}
+                <div className="mb-3 border-2 border-blue-600 bg-blue-50 p-3 rounded">
+                  <div className="text-sm font-bold text-blue-900 mb-2">🎨 React Flow Status</div>
+                  <div className="text-xs text-blue-900 space-y-2 bg-white p-2 rounded">
+                    <div><strong>Nodes Count:</strong> {nodes.length} {nodes.length === 0 && <span className="text-red-600 font-bold">❌ LEER!</span>}</div>
+                    <div><strong>Edges Count:</strong> {edges.length} {edges.length === 0 && <span className="text-red-600 font-bold">❌ LEER!</span>}</div>
+                    <div className="border-t pt-2 mt-2">
+                      <strong>Nodes:</strong>
+                      <div className="font-mono text-[10px] bg-gray-50 p-2 rounded mt-1 max-h-24 overflow-y-auto">
+                        {nodes.length > 0 ? (
+                          nodes.map(n => (
+                            <div key={n.id}>{n.id} ({n.type || 'default'}) @ x:{n.position.x} y:{n.position.y}</div>
+                          ))
+                        ) : (
+                          <div className="text-red-600 font-bold">❌ KEINE NODES!</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="border-t pt-2 mt-2">
+                      <strong>Edges:</strong>
+                      <div className="font-mono text-[10px] bg-gray-50 p-2 rounded mt-1 max-h-24 overflow-y-auto">
+                        {edges.length > 0 ? (
+                          edges.map(e => (
+                            <div key={e.id}>{e.source} → {e.target}</div>
+                          ))
+                        ) : (
+                          <div className="text-red-600 font-bold">❌ KEINE EDGES!</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mb-3 border-2 border-red-600 bg-red-50 p-3 rounded">
+                  <div className="text-sm font-bold text-red-900 mb-2">⚠️ PROBLEM DIAGNOSTICS</div>
+                  <div className="text-xs text-red-900 space-y-2 bg-white p-2 rounded">
+                    <div><strong>DEM Queue:</strong> {demQueueRef.current.length} (SOLLTE &gt; 0 SEIN!)</div>
+                    <div><strong>MON Queue:</strong> {monQueueRef.current.length}</div>
+                    <div><strong>DEM Ready:</strong> {demReadySetRef.current.size} Aufträge warten</div>
+                    <div><strong>Active Orders:</strong> {activeOrders.length}</div>
+                    {initError && (
+                      <div className="border-t pt-2 mt-2 bg-red-100 p-2 rounded">
+                        <strong className="text-red-900">🚨 INIT ERROR:</strong>
+                        <div className="font-mono text-[10px] text-red-800 mt-1">{initError}</div>
+                      </div>
+                    )}
+                    <div className="border-t pt-2 mt-2">
+                      <strong>Initialization Logs ({initDebugLogs.length} total):</strong>
+                      <div className="mt-1 max-h-32 overflow-y-auto font-mono text-[10px] bg-yellow-50 p-2 rounded">
+                        {initDebugLogs.length > 0 ? (
+                          initDebugLogs.map((log, i) => (
+                            <div key={i} className={i < 3 ? 'font-bold text-red-800' : 'text-gray-700'}>{log}</div>
+                          ))
+                        ) : (
+                          <div className="text-red-600 font-bold">❌ KEINE LOGS! initDebugLogs ist LEER!</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mb-3">
+                  <div>
+                    <span className="font-semibold">DEM Queue:</span> {demQueueRef.current.length}
+                  </div>
+                  <div>
+                    <span className="font-semibold">MON Queue:</span> {monQueueRef.current.length}
+                  </div>
+                  <div>
+                    <span className="font-semibold">DEM Active:</span> {demActivesRef.current.length}
+                  </div>
+                  <div>
+                    <span className="font-semibold">MON Active:</span> {monActivesRef.current.length}
+                  </div>
+                  <div>
+                    <span className="font-semibold">DEM Ready:</span> {demReadySetRef.current.size}
+                  </div>
+                  <div className="col-span-2">
+                    <span className="font-semibold">Main Queues:</span> A:{mainQueuesRef.current.acceptance.length} I:{mainQueuesRef.current.inspection.length} <strong className="text-red-600">QS:{mainQueuesRef.current.qualityShipping.length}</strong>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="font-semibold">Quality-Shipping Station:</span> {stations.find(s => s.id === 'quality-shipping')?.currentOrder?.kundeName || 'FREI'} | Queue: {stations.find(s => s.id === 'quality-shipping')?.waitingQueue?.length || 0}
+                  </div>
+                  <div className="col-span-2">
+                    <span className="font-semibold">DEM Queue IDs:</span> {demQueueRef.current.map(b => `${b.orderId.slice(-4)}(${b.ops.length}ops)`).join(', ') || 'empty'}
+                  </div>
+                  <div className="col-span-2">
+                    <span className="font-semibold">DEM Active:</span> {demActivesRef.current.map(a => `${a.orderId.slice(-4)}@slot${a.slotIdx}(${a.remaining.toFixed(1)}/${a.total}min)`).join(', ') || 'none'}
+                  </div>
+                  <div className="col-span-4">
+                    <span className="font-semibold">Orders @ Demontage:</span> {activeOrders.filter(o => o.currentStation === 'demontage').map(o => `${(o as any).kundeName?.slice(0,10)}(${o.progress.toFixed(0)}%)`).join(', ') || 'none'}
+                  </div>
+                  <div className="col-span-4 bg-red-100 p-2 rounded">
+                    <span className="font-semibold text-red-900">Orders @ Quality-Shipping:</span> {activeOrders.filter(o => o.currentStation === 'quality-shipping').map(o => `${(o as any).kundeName?.slice(0,10)}(${o.progress.toFixed(0)}%, waiting:${o.isWaiting})`).join(', ') || 'NONE - THIS IS THE PROBLEM!'}
+                  </div>
+                  <div className="col-span-4 border-t pt-2 mt-2">
+                    <div className="font-semibold mb-1">🔧 Dispatcher Debug:</div>
+                    <div className="text-[10px] space-y-1">
+                      <div>Current Sim Time: {getSimMinutes()} minutes (Speed: {speed}x, Setup: {setupTimeHours}h = {Math.round(setupTimeHours * 60)}min)</div>
+                      <div>DEM Slots: {demSlotsRef.current.length} ({demSlotsRef.current.filter(s => s.busy).length} busy)</div>
+                      <div>Slot Details: {demSlotsRef.current.map((s, i) => `S${i}:${s.busy?'B':'F'}${s.flex?'flex':'rigid'}${s.specialization?`(${normalizeOperationKey(s.specialization)})`:''}`).join(' ')}</div>
+                      <div>Simulation Running: {isRunning ? 'YES' : 'NO'}</div>
+                      <div>Aggregate View: {aggregateView ? 'YES' : 'NO'}</div>
+                      <div className="mt-2 border-t pt-2">
+                        <div className="font-semibold">Last Dispatcher Attempts:</div>
+                        <div className="max-h-20 overflow-y-auto bg-gray-100 p-1 rounded mt-1">
+                          {dispatcherLogsRef.current.slice(-10).map((log, i) => (
+                            <div key={i} className="text-[9px]">{log}</div>
+                          ))}
+                          {dispatcherLogsRef.current.length === 0 && <div className="text-gray-500">No logs yet</div>}
+                        </div>
+                      </div>
+                      <div className="mt-2 border-t pt-2">
+                        <div className="font-semibold">Last pickSlot Debug:</div>
+                        <div className="max-h-40 overflow-y-auto bg-red-50 p-1 rounded mt-1 font-mono">
+                          {pickSlotDebugLogsRef.current.map((log, i) => (
+                            <div key={i} className="text-[9px] whitespace-pre">{log}</div>
+                          ))}
+                          {pickSlotDebugLogsRef.current.length === 0 && <div className="text-gray-500">No logs yet</div>}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                </div>
+                )}
+              </div>
           </CardContent>
         </Card>
-
-        {/* Statistics */}
-        <div className="grid grid-cols-5 gap-4">
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xl font-bold">{activeOrders.length}</div>
-              <p className="text-xs text-muted-foreground">Aktive Aufträge</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xl font-bold">{waitingOrders.length}</div>
-              <p className="text-xs text-muted-foreground">Wartende Aufträge</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xl font-bold">{completedOrders.length}</div>
-              <p className="text-xs text-muted-foreground">Abgeschlossen</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xl font-bold">{stations.length}</div>
-              <p className="text-xs text-muted-foreground">Stationen</p>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4">
-              <div className="text-xl font-bold">
-                {stations.filter(s => s.currentOrder !== null).length}
-              </div>
-              <p className="text-xs text-muted-foreground">Stationen belegt</p>
-            </CardContent>
-          </Card>
-        </div>
 
         {/* Process Flow Diagram */}
         <Card>
@@ -1853,7 +3418,7 @@ export function RealDataFactorySimulation() {
             <CardTitle>Prozessfluss</CardTitle>
           </CardHeader>
           <CardContent>
-            <div style={{ height: 400 }}>
+            <div style={{ height: 200 }}>
               <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -1865,10 +3430,10 @@ export function RealDataFactorySimulation() {
                 minZoom={0.5}
                 maxZoom={2}
                 style={{ width: '100%', height: '100%' }}
+                nodeTypes={nodeTypes}
               >
                 <Background />
                 <Controls />
-                <MiniMap />
               </ReactFlow>
             </div>
           </CardContent>
@@ -1987,11 +3552,11 @@ export function RealDataFactorySimulation() {
                     interval={0}
                     fontSize={9}
                   />
-                  <YAxis 
+                  <YAxis
                     label={{ value: 'Zeit (min)', angle: -90, position: 'insideLeft' }}
                     fontSize={9}
                   />
-                  <Tooltip 
+                  <RechartsTooltip
                     formatter={(value: number, name: string) => [`${value} min`, name]}
                     labelFormatter={(label) => `Kunde: ${label}`}
                   />
@@ -2012,210 +3577,84 @@ export function RealDataFactorySimulation() {
           <CardContent>
             {(() => {
               try {
-                if (!stations || stations.length === 0) {
+                const utilizationData = prepareStationUtilizationData();
+
+                if (!utilizationData || utilizationData.length === 0) {
                   return (
                     <div className="flex items-center justify-center h-[200px] text-center">
                       <p className="text-gray-500 text-sm">
-                        Keine Stationen konfiguriert
-                      </p>
-                    </div>
-                  );
-                }
-                
-                // Ensure we have the required context values
-                if (typeof simulationTime === 'undefined' || typeof simulationStartTime === 'undefined') {
-                  return (
-                    <div className="flex items-center justify-center h-[200px] text-center">
-                      <p className="text-gray-500 text-sm">
-                        Simulation wird initialisiert...
+                        Keine Auslastungsdaten verfügbar
                       </p>
                     </div>
                   );
                 }
 
-              // Get all SUB stations directly with safe filtering - excluding demontage waiting queue
-              const demontageStations = stations.filter(s => {
-                try {
-                  return (s?.id?.includes('demontage-') || (s?.type === 'SUB' && s?.parent === 'demontage')) 
-                    && s?.id !== 'demontage-waiting'; // Exclude the waiting queue
-                } catch (e) {
-                  console.warn('Error filtering demontage station:', s, e);
-                  return false;
-                }
-              });
-              
-              const reassemblyStations = stations.filter(s => {
-                try {
-                  return s?.id?.includes('reassembly-') || (s?.type === 'SUB' && s?.parent === 'reassembly');
-                } catch (e) {
-                  console.warn('Error filtering reassembly station:', s, e);
-                  return false;
-                }
-              });
-              
-              const allSubStations = [...demontageStations, ...reassemblyStations];
-              
-              if (allSubStations.length === 0) {
                 return (
-                  <div className="flex items-center justify-center h-[200px] text-center">
-                    <div>
-                      <p className="text-gray-500 text-sm mb-2">
-                        Keine Unter-Stationen gefunden
-                      </p>
-                      <p className="text-xs text-gray-400">
-                        {stations.length} Stationen verfügbar, aber keine SUB-Stationen
-                      </p>
-                    </div>
-                  </div>
-                );
-              }
+                  <div className="space-y-4">
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={utilizationData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis
+                          dataKey="name"
+                          tick={{ fontSize: 10 }}
+                          interval={0}
+                          angle={0}
+                          textAnchor="middle"
+                          height={60}
+                        />
+                        <YAxis
+                          label={{ value: 'Auslastung (%)', angle: -90, position: 'insideLeft', style: { fontSize: 11 } }}
+                          domain={[0, 100]}
+                          tick={{ fontSize: 11 }}
+                        />
+                        <RechartsTooltip
+                          formatter={(value: any, name: any, props: any) => {
+                            const slotCount = props.payload.slotCount;
+                            return [`${value.toFixed(1)}%`, `Auslastung (${slotCount} Slots)`];
+                          }}
+                          contentStyle={{ fontSize: 12 }}
+                        />
+                        <Bar dataKey="utilizationRate" name="Auslastung">
+                          {utilizationData.map((entry, index) => (
+                            <Cell
+                              key={`cell-${index}`}
+                              fill={entry.station === 'Demontage' ? '#3B82F6' : '#10B981'}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
 
-              // Skip utilization calculation if simulation hasn't started
-              if (!simulationStartTime) {
-                return (
-                  <div 
-                    key={station.id} 
-                    className="p-1 border rounded bg-gray-50"
-                  >
-                    <div className="text-[7px] font-medium text-gray-600 leading-tight">
-                      {(station.id?.includes('demontage') || station.parent === 'demontage') ? 'Disassembly' : 'Assembly'}
-                    </div>
-                    <div className="text-[8px] font-semibold text-gray-800 leading-tight truncate" title={station.name || 'Unknown Station'}>
-                      {station.name || 'Unknown'}
-                    </div>
-                    <div className="text-[10px] text-gray-400 mt-1">
-                      0%
-                    </div>
-                  </div>
-                );
-              }
-              
-              // Calculate utilization for each station
-              const currentTime = simulationTime.getTime();
-              const startTime = simulationStartTime.getTime();
-              const simulationDurationMs = Math.max(currentTime - startTime, 1000); // At least 1 second
-              const simulationDurationMinutes = simulationDurationMs / (1000 * 60);
-              
-              // Debug logging to track timing
-              console.log('Utilization calculation timing:', {
-                currentTime: new Date(currentTime).toISOString(),
-                startTime: new Date(startTime).toISOString(),
-                durationMinutes: simulationDurationMinutes.toFixed(2),
-                isRunning
-              });
-
-              return (
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                  {allSubStations.slice(0, 12).map((station, index) => {
-                    try {
-                      if (!station || !station.id) {
-                        return (
-                          <div key={`unknown-${index}`} className="p-3 border rounded-lg bg-gray-50">
-                            <div className="text-xs text-gray-500">Unknown Station</div>
-                          </div>
-                        );
-                      }
-
-                      // Calculate CUMULATIVE processing time - avoiding double counting
-                      let totalProcessingTime = 0;
-                      
-                      // Track which orders we've already counted to avoid double counting
-                      const countedOrders = new Set<string>();
-                      
-                      // Add time from completed orders
-                      (completedOrders || []).forEach((order: any) => {
-                        try {
-                          const stationDuration = order?.stationDurations?.[station.id];
-                          if (stationDuration?.actual && !countedOrders.has(order.id)) {
-                            totalProcessingTime += stationDuration.actual;
-                            countedOrders.add(order.id);
-                          }
-                        } catch (e) {
-                          console.warn('Error calculating processing time for completed order:', order?.id, e);
-                        }
-                      });
-
-                      // Add time from active orders - either current progress OR completed time, not both
-                      (activeOrders || []).forEach((order: any) => {
-                        try {
-                          if (countedOrders.has(order.id)) return; // Skip if already counted
-                          
-                          const stationDuration = order?.stationDurations?.[station.id];
-                          
-                          if (stationDuration?.completed && stationDuration?.actual) {
-                            // Order has passed through this station - count the completed time
-                            totalProcessingTime += stationDuration.actual;
-                            countedOrders.add(order.id);
-                          } else if (order?.currentStation === station.id && !order?.isWaiting) {
-                            // Order is currently processing at this station - count current progress
-                            totalProcessingTime += (order?.progress || 0);
-                            countedOrders.add(order.id);
-                          }
-                        } catch (e) {
-                          console.warn('Error calculating active processing time for order:', order?.id, e);
-                        }
-                      });
-                      
-                      // Enhanced debugging for troubleshooting
-                      if (totalProcessingTime > 0) {
-                        console.log(`Station ${station.id} (${station.name}):`, {
-                          totalProcessingTime: totalProcessingTime.toFixed(1),
-                          simulationDurationMinutes: simulationDurationMinutes.toFixed(1),
-                          countedOrders: countedOrders.size,
-                          utilizationRate: ((totalProcessingTime / simulationDurationMinutes) * 100).toFixed(1) + '%'
-                        });
-                      }
-                      
-                      if (totalProcessingTime > simulationDurationMinutes) {
-                        console.error(`🚨 IMPOSSIBLE UTILIZATION: Station ${station.id}:`, {
-                          totalProcessingTime: totalProcessingTime.toFixed(1) + 'min',
-                          simulationDuration: simulationDurationMinutes.toFixed(1) + 'min',
-                          countedOrders: Array.from(countedOrders),
-                          ratio: ((totalProcessingTime / simulationDurationMinutes) * 100).toFixed(1) + '%'
-                        });
-                      }
-
-                      // Pure mathematical calculation: cumulative processing time / total simulation time
-                      // Capped at 100% to prevent display issues
-                      const utilizationRate = simulationDurationMinutes > 0 
-                        ? Math.min((totalProcessingTime / simulationDurationMinutes) * 100, 100)
-                        : 0;
-
-                      const stationType = (station.id?.includes('demontage') || station.parent === 'demontage') ? 'Disassembly' : 'Assembly';
-                      const isActive = station.currentOrder !== null;
-
-                      return (
-                        <div 
-                          key={station.id} 
-                          className={`p-1 border rounded ${isActive ? 'bg-blue-50 border-blue-200' : 'bg-gray-50'}`}
+                    {/* Summary Cards */}
+                    <div className="grid grid-cols-2 gap-3">
+                      {utilizationData.map((data, idx) => (
+                        <div
+                          key={idx}
+                          className={`p-3 rounded-lg border-2 ${
+                            data.station === 'Demontage'
+                              ? 'bg-blue-50 border-blue-200'
+                              : 'bg-green-50 border-green-200'
+                          }`}
                         >
-                          <div className="text-[7px] font-medium text-gray-600 leading-tight">
-                            {stationType}
+                          <div className="text-xs font-semibold text-gray-700 mb-1">
+                            {data.name}
                           </div>
-                          <div className="text-[8px] font-semibold text-gray-800 leading-tight truncate" title={station.name || 'Unknown Station'}>
-                            {station.name || 'Unknown'}
+                          <div className={`text-2xl font-bold ${
+                            data.station === 'Demontage' ? 'text-blue-600' : 'text-green-600'
+                          }`}>
+                            {data.utilizationRate.toFixed(1)}%
                           </div>
-                          <div className="flex items-center justify-between mt-1">
-                            <div className={`text-[10px] font-bold ${utilizationRate >= 70 ? 'text-green-600' : utilizationRate >= 50 ? 'text-blue-600' : utilizationRate >= 30 ? 'text-orange-600' : 'text-red-600'}`}>
-                              {(utilizationRate || 0).toFixed(1)}%
-                            </div>
-                            <div className="text-[7px] text-gray-500">
-                              {isActive ? 'A' : 'F'}
-                            </div>
+                          <div className="text-[10px] text-gray-600 mt-1">
+                            Bearbeitungszeit: {data.processingTime.toFixed(0)} min
+                          </div>
+                          <div className="text-[10px] text-gray-600">
+                            Gesamtzeit: {data.totalTime.toFixed(0)} min
                           </div>
                         </div>
-                      );
-                    } catch (e) {
-                      console.error('Error rendering station:', station?.id, e);
-                      return (
-                        <div key={`error-${index}`} className="p-3 border rounded-lg bg-red-50">
-                          <div className="text-xs text-red-600">Station Error</div>
-                        </div>
-                      );
-                    }
-                  })}
-                </div>
-              );
+                      ))}
+                    </div>
+                  </div>
+                );
               } catch (error) {
                 console.error('Error in Stationsauslastung component:', error);
                 return (
@@ -2225,7 +3664,7 @@ export function RealDataFactorySimulation() {
                         Fehler beim Laden der Stationsauslastung
                       </p>
                       <p className="text-xs text-gray-400">
-                        Überprüfen Sie die Browser-Konsole für Details
+                        {String(error)}
                       </p>
                     </div>
                   </div>
@@ -2235,19 +3674,178 @@ export function RealDataFactorySimulation() {
           </CardContent>
         </Card>
 
-        {/* Placeholder for Future Changeover Times Chart */}
+        {/* Rüstzeiten Analysis */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Rüstzeiten</CardTitle>
+            <CardTitle className="text-lg">Rüstzeiten-Analyse</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center justify-center h-[300px] text-center">
-              <p className="text-gray-500 text-sm">
-                Kommende Funktionalität:<br/>
-                Durchschnittliche Rüstzeiten<br/>
-                pro Station
-              </p>
-            </div>
+            {(() => {
+              try {
+                if (setupTimeHours === 0) {
+                  return (
+                    <div className="text-center py-8 text-muted-foreground">
+                      Rüstzeit ist auf 0 Stunden eingestellt.<br/>
+                      Erhöhen Sie die Rüstzeit in den Einstellungen, um Rüstzeiten zu analysieren.
+                    </div>
+                  )
+                }
+
+                // Calculate setup times from slot changes (when a flex slot switches to a different type)
+                const setupMinutes = setupTimeHours * 60
+                const events = [...simEventsRef.current]
+
+                // Track slot type changes for flex slots
+                const slotTypeChanges: Record<string, { prev: string | null; curr: string; time: number }[]> = {}
+
+                // We need to track what type each slot was working on over time
+                // For this, we'll analyze the events and track slot assignments
+
+                // Count total setup times (estimated)
+                let totalSetupTimeMinutes = 0
+                let setupEventCount = 0
+
+                // Parse events to find operations and estimate setups
+                const demOps: Array<{order: string; op: string; start: number; end: number; slot: number}> = []
+                const monOps: Array<{order: string; op: string; start: number; end: number; slot: number}> = []
+
+                const starts: Record<string, any> = {}
+                events.forEach(ev => {
+                  if (!ev.activity || typeof ev.activity !== 'string') return
+                  const act = ev.activity
+
+                  if (act.endsWith('_START') && ev.slot != null) {
+                    const stem = act.slice(0, -6)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    starts[key] = { t: ev.t, op: stem, order: ev.order_id, slot: ev.slot }
+                  } else if (act.endsWith('_END') && ev.slot != null) {
+                    const stem = act.slice(0, -4)
+                    const key = `${ev.order_id}|${stem}|${ev.slot}`
+                    const s = starts[key]
+                    if (s) {
+                      const op = { order: ev.order_id, op: stem, start: s.t, end: ev.t, slot: ev.slot }
+                      if (act.startsWith('DEMONTAGE:')) demOps.push(op)
+                      else if (act.startsWith('MONTAGE:')) monOps.push(op)
+                      delete starts[key]
+                    }
+                  }
+                })
+
+                // For each slot, track type changes
+                const analyzeSlotChanges = (ops: typeof demOps, slotCount: number) => {
+                  const slotOps: Record<number, typeof ops> = {}
+                  ops.forEach(op => {
+                    if (!slotOps[op.slot]) slotOps[op.slot] = []
+                    slotOps[op.slot].push(op)
+                  })
+
+                  let changes = 0
+                  Object.values(slotOps).forEach(opList => {
+                    opList.sort((a, b) => a.start - b.start)
+                    for (let i = 1; i < opList.length; i++) {
+                      const prev = normalizeOperationKey(opList[i-1].op)
+                      const curr = normalizeOperationKey(opList[i].op)
+                      if (prev !== curr) {
+                        changes++
+                        totalSetupTimeMinutes += setupMinutes
+                      }
+                    }
+                  })
+                  return changes
+                }
+
+                const demChanges = analyzeSlotChanges(demOps, demSlotsRef.current.length)
+                const monChanges = analyzeSlotChanges(monOps, monSlotsRef.current.length)
+                setupEventCount = demChanges + monChanges
+
+                // Calculate production time from segments
+                const prodTimeMinutes = demOps.reduce((sum, op) => sum + (op.end - op.start), 0) +
+                                       monOps.reduce((sum, op) => sum + (op.end - op.start), 0)
+
+                const avgSetupPerOrder = completedOrders.length > 0 ? totalSetupTimeMinutes / completedOrders.length : 0
+                const avgProdPerOrder = completedOrders.length > 0 ? prodTimeMinutes / completedOrders.length : 0
+
+                const setupRatio = avgProdPerOrder > 0 ? (avgSetupPerOrder / avgProdPerOrder) * 100 : 0
+
+                return (
+                  <div className="space-y-4">
+                    {/* Summary Cards */}
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      <div className="p-2 bg-orange-50 border border-orange-200 rounded-lg">
+                        <div className="text-[10px] text-orange-700 font-medium">Eingestellte Rüstzeit</div>
+                        <div className="text-lg font-bold text-orange-900">{setupMinutes} min</div>
+                      </div>
+                      <div className="p-2 bg-red-50 border border-red-200 rounded-lg">
+                        <div className="text-[10px] text-red-700 font-medium">Anzahl Umrüstungen</div>
+                        <div className="text-lg font-bold text-red-900">{setupEventCount}</div>
+                      </div>
+                      <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                        <div className="text-[10px] text-blue-700 font-medium">Ø Rüstzeit / Auftrag</div>
+                        <div className="text-lg font-bold text-blue-900">{avgSetupPerOrder.toFixed(1)} min</div>
+                      </div>
+                      <div className="p-2 bg-green-50 border border-green-200 rounded-lg">
+                        <div className="text-[10px] text-green-700 font-medium">Ø Fertigungszeit / Auftrag</div>
+                        <div className="text-lg font-bold text-green-900">{avgProdPerOrder.toFixed(1)} min</div>
+                      </div>
+                    </div>
+
+                    {/* Ratio Visualization */}
+                    <div className="p-3 bg-gradient-to-r from-orange-50 to-green-50 border rounded-lg">
+                      <h4 className="text-[10px] font-semibold mb-2">Rüstzeit im Verhältnis zur Fertigungszeit</h4>
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between text-[9px] mb-1">
+                            <span className="text-orange-700 font-medium">Rüstzeit: {avgSetupPerOrder.toFixed(1)} min</span>
+                            <span className="text-green-700 font-medium">Fertigungszeit: {avgProdPerOrder.toFixed(1)} min</span>
+                          </div>
+                          <div className="h-4 bg-gray-200 rounded-full overflow-hidden flex">
+                            <div
+                              className="bg-orange-500 flex items-center justify-center text-[9px] text-white font-semibold"
+                              style={{ width: `${Math.min((avgSetupPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
+                            >
+                              {setupRatio > 5 && `${setupRatio.toFixed(1)}%`}
+                            </div>
+                            <div
+                              className="bg-green-500 flex items-center justify-center text-[9px] text-white font-semibold"
+                              style={{ width: `${Math.min((avgProdPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
+                            >
+                              {setupRatio < 95 && `${(100 - setupRatio).toFixed(1)}%`}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-center">
+                        <span className={`text-sm font-bold ${setupRatio > 30 ? 'text-red-600' : setupRatio > 15 ? 'text-orange-600' : 'text-green-600'}`}>
+                          Verhältnis: {setupRatio.toFixed(1)}% Rüstzeit
+                        </span>
+                        <p className="text-[10px] text-muted-foreground mt-1">
+                          {setupRatio > 30 && '⚠️ Hoher Rüstzeitanteil - Flexibilität prüfen'}
+                          {setupRatio <= 30 && setupRatio > 15 && '⚡ Moderater Rüstzeitanteil'}
+                          {setupRatio <= 15 && '✅ Niedriger Rüstzeitanteil - Effiziente Nutzung'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Phase Details */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-4 border rounded-lg">
+                        <h4 className="text-sm font-semibold mb-2 text-blue-700">Demontage</h4>
+                        <div className="text-sm text-muted-foreground">Umrüstungen: {demChanges}</div>
+                        <div className="text-sm text-muted-foreground">Operationen: {demOps.length}</div>
+                      </div>
+                      <div className="p-4 border rounded-lg">
+                        <h4 className="text-sm font-semibold mb-2 text-green-700">Montage</h4>
+                        <div className="text-sm text-muted-foreground">Umrüstungen: {monChanges}</div>
+                        <div className="text-sm text-muted-foreground">Operationen: {monOps.length}</div>
+                      </div>
+                    </div>
+                  </div>
+                )
+              } catch (e) {
+                console.error('Rüstzeiten analysis error:', e)
+                return <div className="text-sm text-red-500">Fehler bei der Rüstzeiten-Analyse</div>
+              }
+            })()}
           </CardContent>
         </Card>
       </div>

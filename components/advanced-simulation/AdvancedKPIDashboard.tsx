@@ -27,40 +27,47 @@ interface SimulationOrder {
 }
 
 
+interface CalculatedKPIs {
+  avgProcessingTime: number;
+  avgWaitingTime: number;
+  avgLeadTime: number;
+  demUtilization: number;
+  monUtilization: number;
+  totalProcessingTime: number;
+  totalWaitingTime: number;
+  totalLeadTime: number;
+}
+
 interface AdvancedKPIDashboardProps {
   orders: AdvancedOrder[];
   completedOrders: AdvancedOrder[];
   stations: ProductionStation[];
   onClearData: () => void;
+  calculatedKPIs?: CalculatedKPIs;
 }
 
 export function AdvancedKPIDashboard({
   orders,
   completedOrders,
   stations,
-  onClearData
+  onClearData,
+  calculatedKPIs
 }: AdvancedKPIDashboardProps) {
   const { activeFactory } = useFactory();
-  
-  // Calculate KPIs
-  const totalProcessingTime = completedOrders.reduce((sum, order) => {
-    return sum + Object.values((order as any).stationDurations || {})
-      .filter((d: any) => d.actual && d.completed)
-      .reduce((stationSum: number, d: any) => stationSum + (d.actual || 0), 0);
-  }, 0);
-  
-  const totalWaitingTime = completedOrders.reduce((sum, order) => {
-    return sum + Object.values((order as any).stationDurations || {})
-      .filter((d: any) => d.completed)
-      .reduce((stationSum: number, d: any) => stationSum + (d.waitingTime || 0), 0);
-  }, 0);
-  
-  const avgProcessingTime = completedOrders.length > 0 ? totalProcessingTime / completedOrders.length : 0;
-  const avgWaitingTime = completedOrders.length > 0 ? totalWaitingTime / completedOrders.length : 0;
-  const avgTotalTime = avgProcessingTime + avgWaitingTime;
-  
-  const busyStations = stations.filter(s => s.currentOrderId !== null && s.currentOrderId !== undefined).length;
-  const utilizationRate = stations.length > 0 ? (busyStations / stations.length) * 100 : 0;
+
+  // Use calculated KPIs from Gantt events if available, otherwise fallback to old calculation
+  const avgProcessingTime = calculatedKPIs?.avgProcessingTime ?? 0;
+  const avgWaitingTime = calculatedKPIs?.avgWaitingTime ?? 0;
+  const avgTotalTime = calculatedKPIs?.avgLeadTime ?? (avgProcessingTime + avgWaitingTime);
+  const totalProcessingTime = calculatedKPIs?.totalProcessingTime ?? 0;
+  const totalWaitingTime = calculatedKPIs?.totalWaitingTime ?? 0;
+
+  // Utilization now from Gantt calculation (over entire simulation duration)
+  const demUtilization = calculatedKPIs?.demUtilization ?? 0;
+  const monUtilization = calculatedKPIs?.monUtilization ?? 0;
+
+  const busyStations = stations.filter((s: any) => s.currentOrderId != null || s.currentOrder != null).length;
+  const currentUtilizationRate = stations.length > 0 ? (busyStations / stations.length) * 100 : 0;
 
   const totalWaitingOrders = stations.reduce((sum, station) => sum + ((station as any).waitingQueue?.length || 0), 0);
 
@@ -99,7 +106,7 @@ export function AdvancedKPIDashboard({
       </div>
       
       {/* KPI Cards */}
-      <div className="grid grid-cols-3 md:grid-cols-9 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
         <Card>
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{completedOrders.length}</div>
@@ -109,7 +116,7 @@ export function AdvancedKPIDashboard({
         <Card>
           <CardContent className="pt-6">
             <div className="text-2xl font-bold">{avgTotalTime.toFixed(1)} min</div>
-            <p className="text-xs text-muted-foreground">Ø Gesamtzeit</p>
+            <p className="text-xs text-muted-foreground">Ø Durchlaufzeit</p>
           </CardContent>
         </Card>
         <Card>
@@ -126,20 +133,24 @@ export function AdvancedKPIDashboard({
         </Card>
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{utilizationRate.toFixed(1)}%</div>
-            <p className="text-xs text-muted-foreground">Stationsauslastung</p>
+            <div className="text-2xl font-bold">{((avgWaitingTime / avgTotalTime) * 100 || 0).toFixed(1)}%</div>
+            <p className="text-xs text-muted-foreground">Wartezeit-Anteil</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Utilization Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-2xl font-bold text-blue-600">{demUtilization.toFixed(1)}%</div>
+            <p className="text-xs text-muted-foreground">Demontage Auslastung</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{totalWaitingOrders}</div>
-            <p className="text-xs text-muted-foreground">Aufträge in Warteschlangen</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{busyStations}</div>
-            <p className="text-xs text-muted-foreground">Belegte Stationen</p>
+            <div className="text-2xl font-bold text-green-600">{monUtilization.toFixed(1)}%</div>
+            <p className="text-xs text-muted-foreground">Montage Auslastung</p>
           </CardContent>
         </Card>
         <Card>
@@ -150,8 +161,8 @@ export function AdvancedKPIDashboard({
         </Card>
         <Card>
           <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{stations.length}</div>
-            <p className="text-xs text-muted-foreground">Gesamte Stationen</p>
+            <div className="text-2xl font-bold">{totalWaitingOrders}</div>
+            <p className="text-xs text-muted-foreground">In Warteschlangen</p>
           </CardContent>
         </Card>
       </div>
@@ -188,11 +199,12 @@ export function AdvancedKPIDashboard({
                   </TableHeader>
                   <TableBody>
                     {completedOrders.map((order) => {
-                      const completedDurations = Object.values((order as any).stationDurations || {}).filter((d: any) => d.completed);
-                      const processingTime = completedDurations.reduce((sum: number, d: any) => sum + (d.actual || 0), 0);
-                      const waitingTime = completedDurations.reduce((sum: number, d: any) => sum + (d.waitingTime || 0), 0);
-                      const totalTime = processingTime + waitingTime;
-                      
+                      // Use calculatedMetrics from Gantt chart if available
+                      const metrics = (order as any).calculatedMetrics;
+                      const processingTime = metrics?.processingTime ?? 0;
+                      const waitingTime = metrics?.waitingTime ?? 0;
+                      const totalTime = metrics?.leadTime ?? (processingTime + waitingTime);
+
                       return (
                         <TableRow key={order.id}>
                           <TableCell className="font-medium">{(order as any).kundeName || order.customer?.firstName + ' ' + order.customer?.lastName}</TableCell>
@@ -226,40 +238,68 @@ export function AdvancedKPIDashboard({
                     </CardHeader>
                     <CardContent>
                       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                        {Object.entries((order as any).stationDurations || {})
-                          .filter(([_, duration]: any) => duration.completed)
-                          .map(([stationId, duration]: any) => {
-                            const station = stations.find(s => s.id === stationId);
-                            const processingTime = duration.actual || 0;
-                            const waitingTime = duration.waitingTime || 0;
-                            const totalStationTime = processingTime + waitingTime;
-                            
-                            return (
-                              <div 
-                                key={`${order.id}-${stationId}`} 
-                                className="p-3 border rounded-lg bg-gray-50"
-                              >
-                                <div className="text-sm font-medium text-gray-800">
-                                  {station?.name || stationId}
-                                </div>
-                                <div className="text-xs space-y-1 mt-1">
-                                  <div className="text-green-600">Bearbeitung: {processingTime.toFixed(1)} min</div>
-                                  {waitingTime > 0 && (
-                                    <div className="text-orange-600">Wartezeit: {waitingTime.toFixed(1)} min</div>
-                                  )}
-                                  <div className="font-medium border-t pt-1">
-                                    Gesamt: {totalStationTime.toFixed(1)} min
+                        {(() => {
+                          // Use ganttStationData from Gantt chart if available
+                          const ganttData = (order as any).ganttStationData;
+                          if (ganttData && Object.keys(ganttData).length > 0) {
+                            return Object.entries(ganttData).map(([stationId, data]: any) => {
+                              const station = stations.find(s => s.id === stationId);
+                              const processingTime = data.processingTime || 0;
+                              const waitingTime = data.waitingTime || 0;
+                              const totalStationTime = processingTime + waitingTime;
+
+                              return (
+                                <div
+                                  key={`${order.id}-${stationId}`}
+                                  className="p-3 border rounded-lg bg-gray-50"
+                                >
+                                  <div className="text-sm font-medium text-gray-800">
+                                    {station?.name || stationId}
                                   </div>
-                                  {duration.startTime && (
-                                    <div className="text-gray-500">
-                                      {duration.startTime.toLocaleTimeString('de-DE')}
+                                  <div className="text-xs space-y-1 mt-1">
+                                    <div className="text-green-600">Bearbeitung: {processingTime.toFixed(1)} min</div>
+                                    {waitingTime > 0 && (
+                                      <div className="text-orange-600">Wartezeit: {waitingTime.toFixed(1)} min</div>
+                                    )}
+                                    <div className="font-medium border-t pt-1">
+                                      Gesamt: {totalStationTime.toFixed(1)} min
                                     </div>
-                                  )}
+                                  </div>
                                 </div>
-                              </div>
-                            );
-                          })
-                        }
+                              );
+                            });
+                          }
+
+                          // Fallback to old stationDurations if ganttStationData not available
+                          return Object.entries((order as any).stationDurations || {})
+                            .filter(([_, duration]: any) => duration.completed)
+                            .map(([stationId, duration]: any) => {
+                              const station = stations.find(s => s.id === stationId);
+                              const processingTime = duration.actual || 0;
+                              const waitingTime = duration.waitingTime || 0;
+                              const totalStationTime = processingTime + waitingTime;
+
+                              return (
+                                <div
+                                  key={`${order.id}-${stationId}`}
+                                  className="p-3 border rounded-lg bg-gray-50"
+                                >
+                                  <div className="text-sm font-medium text-gray-800">
+                                    {station?.name || stationId}
+                                  </div>
+                                  <div className="text-xs space-y-1 mt-1">
+                                    <div className="text-green-600">Bearbeitung: {processingTime.toFixed(1)} min</div>
+                                    {waitingTime > 0 && (
+                                      <div className="text-orange-600">Wartezeit: {waitingTime.toFixed(1)} min</div>
+                                    )}
+                                    <div className="font-medium border-t pt-1">
+                                      Gesamt: {totalStationTime.toFixed(1)} min
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            });
+                        })()}
                       </div>
                     </CardContent>
                   </Card>

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, ReactNode, useEffect } from 'react';
+import React, { createContext, useContext, useState, ReactNode, useEffect, useRef } from 'react';
 
 interface SimulationOrder {
   id: string;
@@ -70,7 +70,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
   const [speed, setSpeed] = useState<number>(1);
   const [simulationTime, setSimulationTime] = useState<Date>(new Date());
   const [waitingOrders, setWaitingOrders] = useState<SimulationOrder[]>([]);
-  const [lastRealTime, setLastRealTime] = useState<number>(Date.now());
+  const lastRealTimeRef = useRef<number>(Date.now());
   const [currentSchedulingAlgorithm, setCurrentSchedulingAlgorithm] = useState<string>('FIFO');
 
   const addCompletedOrder = (order: SimulationOrder) => {
@@ -92,26 +92,36 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
     setSpeed(1);
     setSimulationTime(new Date());
     setWaitingOrders([]);
+    lastRealTimeRef.current = Date.now();
   };
 
   // Simulation engine - runs independently of active component
   useEffect(() => {
     if (!isRunning) return;
-    
+
+    lastRealTimeRef.current = Date.now();
+
     const interval = setInterval(() => {
       const now = Date.now();
-      const realTimeDelta = now - lastRealTime;
-      const simulationTimeDelta = realTimeDelta * speed;
-      
-      setSimulationTime(prev => new Date(prev.getTime() + simulationTimeDelta));
-      setLastRealTime(now);
-      
-      // Note: Complex order processing is handled by the RealDataFactorySimulation component
-      // This just keeps the simulation time running when switching between tabs
+      const realTimeDelta = now - lastRealTimeRef.current;
+      lastRealTimeRef.current = now;
+
+      if (realTimeDelta <= 0) {
+        return;
+      }
+
+      const deltaMinutes = (realTimeDelta / 1000) * speed;
+      if (deltaMinutes <= 0) {
+        return;
+      }
+
+      setSimulationTime(prev => new Date(prev.getTime() + deltaMinutes * 60000));
+
+      // Complex order processing is handled by the RealDataFactorySimulation component.
     }, 100);
-    
+
     return () => clearInterval(interval);
-  }, [isRunning, speed, lastRealTime]);
+  }, [isRunning, speed]);
 
   return (
     <SimulationContext.Provider
