@@ -7,7 +7,8 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 import { getQueueConfig, updateQueueConfig } from '@/app/actions/queue.actions'
-import { Settings, Save } from 'lucide-react'
+import { Settings, Save, ChevronDown, ChevronRight } from 'lucide-react'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 
 interface QueueConfigPanelProps {
   factoryId: string
@@ -16,6 +17,8 @@ interface QueueConfigPanelProps {
 export function QueueConfigPanel({ factoryId }: QueueConfigPanelProps) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [waitTimesOpen, setWaitTimesOpen] = useState(false)
+  const [pythonScriptsOpen, setPythonScriptsOpen] = useState(false)
   const [config, setConfig] = useState({
     preAcceptanceReleaseMinutes: 0,
     preInspectionReleaseMinutes: 0,
@@ -107,123 +110,166 @@ export function QueueConfigPanel({ factoryId }: QueueConfigPanelProps) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <Label htmlFor="preAcceptance">
-              Pre-Acceptance Queue Wait Time
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="preAcceptance"
-                type="number"
-                min="0"
-                value={config.preAcceptanceReleaseMinutes}
-                onChange={(e) => setConfig({
-                  ...config,
-                  preAcceptanceReleaseMinutes: parseInt(e.target.value) || 0
-                })}
-              />
-              <span className="text-sm text-muted-foreground">min</span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Wait time before order enters Auftragsannahme
-            </p>
-          </div>
+        {/* Wait Times Section - Collapsible */}
+        <Collapsible open={waitTimesOpen} onOpenChange={setWaitTimesOpen}>
+          <CollapsibleTrigger asChild>
+            <Button
+              variant="ghost"
+              className="flex items-center justify-between w-full p-4 hover:bg-accent rounded-md"
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">Queue Wait Times</span>
+                <span className="text-xs text-muted-foreground">
+                  (Demontage, Montage settings)
+                </span>
+              </div>
+              {waitTimesOpen ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronRight className="h-4 w-4" />
+              )}
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-4">
+            <div className="grid gap-4 md:grid-cols-3 px-4">
+              <div className="space-y-2">
+                <Label htmlFor="preAcceptance">
+                  Pre-Acceptance Queue Wait Time
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="preAcceptance"
+                    type="number"
+                    min="0"
+                    value={config.preAcceptanceReleaseMinutes}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      preAcceptanceReleaseMinutes: parseInt(e.target.value) || 0
+                    })}
+                  />
+                  <span className="text-sm text-muted-foreground">min</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Wait time before order enters Auftragsannahme
+                </p>
+              </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="preInspection">
-              Pre-Inspection Queue Wait Time
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="preInspection"
-                type="number"
-                min="0"
-                value={config.preInspectionReleaseMinutes}
-                onChange={(e) => setConfig({
-                  ...config,
-                  preInspectionReleaseMinutes: parseInt(e.target.value) || 0
-                })}
-              />
-              <span className="text-sm text-muted-foreground">min</span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Wait time before order enters Inspektion
-            </p>
-          </div>
+              <div className="space-y-2">
+                <Label htmlFor="preInspection">
+                  Pre-Inspection Queue Wait Time
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="preInspection"
+                    type="number"
+                    min="0"
+                    value={config.preInspectionReleaseMinutes}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      preInspectionReleaseMinutes: parseInt(e.target.value) || 0
+                    })}
+                  />
+                  <span className="text-sm text-muted-foreground">min</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Wait time before order enters Inspektion
+                </p>
+              </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="postInspection">
-              Post-Inspection Queue Wait Time
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="postInspection"
-                type="number"
-                min="0"
-                value={config.postInspectionReleaseMinutes}
-                onChange={(e) => setConfig({
-                  ...config,
-                  postInspectionReleaseMinutes: parseInt(e.target.value) || 0
-                })}
-              />
-              <span className="text-sm text-muted-foreground">min</span>
+              <div className="space-y-2">
+                <Label htmlFor="postInspection">
+                  Post-Inspection Queue Wait Time
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="postInspection"
+                    type="number"
+                    min="0"
+                    value={config.postInspectionReleaseMinutes}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      postInspectionReleaseMinutes: parseInt(e.target.value) || 0
+                    })}
+                  />
+                  <span className="text-sm text-muted-foreground">min</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Wait time before order enters Demontage
+                </p>
+              </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Wait time before order enters Demontage
-            </p>
-          </div>
-        </div>
+          </CollapsibleContent>
+        </Collapsible>
 
-        <div className="mt-6 pt-6 border-t">
-          <h3 className="text-sm font-semibold mb-4">Python Optimization Scripts (Optional)</h3>
-          <p className="text-xs text-muted-foreground mb-4">
-            Configure Python scripts to optimize order sequences. Leave empty to use FIFO order.
-          </p>
-          <div className="grid gap-4 md:grid-cols-3">
-            <div className="space-y-2">
-              <Label htmlFor="preAcceptanceScript">Pre-Acceptance Script</Label>
-              <Input
-                id="preAcceptanceScript"
-                type="text"
-                placeholder="/path/to/script.py"
-                value={config.preAcceptancePythonScript}
-                onChange={(e) => setConfig({
-                  ...config,
-                  preAcceptancePythonScript: e.target.value
-                })}
-              />
-            </div>
+        {/* Python Scripts Section - Collapsible */}
+        <Collapsible open={pythonScriptsOpen} onOpenChange={setPythonScriptsOpen}>
+          <CollapsibleTrigger asChild>
+            <Button
+              variant="ghost"
+              className="flex items-center justify-between w-full p-4 hover:bg-accent rounded-md"
+            >
+              <div className="flex items-center gap-2">
+                <span className="font-semibold">Python Optimization Scripts</span>
+                <span className="text-xs text-muted-foreground">(Debug Info, optional)</span>
+              </div>
+              {pythonScriptsOpen ? (
+                <ChevronDown className="h-4 w-4" />
+              ) : (
+                <ChevronRight className="h-4 w-4" />
+              )}
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="pt-4">
+            <div className="px-4">
+              <p className="text-xs text-muted-foreground mb-4">
+                Configure Python scripts to optimize order sequences. Leave empty to use FIFO order.
+              </p>
+              <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <Label htmlFor="preAcceptanceScript">Pre-Acceptance Script</Label>
+                  <Input
+                    id="preAcceptanceScript"
+                    type="text"
+                    placeholder="/path/to/script.py"
+                    value={config.preAcceptancePythonScript}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      preAcceptancePythonScript: e.target.value
+                    })}
+                  />
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="preInspectionScript">Pre-Inspection Script</Label>
-              <Input
-                id="preInspectionScript"
-                type="text"
-                placeholder="/path/to/script.py"
-                value={config.preInspectionPythonScript}
-                onChange={(e) => setConfig({
-                  ...config,
-                  preInspectionPythonScript: e.target.value
-                })}
-              />
-            </div>
+                <div className="space-y-2">
+                  <Label htmlFor="preInspectionScript">Pre-Inspection Script</Label>
+                  <Input
+                    id="preInspectionScript"
+                    type="text"
+                    placeholder="/path/to/script.py"
+                    value={config.preInspectionPythonScript}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      preInspectionPythonScript: e.target.value
+                    })}
+                  />
+                </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="postInspectionScript">Post-Inspection Script</Label>
-              <Input
-                id="postInspectionScript"
-                type="text"
-                placeholder="/path/to/script.py"
-                value={config.postInspectionPythonScript}
-                onChange={(e) => setConfig({
-                  ...config,
-                  postInspectionPythonScript: e.target.value
-                })}
-              />
+                <div className="space-y-2">
+                  <Label htmlFor="postInspectionScript">Post-Inspection Script</Label>
+                  <Input
+                    id="postInspectionScript"
+                    type="text"
+                    placeholder="/path/to/script.py"
+                    value={config.postInspectionPythonScript}
+                    onChange={(e) => setConfig({
+                      ...config,
+                      postInspectionPythonScript: e.target.value
+                    })}
+                  />
+                </div>
+              </div>
             </div>
-          </div>
-        </div>
+          </CollapsibleContent>
+        </Collapsible>
 
         <div className="flex justify-end pt-4">
           <Button onClick={handleSave} disabled={saving}>
