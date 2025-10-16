@@ -347,3 +347,91 @@ export async function getFactory(id: string) {
     }
   }
 }
+
+export async function updateFactoryDefaultDemontagezeit(id: string, defaultDemontagezeit: number) {
+  try {
+    // Validate defaultDemontagezeit
+    if (defaultDemontagezeit < 0) {
+      return {
+        success: false,
+        error: 'Die Standard-Demontagezeit muss mindestens 0 Minuten betragen'
+      }
+    }
+
+    const factory = await prisma.reassemblyFactory.update({
+      where: { id },
+      data: { defaultDemontagezeit }
+    })
+
+    revalidatePath('/factory-configurator')
+    revalidatePath(`/factory-configurator/${id}`)
+    revalidatePath('/api/factories')
+    revalidatePath('/')
+
+    return {
+      success: true,
+      data: factory,
+      message: 'Standard-Demontagezeit erfolgreich aktualisiert'
+    }
+  } catch (error) {
+    console.error('Error updating factory defaultDemontagezeit:', error)
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2025') {
+        return {
+          success: false,
+          error: 'Factory nicht gefunden'
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Fehler beim Aktualisieren der Standard-Demontagezeit'
+    }
+  }
+}
+
+export async function updateFactoryDefaultMontagezeit(id: string, defaultMontagezeit: number) {
+  try {
+    // Validate defaultMontagezeit
+    if (defaultMontagezeit < 0) {
+      return {
+        success: false,
+        error: 'Die Standard-Montagezeit muss mindestens 0 Minuten betragen'
+      }
+    }
+
+    const factory = await prisma.reassemblyFactory.update({
+      where: { id },
+      data: { defaultMontagezeit }
+    })
+
+    revalidatePath('/factory-configurator')
+    revalidatePath(`/factory-configurator/${id}`)
+    revalidatePath('/api/factories')
+    revalidatePath('/')
+
+    return {
+      success: true,
+      data: factory,
+      message: 'Standard-Montagezeit erfolgreich aktualisiert'
+    }
+  } catch (error) {
+    console.error('Error updating factory defaultMontagezeit:', error)
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2025') {
+        return {
+          success: false,
+          error: 'Factory nicht gefunden'
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Fehler beim Aktualisieren der Standard-Montagezeit'
+    }
+  }
+}

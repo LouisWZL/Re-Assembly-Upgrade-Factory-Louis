@@ -29,6 +29,8 @@ model ReassemblyFactory {
   anzahlMontagestationen Int           @default(10)
   targetBatchAverage     Int           @default(65)
   pflichtUpgradeSchwelle Int           @default(30)
+  defaultDemontagezeit   Int           @default(30)
+  defaultMontagezeit     Int           @default(45)
   beschaffung            Json?
   createdAt              DateTime      @default(now())
   updatedAt              DateTime      @updatedAt

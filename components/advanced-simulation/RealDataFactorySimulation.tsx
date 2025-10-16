@@ -102,6 +102,36 @@ interface SchedulingStrategy {
 
 import { AdvancedKPIDashboard } from './AdvancedKPIDashboard';
 
+// Helper function to calculate process times from baugruppen
+function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
+  const baugruppen = order.baugruppenInstances || []
+  if (baugruppen.length === 0) {
+    return {
+      demontage: factory.defaultDemontagezeit || 30,
+      montage: factory.defaultMontagezeit || 45
+    }
+  }
+
+  let totalDemontage = 0
+  let totalMontage = 0
+  let count = 0
+
+  baugruppen.forEach((bg: any) => {
+    if (bg.baugruppe?.demontagezeit) {
+      totalDemontage += bg.baugruppe.demontagezeit
+      count++
+    }
+    if (bg.baugruppe?.montagezeit) {
+      totalMontage += bg.baugruppe.montagezeit
+    }
+  })
+
+  return {
+    demontage: count > 0 ? Math.round(totalDemontage / count) : (factory.defaultDemontagezeit || 30),
+    montage: count > 0 ? Math.round(totalMontage / count) : (factory.defaultMontagezeit || 45)
+  }
+}
+
 export function RealDataFactorySimulation() {
   const { activeFactory } = useFactory();
   const { 
@@ -771,7 +801,7 @@ export function RealDataFactorySimulation() {
                 order.id,
                 0, // currentSimMinute = 0 at start
                 order.processSequences,
-                { demontage: 30, montage: 45 } // TODO: Calculate from process sequence
+                calculateProcessTimesFromBaugruppen(order, result.data.factory)
               )
               console.log(`✅ Enqueued order ${order.id.slice(-4)} into PreAcceptanceQueue`)
 
@@ -1581,7 +1611,7 @@ export function RealDataFactorySimulation() {
                       finishedOrderId,
                       getSimMinutes(),
                       order.processSequences,
-                      { demontage: 30, montage: 45 }
+                      calculateProcessTimesFromBaugruppen(order, factoryData?.factory)
                     )
                     console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished acceptance → PreInspectionQueue`)
                     // Add Gantt event for queue waiting start
@@ -1592,7 +1622,7 @@ export function RealDataFactorySimulation() {
                       finishedOrderId,
                       getSimMinutes(),
                       order.processSequences,
-                      { demontage: 30, montage: 45 }
+                      calculateProcessTimesFromBaugruppen(order, factoryData?.factory)
                     )
                     console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished inspection → PostInspectionQueue`)
                     // Add Gantt event for queue waiting start
