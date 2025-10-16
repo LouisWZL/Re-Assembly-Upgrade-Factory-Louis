@@ -51,4 +51,4 @@ CLAUDE.md
 /eurogardGitlabFrontend
 /apps
 .mcp.json
-.puppeteerrc.json
+.puppeteerrc.json/.env.local

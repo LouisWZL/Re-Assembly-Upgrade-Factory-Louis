@@ -1,19 +1,52 @@
 #!/usr/bin/env node
 
-// Setup script for Vercel database initialization
-console.log('🔧 Setting up Vercel database...')
+/**
+ * This script runs before build on Vercel to configure Prisma for PostgreSQL
+ * On local development, it uses SQLite via .env.local
+ */
 
-// Set DATABASE_URL if not already set
-if (!process.env.DATABASE_URL) {
-  console.log('📝 Setting DATABASE_URL to SQLite in /tmp')
-  process.env.DATABASE_URL = 'file:/tmp/production.db'
+const fs = require('fs');
+const path = require('path');
+
+const schemaPath = path.join(__dirname, '..', 'prisma', 'schema.prisma');
+const isVercel = process.env.VERCEL === '1';
+
+console.log('🔧 Setting up database configuration...');
+console.log('- Environment:', isVercel ? 'Vercel (Production)' : 'Local (Development)');
+
+// Read the current schema
+let schema = fs.readFileSync(schemaPath, 'utf-8');
+
+if (isVercel) {
+  console.log('- Configuring for PostgreSQL (Supabase)...');
+
+  // Replace datasource block for PostgreSQL
+  schema = schema.replace(
+    /datasource db \{[^}]+\}/s,
+    `datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}`
+  );
+
+  console.log('✅ Schema configured for PostgreSQL');
+} else {
+  console.log('- Configuring for SQLite (Local)...');
+
+  // Replace datasource block for SQLite
+  schema = schema.replace(
+    /datasource db \{[^}]+\}/s,
+    `datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}`
+  );
+
+  console.log('✅ Schema configured for SQLite');
 }
 
-console.log('Environment variables:')
-console.log('- NODE_ENV:', process.env.NODE_ENV)
-console.log('- VERCEL:', process.env.VERCEL)
-console.log('- DATABASE_URL:', process.env.DATABASE_URL)
+// Write the updated schema
+fs.writeFileSync(schemaPath, schema, 'utf-8');
 
-// This script can be called during the Vercel build process
-// to ensure the database is properly configured
-console.log('✅ Database setup complete')
+console.log('✅ Database configuration complete');

@@ -17,8 +17,17 @@ export function PhaseNode({ data }: { data: PhaseNodeData }) {
   const { title, queue, totalSlots, busySlots, slots } = data
   const util = totalSlots > 0 ? Math.round((busySlots / totalSlots) * 100) : 0
 
+  // Determine if this is a Demontage or Montage node for blue background
+  const isDemontageOrMontage = title === 'Demontage' || title === 'Montage'
+  const bgColor = isDemontageOrMontage ? 'bg-blue-50' : 'bg-white'
+
   return (
-    <div className="rounded-md border shadow-sm bg-white p-3 w-[240px]">
+    <div
+      className={`rounded-md shadow-sm ${bgColor} p-3 w-[240px]`}
+      style={{
+        border: isDemontageOrMontage ? '2px solid #1e40af' : '2px solid #e5e7eb'
+      }}
+    >
       <Handle type="target" position={Position.Left} />
       <Handle type="source" position={Position.Right} />
       <div className="flex items-center justify-between">
