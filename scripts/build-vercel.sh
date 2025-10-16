@@ -10,16 +10,25 @@ echo "Database URL for build: $DATABASE_URL"
 echo "Node environment: $NODE_ENV"
 echo "Vercel environment: ${VERCEL:-'false'}"
 
+# Check if we need to use SQLite for build (no PostgreSQL URL provided)
+if [[ "$DATABASE_URL" == file:* ]]; then
+    echo "🗄️ Switching to SQLite for build-time database..."
+
+    # Temporarily modify schema to use SQLite
+    echo "Temporarily modifying Prisma schema for SQLite..."
+    sed -i.bak 's/provider = "postgresql"/provider = "sqlite"/' prisma/schema.prisma
+
+    # Create the directory if it doesn't exist
+    mkdir -p "$(dirname "${DATABASE_URL#file:}")"
+fi
+
 echo "📦 Generating Prisma client..."
 npx prisma generate
 
 # Check if we have a database URL that looks like a file
 if [[ "$DATABASE_URL" == file:* ]]; then
     echo "🗄️ Setting up temporary SQLite database for build..."
-    
-    # Create the directory if it doesn't exist
-    mkdir -p "$(dirname "${DATABASE_URL#file:}")"
-    
+
     # Push the schema to create the database structure
     echo "Pushing database schema..."
     npx prisma db push --accept-data-loss --force-reset
@@ -41,6 +50,12 @@ fi
 
 echo "🚀 Building Next.js application..."
 npx next build
+
+# Restore original schema if we modified it
+if [[ -f prisma/schema.prisma.bak ]]; then
+    echo "🔄 Restoring original Prisma schema..."
+    mv prisma/schema.prisma.bak prisma/schema.prisma
+fi
 
 echo "✅ Build completed successfully!"
 
