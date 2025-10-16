@@ -1,11 +1,15 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { Download } from 'lucide-react';
 import { exportToCSV } from '@/lib/csv-export';
 import { getOrdersForExport } from '@/app/actions/export.actions';
 import { toast } from 'sonner';
 import { useFactory } from '@/contexts/factory-context';
+import { getQueueConfig, updateQueueConfig } from '@/app/actions/queue.actions';
+import { useState, useEffect } from 'react';
 
 import { AdvancedOrder, ProductionStation } from '@/types/advanced-factory';
 
@@ -55,6 +59,12 @@ export function AdvancedKPIDashboard({
 }: AdvancedKPIDashboardProps) {
   const { activeFactory } = useFactory();
 
+  // Queue configuration state
+  const [preAcceptanceMinutes, setPreAcceptanceMinutes] = useState(0);
+  const [preInspectionMinutes, setPreInspectionMinutes] = useState(0);
+  const [postInspectionMinutes, setPostInspectionMinutes] = useState(0);
+  const [loadingQueueConfig, setLoadingQueueConfig] = useState(false);
+
   // Use calculated KPIs from Gantt events if available, otherwise fallback to old calculation
   const avgProcessingTime = calculatedKPIs?.avgProcessingTime ?? 0;
   const avgWaitingTime = calculatedKPIs?.avgWaitingTime ?? 0;
@@ -70,6 +80,58 @@ export function AdvancedKPIDashboard({
   const currentUtilizationRate = stations.length > 0 ? (busyStations / stations.length) * 100 : 0;
 
   const totalWaitingOrders = stations.reduce((sum, station) => sum + ((station as any).waitingQueue?.length || 0), 0);
+
+  // Load queue configuration on mount
+  useEffect(() => {
+    if (activeFactory?.id) {
+      loadQueueConfiguration();
+    }
+  }, [activeFactory?.id]);
+
+  const loadQueueConfiguration = async () => {
+    if (!activeFactory?.id) return;
+
+    setLoadingQueueConfig(true);
+    try {
+      const result = await getQueueConfig(activeFactory.id);
+      if (result.success && result.data) {
+        setPreAcceptanceMinutes(result.data.preAcceptanceReleaseMinutes);
+        setPreInspectionMinutes(result.data.preInspectionReleaseMinutes);
+        setPostInspectionMinutes(result.data.postInspectionReleaseMinutes);
+      }
+    } catch (error) {
+      console.error('Error loading queue config:', error);
+    } finally {
+      setLoadingQueueConfig(false);
+    }
+  };
+
+  const handleSaveQueueConfig = async () => {
+    if (!activeFactory?.id) {
+      toast.error('Keine Fabrik ausgewählt');
+      return;
+    }
+
+    setLoadingQueueConfig(true);
+    try {
+      const result = await updateQueueConfig(activeFactory.id, {
+        preAcceptanceReleaseMinutes: preAcceptanceMinutes,
+        preInspectionReleaseMinutes: preInspectionMinutes,
+        postInspectionReleaseMinutes: postInspectionMinutes
+      });
+
+      if (result.success) {
+        toast.success('Warteschlangen-Konfiguration gespeichert');
+      } else {
+        toast.error('Fehler beim Speichern der Konfiguration');
+      }
+    } catch (error) {
+      console.error('Error saving queue config:', error);
+      toast.error('Fehler beim Speichern der Konfiguration');
+    } finally {
+      setLoadingQueueConfig(false);
+    }
+  };
 
   const handleExportOrders = async () => {
     try {
@@ -166,6 +228,67 @@ export function AdvancedKPIDashboard({
           </CardContent>
         </Card>
       </div>
+
+      {/* Queue Configuration Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Warteschlangen-Konfiguration (Freigabezeiten)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div className="space-y-2">
+              <Label htmlFor="preAcceptance">Pre-Acceptance Queue (Minuten)</Label>
+              <Input
+                id="preAcceptance"
+                type="number"
+                min="0"
+                value={preAcceptanceMinutes}
+                onChange={(e) => setPreAcceptanceMinutes(parseInt(e.target.value) || 0)}
+                disabled={loadingQueueConfig}
+              />
+              <p className="text-xs text-muted-foreground">
+                Wartezeit vor Auftragsannahme
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="preInspection">Pre-Inspection Queue (Minuten)</Label>
+              <Input
+                id="preInspection"
+                type="number"
+                min="0"
+                value={preInspectionMinutes}
+                onChange={(e) => setPreInspectionMinutes(parseInt(e.target.value) || 0)}
+                disabled={loadingQueueConfig}
+              />
+              <p className="text-xs text-muted-foreground">
+                Wartezeit vor Inspektion
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="postInspection">Post-Inspection Queue (Minuten)</Label>
+              <Input
+                id="postInspection"
+                type="number"
+                min="0"
+                value={postInspectionMinutes}
+                onChange={(e) => setPostInspectionMinutes(parseInt(e.target.value) || 0)}
+                disabled={loadingQueueConfig}
+              />
+              <p className="text-xs text-muted-foreground">
+                Wartezeit nach Inspektion
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 flex justify-end">
+            <Button
+              onClick={handleSaveQueueConfig}
+              disabled={loadingQueueConfig}
+            >
+              {loadingQueueConfig ? 'Speichert...' : 'Konfiguration speichern'}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Detailed Order View from Simulation */}
       <OrderDetailsCardSection orders={orders} stations={stations} />

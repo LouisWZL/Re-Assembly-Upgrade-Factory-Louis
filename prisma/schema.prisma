@@ -21,20 +21,21 @@ model Baugruppentyp {
 }
 
 model ReassemblyFactory {
-  id                     String          @id @default(cuid())
+  id                     String        @id @default(cuid())
   name                   String
   kapazität             Int
-  schichtmodell          String          @default("EINSCHICHT")
-  anzahlMontagestationen Int             @default(10)
-  targetBatchAverage     Int             @default(65)
-  pflichtUpgradeSchwelle Int             @default(30)
+  schichtmodell          String        @default("EINSCHICHT")
+  anzahlMontagestationen Int           @default(10)
+  targetBatchAverage     Int           @default(65)
+  pflichtUpgradeSchwelle Int           @default(30)
   beschaffung            Json?
-  createdAt              DateTime        @default(now())
-  updatedAt              DateTime        @updatedAt
+  createdAt              DateTime      @default(now())
+  updatedAt              DateTime      @updatedAt
   auftraege              Auftrag[]
   baugruppen             Baugruppe[]
   baugruppentypen        Baugruppentyp[]
   produkte               Produkt[]
+  queueConfig            QueueConfig?
 }
 
 model Kunde {
@@ -50,25 +51,28 @@ model Kunde {
 }
 
 model Auftrag {
-  id                  String              @id @default(cuid())
-  kundeId             String
-  produktvarianteId   String
-  phase               String              @default("AUFTRAGSANNAHME")
-  factoryId           String
-  terminierung        Json?
-  phaseHistory        Json?
-  graphData           Json?
-  processGraphDataBg  Json?
-  processGraphDataBgt Json?
-  processSequences    Json?
-  createdAt           DateTime            @default(now())
-  updatedAt           DateTime            @updatedAt
-  factory             ReassemblyFactory   @relation(fields: [factoryId], references: [id])
-  produktvariante     Produktvariante     @relation(fields: [produktvarianteId], references: [id])
-  kunde               Kunde               @relation(fields: [kundeId], references: [id])
-  baugruppenInstances BaugruppeInstance[]
-  liefertermine       Liefertermin[]
-  stationDurations    StationDuration[]
+  id                   String                @id @default(cuid())
+  kundeId              String
+  produktvarianteId    String
+  phase                String                @default("AUFTRAGSANNAHME")
+  factoryId            String
+  terminierung         Json?
+  phaseHistory         Json?
+  graphData            Json?
+  processGraphDataBg   Json?
+  processGraphDataBgt  Json?
+  processSequences     Json?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  factory              ReassemblyFactory     @relation(fields: [factoryId], references: [id])
+  produktvariante      Produktvariante       @relation(fields: [produktvarianteId], references: [id])
+  kunde                Kunde                 @relation(fields: [kundeId], references: [id])
+  baugruppenInstances  BaugruppeInstance[]
+  liefertermine        Liefertermin[]
+  stationDurations     StationDuration[]
+  preAcceptanceQueue   PreAcceptanceQueue?
+  preInspectionQueue   PreInspectionQueue?
+  postInspectionQueue  PostInspectionQueue?
 }
 
 model Liefertermin {
@@ -260,4 +264,73 @@ model StationDuration {
 
   @@index([auftragId])
   @@index([stationId])
+}
+
+// Simulation Queue Models - Control order flow with configurable wait times
+model PreAcceptanceQueue {
+  id                  String    @id @default(cuid())
+  orderId             String    @unique
+  order               Auftrag   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  possibleSequence    Json?     // Copied processSequences.steps
+  processTimes        Json?     // e.g. { demontage: 45, montage: 60 }
+  processingOrder     Int       @default(0)
+  releaseAfterMinutes Int       @default(0) // Wait time before order can be released (simulation minutes)
+  queuedAtSimMinute   Int       @default(0) // Simulation minute when queued
+  releasedAtSimMinute Int?      // Simulation minute when released (null = not released yet)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([processingOrder, queuedAtSimMinute])
+}
+
+model PreInspectionQueue {
+  id                  String    @id @default(cuid())
+  orderId             String    @unique
+  order               Auftrag   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  possibleSequence    Json?
+  processTimes        Json?
+  processingOrder     Int       @default(0)
+  releaseAfterMinutes Int       @default(0)
+  queuedAtSimMinute   Int       @default(0)
+  releasedAtSimMinute Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([processingOrder, queuedAtSimMinute])
+}
+
+model PostInspectionQueue {
+  id                  String    @id @default(cuid())
+  orderId             String    @unique
+  order               Auftrag   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  possibleSequence    Json?
+  processTimes        Json?
+  processingOrder     Int       @default(0)
+  releaseAfterMinutes Int       @default(0)
+  queuedAtSimMinute   Int       @default(0)
+  releasedAtSimMinute Int?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([processingOrder, queuedAtSimMinute])
+}
+
+// Queue Configuration - Store release times per queue
+model QueueConfig {
+  id                           String   @id @default(cuid())
+  factoryId                    String   @unique
+  factory                      ReassemblyFactory @relation(fields: [factoryId], references: [id], onDelete: Cascade)
+  preAcceptanceReleaseMinutes  Int      @default(0)
+  preInspectionReleaseMinutes  Int      @default(0)
+  postInspectionReleaseMinutes Int      @default(0)
+  // Python optimization script paths (optional)
+  preAcceptancePythonScript    String?  // Path to Python script for optimizing order sequence
+  preInspectionPythonScript    String?
+  postInspectionPythonScript   String?
+  // Batch release tracking - when did the batch window start?
+  preAcceptanceBatchStartSimMinute  Int?  // Sim minute when first order arrived (triggers wait time)
+  preInspectionBatchStartSimMinute  Int?
+  postInspectionBatchStartSimMinute Int?
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
 }

@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -28,6 +28,7 @@ import {
   Position
 } from '@xyflow/react';
 import { PhaseNode } from './nodes/PhaseNode'
+import { QueueCircleNode } from './QueueCircleNode'
 import '@xyflow/react/dist/style.css';
 import {
   Dialog,
@@ -368,7 +369,10 @@ export function RealDataFactorySimulation() {
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
   // Custom node types for React Flow
-  const nodeTypes = useMemo(() => ({ phaseNode: PhaseNode }), []);
+  const nodeTypes = useMemo(() => ({
+    phaseNode: PhaseNode,
+    queueCircle: QueueCircleNode
+  }), []);
 
   // Debug info toggle
   const [showDebugInfo, setShowDebugInfo] = useState(true);
@@ -395,6 +399,21 @@ export function RealDataFactorySimulation() {
   const [ganttRefreshKey, setGanttRefreshKey] = useState(0)
   const lastGanttBucketRef = useRef<number>(-1)
   const [debugRefreshKey, setDebugRefreshKey] = useState(0)
+  const [queueDebugInfo, setQueueDebugInfo] = useState<{
+    preAcceptanceCount: number
+    preInspectionCount: number
+    postInspectionCount: number
+    preAcceptanceReady: number
+    preInspectionReady: number
+    postInspectionReady: number
+    lastCheck: number
+    config: any
+    lastRelease?: {
+      queue: string
+      count: number
+      simTime: number
+    }
+  } | null>(null)
   useEffect(() => {
     const min = getSimMinutes()
     const bucket = Math.floor(min / 10)
@@ -427,6 +446,7 @@ export function RealDataFactorySimulation() {
   const demActivesRef = useRef<Array<{ orderId: string; label: string; slotIdx: number; remaining: number; total: number }>>([])
   const monActivesRef = useRef<Array<{ orderId: string; label: string; slotIdx: number; remaining: number; total: number }>>([])
   const monBundlesMapRef = useRef<Record<string, OpItem[]>>({})
+  const simulationOrdersRef = useRef<SimulationOrder[]>([])
 
   // Load factory data
   useEffect(() => {
@@ -562,8 +582,11 @@ export function RealDataFactorySimulation() {
             currentSequenceStep: 0 // Start at beginning of sequence
           };
         });
-        
-        setActiveOrders(simulationOrders);
+
+        // DON'T set active orders yet! They will be activated when released from PreAcceptanceQueue
+        // Store simulation orders in a ref for later use
+        simulationOrdersRef.current = simulationOrders
+        setActiveOrders([]);
 
         // Don't set simulation start time here - wait for user to press Start
         // setSimulationStartTime(new Date());
@@ -639,8 +662,20 @@ export function RealDataFactorySimulation() {
           demQueueRef.current = []
           monQueueRef.current = []
           monBundlesMapRef.current = {}
+
+          // IMPORTANT: Release all slots before clearing actives
+          demActivesRef.current.forEach(a => {
+            releaseSlot('DEMONTAGE', a.slotIdx)
+          })
+          monActivesRef.current.forEach(a => {
+            releaseSlot('REASSEMBLY', a.slotIdx)
+          })
+
           demActivesRef.current = []
           monActivesRef.current = []
+
+          // Clear slot tracking map
+          orderPhaseSlotMapRef.current = {}
 
           const debugLogs: string[] = []
           console.log('=== SIMULATION INIT START ===')
@@ -707,13 +742,45 @@ export function RealDataFactorySimulation() {
           // console.log(summary)
           // setTimeout(() => alert(summary), 500)
 
-          // Initialize main phase queues: all orders start at acceptance
+          // Initialize main phase queues: orders will come from database queues
           mainQueuesRef.current = {
-            acceptance: simulationOrders.map((o:any) => o.id),
+            acceptance: [], // Empty - will be filled by checkAndReleaseBatch()
             inspection: [],
             qualityShipping: []
           }
           demReadySetRef.current = new Set()
+
+          // Clear all queues before starting (to avoid unique constraint errors)
+          console.log('='*80)
+          console.log('🚀🚀🚀 NEUE QUEUE-INTEGRATION WIRD VERWENDET 🚀🚀🚀')
+          console.log('='*80)
+          console.log('🧹 Clearing all queues...')
+          const { clearAllQueues, enqueueOrder } = await import('@/app/actions/queue.actions')
+          const clearResult = await clearAllQueues()
+          console.log('✅ clearAllQueues result:', clearResult)
+
+          // Wait a bit to ensure database is cleared
+          await new Promise(resolve => setTimeout(resolve, 100))
+
+          // Enqueue all orders into PreAcceptanceQueue (database)
+          console.log(`📦 Enqueueing ${simulationOrders.length} orders into PreAcceptanceQueue...`)
+          for (const order of simulationOrders) {
+            try {
+              await enqueueOrder(
+                'preAcceptance',
+                order.id,
+                0, // currentSimMinute = 0 at start
+                order.processSequences,
+                { demontage: 30, montage: 45 } // TODO: Calculate from process sequence
+              )
+              console.log(`✅ Enqueued order ${order.id.slice(-4)} into PreAcceptanceQueue`)
+
+              // Add Gantt event for queue waiting start
+              pushEvent('QUEUE_WAIT:PRE_ACCEPTANCE_START', order.id, null)
+            } catch (error) {
+              console.error(`Failed to enqueue order ${order.id}:`, error)
+            }
+          }
         } catch (e) {
           const errorMsg = `FCFS queue build error: ${e instanceof Error ? e.message : String(e)}`
           console.error(errorMsg, e)
@@ -1075,13 +1142,14 @@ export function RealDataFactorySimulation() {
     const inspectionNode = flowNodes.find(n => n.id === 'inspection');
 
     if (orderAcceptanceNode) {
-      // 1. Circle connector between start and Auftragsannahme
+      // 1. Circle connector between start and Auftragsannahme - PRE-ACCEPTANCE QUEUE
       flowNodes.push({
         id: 'circle-1',
-        type: 'default',
+        type: 'queueCircle',
         position: { x: orderAcceptanceNode.position.x - 100, y: orderAcceptanceNode.position.y + 35 },
         data: {
-          label: ''
+          label: '',
+          queueType: 'preAcceptance' as const
         },
         style: {
           background: '#ffffff',
@@ -1093,19 +1161,20 @@ export function RealDataFactorySimulation() {
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
         draggable: false,
-        selectable: false
+        selectable: true
       });
     }
     
     if (orderAcceptanceNode && inspectionNode) {
-      // 2. Circle connector between Auftragsannahme and Inspektion
+      // 2. Circle connector between Auftragsannahme and Inspektion - PRE-INSPECTION QUEUE
       const midX = (orderAcceptanceNode.position.x + 180 + inspectionNode.position.x) / 2 - 15; // Center between stations
       flowNodes.push({
         id: 'circle-2',
-        type: 'default',
+        type: 'queueCircle',
         position: { x: midX, y: orderAcceptanceNode.position.y + 35 },
         data: {
-          label: ''
+          label: '',
+          queueType: 'preInspection' as const
         },
         style: {
           background: '#ffffff',
@@ -1117,21 +1186,22 @@ export function RealDataFactorySimulation() {
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
         draggable: false,
-        selectable: false
+        selectable: true
       });
     }
 
     if (inspectionNode) {
-      // 3. Circle connector between Inspektion and Demontage Phase
+      // 3. Circle connector between Inspektion and Demontage Phase - POST-INSPECTION QUEUE
       // Position circle-3 between inspection and demontage-phase
       const demontagePhaseX = indexById['demontage-phase'] * SPACING; // demontage-phase position
       const midX = (inspectionNode.position.x + 180 + demontagePhaseX) / 2 - 15; // Center between stations
       flowNodes.push({
         id: 'circle-3',
-        type: 'default',
+        type: 'queueCircle',
         position: { x: midX, y: inspectionNode.position.y + 35 },
         data: {
-          label: ''
+          label: '',
+          queueType: 'postInspection' as const
         },
         style: {
           background: '#ffffff',
@@ -1143,7 +1213,7 @@ export function RealDataFactorySimulation() {
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
         draggable: false,
-        selectable: false
+        selectable: true
       });
     }
     
@@ -1250,13 +1320,176 @@ export function RealDataFactorySimulation() {
     }
   };
 
-  const processOrders = (deltaMinutes: number) => {
+  const processOrders = async (deltaMinutes: number) => {
+    // Check database queues for batch releases
+    const currentSimMinute = getSimMinutes()
+
+    // Store current sim time in localStorage for queue viewer
+    localStorage.setItem('currentSimMinute', currentSimMinute.toString())
+
+    if (activeFactory) {
+      try {
+        const { checkAndReleaseBatch, getQueueStatus, getQueueConfig } = await import('@/app/actions/queue.actions')
+
+        // Check PreAcceptanceQueue
+        console.log(`⏰ [t=${currentSimMinute}] Checking PreAcceptanceQueue for batch release...`)
+        const preAcceptanceResult = await checkAndReleaseBatch('preAcceptance', currentSimMinute, activeFactory.id)
+        console.log(`⏰ [t=${currentSimMinute}] checkAndReleaseBatch result:`, {
+          batchReleased: preAcceptanceResult.batchReleased,
+          count: preAcceptanceResult.count,
+          orderIds: preAcceptanceResult.orderIds?.map(id => id.slice(-4))
+        })
+        if (preAcceptanceResult.batchReleased && preAcceptanceResult.orderIds) {
+          console.log(`🎉 Released ${preAcceptanceResult.count} orders from PreAcceptanceQueue at sim t=${currentSimMinute}`)
+
+          // Update lastRelease info
+          setQueueDebugInfo(prev => prev ? {
+            ...prev,
+            lastRelease: {
+              queue: 'PreAcceptance',
+              count: preAcceptanceResult.count || 0,
+              simTime: currentSimMinute
+            }
+          } : null)
+
+          // Add released orders to activeOrders and acceptance queue
+          const releasedOrderIds = preAcceptanceResult.orderIds
+          const ordersToActivate = simulationOrdersRef.current.filter(order =>
+            releasedOrderIds.includes(order.id)
+          )
+
+          console.log(`📋 Activating ${ordersToActivate.length} orders:`, ordersToActivate.map(o => `${o.id.slice(-4)}:${(o as any).kundeName}`))
+
+          // Add Gantt events for queue waiting end
+          releasedOrderIds.forEach(orderId => {
+            pushEvent('QUEUE_WAIT:PRE_ACCEPTANCE_END', orderId, null)
+          })
+
+          // Add to activeOrders state
+          setActiveOrders(prev => {
+            const newOrders = ordersToActivate.filter(order =>
+              !prev.some(p => p.id === order.id)
+            )
+            return [...prev, ...newOrders]
+          })
+
+          // Add to acceptance queue
+          releasedOrderIds.forEach(orderId => {
+            if (!mainQueuesRef.current.acceptance.includes(orderId)) {
+              mainQueuesRef.current.acceptance.push(orderId)
+            }
+          })
+        }
+
+        // Update queue debug info every sim minute (for live debug display)
+        const [preAccStatus, preInspStatus, postInspStatus, config] = await Promise.all([
+          getQueueStatus('preAcceptance', currentSimMinute),
+          getQueueStatus('preInspection', currentSimMinute),
+          getQueueStatus('postInspection', currentSimMinute),
+          getQueueConfig(activeFactory.id)
+        ])
+
+        const queueInfo = {
+          preAcceptanceCount: preAccStatus.data?.totalCount || 0,
+          preInspectionCount: preInspStatus.data?.totalCount || 0,
+          postInspectionCount: postInspStatus.data?.totalCount || 0,
+          preAcceptanceReady: preAccStatus.data?.readyCount || 0,
+          preInspectionReady: preInspStatus.data?.readyCount || 0,
+          postInspectionReady: postInspStatus.data?.readyCount || 0,
+          lastCheck: currentSimMinute,
+          config: config.data || null,
+          lastRelease: queueDebugInfo?.lastRelease // Preserve previous release info
+        }
+
+        setQueueDebugInfo(queueInfo)
+
+        // Log queue status for debugging
+        console.log(`🔍 [t=${currentSimMinute}] Queue Status:`,
+          `PreAcc=${queueInfo.preAcceptanceCount}`,
+          `PreInsp=${queueInfo.preInspectionCount}`,
+          `PostInsp=${queueInfo.postInspectionCount}`
+        )
+
+        // Check PreInspectionQueue
+        console.log(`⏰ [t=${currentSimMinute}] Checking PreInspectionQueue for batch release...`)
+        const preInspectionResult = await checkAndReleaseBatch('preInspection', currentSimMinute, activeFactory.id)
+        if (preInspectionResult.batchReleased && preInspectionResult.orderIds) {
+          console.log(`🎉 Released ${preInspectionResult.count} orders from PreInspectionQueue at sim t=${currentSimMinute}`)
+
+          // Update lastRelease info
+          setQueueDebugInfo(prev => prev ? {
+            ...prev,
+            lastRelease: {
+              queue: 'PreInspection',
+              count: preInspectionResult.count || 0,
+              simTime: currentSimMinute
+            }
+          } : null)
+
+          // Add Gantt events for queue waiting end
+          preInspectionResult.orderIds.forEach(orderId => {
+            pushEvent('QUEUE_WAIT:PRE_INSPECTION_END', orderId, null)
+          })
+
+          // Add released orders to inspection queue and update their status
+          preInspectionResult.orderIds.forEach(orderId => {
+            if (!mainQueuesRef.current.inspection.includes(orderId)) {
+              mainQueuesRef.current.inspection.push(orderId)
+              console.log(`✅ Added order ${orderId.slice(-4)} to inspection queue`)
+            }
+          })
+          // Update order status from 'waiting-inspection' to 'inspection'
+          setActiveOrders(prev => prev.map(o =>
+            preInspectionResult.orderIds?.includes(o.id)
+              ? { ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }
+              : o
+          ))
+        }
+
+        // Check PostInspectionQueue
+        console.log(`⏰ [t=${currentSimMinute}] Checking PostInspectionQueue for batch release...`)
+        const postInspectionResult = await checkAndReleaseBatch('postInspection', currentSimMinute, activeFactory.id)
+        if (postInspectionResult.batchReleased && postInspectionResult.orderIds) {
+          console.log(`🎉 Released ${postInspectionResult.count} orders from PostInspectionQueue at sim t=${currentSimMinute}`)
+
+          // Update lastRelease info
+          setQueueDebugInfo(prev => prev ? {
+            ...prev,
+            lastRelease: {
+              queue: 'PostInspection',
+              count: postInspectionResult.count || 0,
+              simTime: currentSimMinute
+            }
+          } : null)
+
+          // Add Gantt events for queue waiting end
+          postInspectionResult.orderIds.forEach(orderId => {
+            pushEvent('QUEUE_WAIT:POST_INSPECTION_END', orderId, null)
+          })
+
+          // Orders from PostInspectionQueue go to demontage phase
+          postInspectionResult.orderIds.forEach(orderId => {
+            demReadySetRef.current.add(orderId)
+            console.log(`✅ Order ${orderId.slice(-4)} ready for demontage phase`)
+          })
+          // Update order status from 'waiting-demontage' to 'demontage'
+          setActiveOrders(prev => prev.map(o =>
+            postInspectionResult.orderIds?.includes(o.id)
+              ? { ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }
+              : o
+          ))
+        }
+      } catch (error) {
+        console.error('Error checking queues:', error)
+      }
+    }
+
     setContextStations((prevStations: any) => {
       const updatedStations = [...prevStations];
       const newCompletedOrders: SimulationOrder[] = [];
       const updatedOrders: SimulationOrder[] = [];
       const waitingOrdersList: SimulationOrder[] = [];
-      
+
       // Aggregate dispatcher mode (FCFS sequential per phase)
       if (aggregateView) {
         const queueQualityPhase = (orderId: string) => {
@@ -1333,6 +1566,41 @@ export function RealDataFactorySimulation() {
                 }
               }
 
+              // Write to database queues asynchronously
+              ;(async () => {
+                try {
+                  const { enqueueOrder } = await import('@/app/actions/queue.actions')
+                  const order = activeOrdersRef.current.find(o => o.id === finishedOrderId)
+                  if (!order) return
+
+                  if (stationId === 'order-acceptance') {
+                    await enqueueOrder(
+                      'preInspection',
+                      finishedOrderId,
+                      getSimMinutes(),
+                      order.processSequences,
+                      { demontage: 30, montage: 45 }
+                    )
+                    console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished acceptance → PreInspectionQueue`)
+                    // Add Gantt event for queue waiting start
+                    pushEvent('QUEUE_WAIT:PRE_INSPECTION_START', finishedOrderId, null)
+                  } else if (stationId === 'inspection') {
+                    await enqueueOrder(
+                      'postInspection',
+                      finishedOrderId,
+                      getSimMinutes(),
+                      order.processSequences,
+                      { demontage: 30, montage: 45 }
+                    )
+                    console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished inspection → PostInspectionQueue`)
+                    // Add Gantt event for queue waiting start
+                    pushEvent('QUEUE_WAIT:POST_INSPECTION_START', finishedOrderId, null)
+                  }
+                } catch (error) {
+                  console.error('Failed to enqueue to database queue:', error)
+                }
+              })()
+
               setActiveOrders(prev => {
                 let updated: SimulationOrder[];
 
@@ -1343,12 +1611,12 @@ export function RealDataFactorySimulation() {
                   updated = prev.map(o => {
                     if (o.id !== finishedOrderId) return o
                     if (stationId === 'order-acceptance') {
-                      enqueueUnique(mainQueuesRef.current.inspection, finishedOrderId)
-                      return { ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }
+                      // DON'T enqueue in inspection yet - wait for PreInspectionQueue release
+                      return { ...o, currentStation: 'waiting-inspection', isWaiting: true, progress: 0 }
                     }
                     if (stationId === 'inspection') {
-                      demReadySetRef.current.add(finishedOrderId)
-                      return { ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }
+                      // DON'T add to demReadySet yet - wait for PostInspectionQueue release
+                      return { ...o, currentStation: 'waiting-demontage', isWaiting: true, progress: 0 }
                     }
                     return { ...o }
                   })
@@ -1443,7 +1711,9 @@ export function RealDataFactorySimulation() {
             finished.forEach(a => {
               pushEvent(`${phase === 'DEM' ? 'DEMONTAGE' : 'MONTAGE'}:${a.label}_END`, a.orderId, a.slotIdx)
               releaseSlot(phase === 'DEM' ? 'DEMONTAGE' : 'REASSEMBLY', a.slotIdx)
-              delete orderPhaseSlotMapRef.current[`${a.orderId}:${phase === 'DEM' ? 'demontage-' : 'reassembly-'}`]
+              // Use the same key format as when setting: orderId:phase:label
+              const delKey = `${a.orderId}:${phase === 'DEM' ? 'demontage' : 'reassembly'}:${a.label}`
+              delete orderPhaseSlotMapRef.current[delKey]
               const idx = queueRef.current.findIndex(b => b.orderId === a.orderId)
               if (idx >= 0) {
                 const b = queueRef.current[idx]
@@ -1487,6 +1757,21 @@ export function RealDataFactorySimulation() {
               continue
             }
             const nxt = b.ops[0]
+            const displayLabel = nxt.display || nxt.label
+
+            // CRITICAL: Check if this operation is already being processed BEFORE picking a slot
+            // This prevents orphan slots (slots marked as busy without active operations)
+            const alreadyActive = activesRef.current.some(a =>
+              a.orderId === b.orderId && a.label === displayLabel
+            )
+            if (alreadyActive) {
+              const msg = `⚠️ SKIP: Op ${displayLabel} for order ${b.orderId.slice(-4)} already active in slot`
+              console.log(msg)
+              dispatcherLogsRef.current.push(msg)
+              if (dispatcherLogsRef.current.length > 50) dispatcherLogsRef.current.shift()
+              continue // Skip this operation before calling pickSlot
+            }
+
             const desiredKey = nxt.typeKey || normalizeOperationKey(nxt.label)
             const msg1 = `🔍 try ${b.orderId.slice(-4)} op=${nxt.label} key=${desiredKey} @t=${getSimMinutes()}`
             console.log(msg1)
@@ -1500,13 +1785,13 @@ export function RealDataFactorySimulation() {
             console.log(msg2)
             dispatcherLogsRef.current.push(msg2)
             if (slotIdx >= 0) {
-              const displayLabel = nxt.display || nxt.label
+              // IMPORTANT: Check if this specific operation already has a slot assigned
+              // Use operation label to track slots per operation, not per order
+              const opKey = `${b.orderId}:${phase === 'DEM' ? 'demontage' : 'reassembly'}:${nxt.label}`
 
-              // IMPORTANT: Release previous slot if this order already had one in this phase
-              const phaseKey = `${b.orderId}:${phase === 'DEM' ? 'demontage-' : 'reassembly-'}`
-              const previousSlot = orderPhaseSlotMapRef.current[phaseKey]
+              const previousSlot = orderPhaseSlotMapRef.current[opKey]
               if (previousSlot !== undefined && previousSlot !== slotIdx) {
-                console.log(`🔓 Releasing previous slot ${previousSlot} for order ${b.orderId.slice(-4)} before assigning new slot ${slotIdx}`)
+                console.log(`🔓 Releasing previous slot ${previousSlot} for order ${b.orderId.slice(-4)} op ${nxt.label} before assigning new slot ${slotIdx}`)
                 releaseSlot(phase === 'DEM' ? 'DEMONTAGE' : 'REASSEMBLY', previousSlot)
               }
 
@@ -1528,7 +1813,7 @@ export function RealDataFactorySimulation() {
                 sd[mainId] = { expected: nxt.duration, actual: nxt.duration, startTime: new Date(), completed: false }
                 return { ...o, currentStation: mainId, progress: 0, stationDurations: sd, isWaiting: false }
               }))
-              orderPhaseSlotMapRef.current[phaseKey] = slotIdx
+              orderPhaseSlotMapRef.current[opKey] = slotIdx
               if (mainStation) {
                 mainStation.currentOrder = activeOrdersRef.current.find(o => o.id === b.orderId) as any
               }
@@ -1668,14 +1953,24 @@ export function RealDataFactorySimulation() {
             // Log START for sub-ops
             if (order.currentStation.startsWith('demontage-')) {
               const lbl = currentStationData.name?.replace('Demontage ', '') || order.currentStation
-              const key = `${order.id}:demontage-`
-              const slotIdx = orderPhaseSlotMapRef.current[key]
-              pushEvent(`DEMONTAGE:${lbl}_START`, order.id, slotIdx ?? null)
+              // Find any slot for this order in demontage phase
+              let slotIdx: number | null = null
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:demontage`)) {
+                  slotIdx = orderPhaseSlotMapRef.current[key]
+                }
+              })
+              pushEvent(`DEMONTAGE:${lbl}_START`, order.id, slotIdx)
             } else if (order.currentStation.startsWith('reassembly-')) {
               const lbl = currentStationData.name?.replace('Montage ', '') || order.currentStation
-              const key = `${order.id}:reassembly-`
-              const slotIdx = orderPhaseSlotMapRef.current[key]
-              pushEvent(`MONTAGE:${lbl}_START`, order.id, slotIdx ?? null)
+              // Find any slot for this order in reassembly phase
+              let slotIdx: number | null = null
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:reassembly`)) {
+                  slotIdx = orderPhaseSlotMapRef.current[key]
+                }
+              })
+              pushEvent(`MONTAGE:${lbl}_START`, order.id, slotIdx)
             }
           }
           
@@ -1709,33 +2004,55 @@ export function RealDataFactorySimulation() {
             // Log END event for sub-ops
             if (order.currentStation.startsWith('demontage-')) {
               const lbl = currentStationData.name?.replace('Demontage ', '') || order.currentStation
-              const key = `${order.id}:demontage-`
-              const slotIdx = orderPhaseSlotMapRef.current[key]
-              pushEvent(`DEMONTAGE:${lbl}_END`, order.id, slotIdx ?? null)
+              // Find any slot for this order in demontage phase
+              let slotIdx: number | null = null
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:demontage`)) {
+                  slotIdx = orderPhaseSlotMapRef.current[key]
+                }
+              })
+              pushEvent(`DEMONTAGE:${lbl}_END`, order.id, slotIdx)
             } else if (order.currentStation.startsWith('reassembly-')) {
               const lbl = currentStationData.name?.replace('Montage ', '') || order.currentStation
-              const key = `${order.id}:reassembly-`
-              const slotIdx = orderPhaseSlotMapRef.current[key]
-              pushEvent(`MONTAGE:${lbl}_END`, order.id, slotIdx ?? null)
+              // Find any slot for this order in reassembly phase
+              let slotIdx: number | null = null
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:reassembly`)) {
+                  slotIdx = orderPhaseSlotMapRef.current[key]
+                }
+              })
+              pushEvent(`MONTAGE:${lbl}_END`, order.id, slotIdx)
             }
             
             // Free current station
             currentStationData.currentOrder = null;
             // Release slot if this was a demontage/reassembly sub-station
             if (order.currentStation.startsWith('demontage-')) {
-              const key = `${order.id}:demontage-`
-              const idx = orderPhaseSlotMapRef.current[key]
-              if (idx !== undefined) {
-                releaseSlot('DEMONTAGE', idx)
-                delete orderPhaseSlotMapRef.current[key]
-              }
+              // Find all keys for this order in demontage phase and release them
+              const keysToDelete: string[] = []
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:demontage`)) {
+                  const idx = orderPhaseSlotMapRef.current[key]
+                  if (idx !== undefined) {
+                    releaseSlot('DEMONTAGE', idx)
+                    keysToDelete.push(key)
+                  }
+                }
+              })
+              keysToDelete.forEach(key => delete orderPhaseSlotMapRef.current[key])
             } else if (order.currentStation.startsWith('reassembly-')) {
-              const key = `${order.id}:reassembly-`
-              const idx = orderPhaseSlotMapRef.current[key]
-              if (idx !== undefined) {
-                releaseSlot('REASSEMBLY', idx)
-                delete orderPhaseSlotMapRef.current[key]
-              }
+              // Find all keys for this order in reassembly phase and release them
+              const keysToDelete: string[] = []
+              Object.keys(orderPhaseSlotMapRef.current).forEach(key => {
+                if (key.startsWith(`${order.id}:reassembly`)) {
+                  const idx = orderPhaseSlotMapRef.current[key]
+                  if (idx !== undefined) {
+                    releaseSlot('REASSEMBLY', idx)
+                    keysToDelete.push(key)
+                  }
+                }
+              })
+              keysToDelete.forEach(key => delete orderPhaseSlotMapRef.current[key])
             }
             
             // Try to assign next order from waiting queue to current station using selected scheduling algorithm
@@ -2207,7 +2524,8 @@ export function RealDataFactorySimulation() {
   };
 
   const handleSpeedChange = (value: number[]) => {
-    setSpeed(value[0]);
+    // Limit speed to max 10x
+    setSpeed(Math.min(value[0], 10));
   };
 
   const handleCreateNewOrder = async () => {
@@ -2595,7 +2913,12 @@ export function RealDataFactorySimulation() {
                 const grouped: Record<string, typeof segs> = {}
                 segs.forEach(s => { (grouped[s.order_id] ||= []).push(s) })
                 Object.values(grouped).forEach(arr => arr.sort((a,b)=> a.start - b.start))
-                const colorFor = (p: string) => p.startsWith('DEMONTAGE') ? '#2563eb' : p.startsWith('MONTAGE') ? '#16a34a' : '#6b7280'
+                const colorFor = (p: string) => {
+                  if (p.startsWith('QUEUE_WAIT')) return '#f59e0b' // Orange for queue waiting
+                  if (p.startsWith('DEMONTAGE')) return '#2563eb' // Blue for demontage
+                  if (p.startsWith('MONTAGE')) return '#16a34a' // Green for montage
+                  return '#6b7280' // Gray for others
+                }
 
                 // Helper: Get customer name from order_id
                 const getCustomerName = (orderId: string) => {
@@ -2619,6 +2942,27 @@ export function RealDataFactorySimulation() {
 
                 return (
                   <div className="space-y-3">
+                    {/* Legend */}
+                    <div className="flex gap-4 text-xs items-center border-b pb-2 mb-2">
+                      <span className="font-semibold">Legende:</span>
+                      <div className="flex items-center gap-1">
+                        <div className="w-4 h-3 rounded" style={{ background: '#f59e0b' }}></div>
+                        <span>Warteschlange</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="w-4 h-3 rounded" style={{ background: '#2563eb' }}></div>
+                        <span>Demontage</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="w-4 h-3 rounded" style={{ background: '#16a34a' }}></div>
+                        <span>Montage</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <div className="w-4 h-3 rounded" style={{ background: '#6b7280' }}></div>
+                        <span>Andere</span>
+                      </div>
+                    </div>
+
                     {Object.entries(grouped).map(([oid, arr], idx) => {
                       // Collect unique sub-operations for this order
                       const subOps = [...new Set(arr.map(s => s.sub_op))].join(', ')
@@ -2997,11 +3341,24 @@ export function RealDataFactorySimulation() {
                 <Button
                   onClick={() => {
                     setIsRunning(false);
+
+                    // IMPORTANT: Release all slots before clearing state
+                    demActivesRef.current.forEach(a => {
+                      releaseSlot('DEMONTAGE', a.slotIdx)
+                    })
+                    monActivesRef.current.forEach(a => {
+                      releaseSlot('REASSEMBLY', a.slotIdx)
+                    })
+
+                    demActivesRef.current = []
+                    monActivesRef.current = []
+                    orderPhaseSlotMapRef.current = {}
+
                     setActiveOrders([]);
                     setCompletedOrders([]);
                     setSimulationTime(new Date());
                     setSimulationStartTime(null);
-                    console.log('Simulation STOPPED and RESET');
+                    console.log('Simulation STOPPED and RESET - Slots released');
                   }}
                   variant="outline"
                   size="sm"
@@ -3059,7 +3416,7 @@ export function RealDataFactorySimulation() {
                     value={[speed]}
                     onValueChange={handleSpeedChange}
                     min={1}
-                    max={100}
+                    max={10}
                     step={1}
                     className="w-24"
                   />
@@ -3139,14 +3496,14 @@ export function RealDataFactorySimulation() {
                   <div className="space-y-1">
                     <div className="flex items-center gap-1.5">
                       <Label className="text-xs">Kapazität</Label>
-                      <Tooltip>
+                      <UITooltip>
                         <TooltipTrigger asChild>
                           <Info className="h-3 w-3 text-muted-foreground cursor-help" />
                         </TooltipTrigger>
                         <TooltipContent>
                           <p className="max-w-xs text-xs">Anzahl der parallelen Demontage-Slots (Arbeitsplätze)</p>
                         </TooltipContent>
-                      </Tooltip>
+                      </UITooltip>
                     </div>
                     <Input
                       type="number"
@@ -3162,14 +3519,14 @@ export function RealDataFactorySimulation() {
                   <div className="space-y-1">
                     <div className="flex items-center gap-1.5">
                       <Label className="text-xs">Flexibilitätsgrad</Label>
-                      <Tooltip>
+                      <UITooltip>
                         <TooltipTrigger asChild>
                           <Info className="h-3 w-3 text-muted-foreground cursor-help" />
                         </TooltipTrigger>
                         <TooltipContent>
                           <p className="max-w-xs text-xs">Prozentsatz der Slots, die flexibel für verschiedene Baugruppen-Typen einsetzbar sind</p>
                         </TooltipContent>
-                      </Tooltip>
+                      </UITooltip>
                     </div>
                     <div className="flex items-center gap-2">
                       <Slider
@@ -3193,14 +3550,14 @@ export function RealDataFactorySimulation() {
                   <div className="space-y-1">
                     <div className="flex items-center gap-1.5">
                       <Label className="text-xs">Kapazität</Label>
-                      <Tooltip>
+                      <UITooltip>
                         <TooltipTrigger asChild>
                           <Info className="h-3 w-3 text-muted-foreground cursor-help" />
                         </TooltipTrigger>
                         <TooltipContent>
                           <p className="max-w-xs text-xs">Anzahl der parallelen Montage-Slots (Arbeitsplätze)</p>
                         </TooltipContent>
-                      </Tooltip>
+                      </UITooltip>
                     </div>
                     <Input
                       type="number"
@@ -3216,14 +3573,14 @@ export function RealDataFactorySimulation() {
                   <div className="space-y-1">
                     <div className="flex items-center gap-1.5">
                       <Label className="text-xs">Flexibilitätsgrad</Label>
-                      <Tooltip>
+                      <UITooltip>
                         <TooltipTrigger asChild>
                           <Info className="h-3 w-3 text-muted-foreground cursor-help" />
                         </TooltipTrigger>
                         <TooltipContent>
                           <p className="max-w-xs text-xs">Prozentsatz der Slots, die flexibel für verschiedene Baugruppen-Typen einsetzbar sind</p>
                         </TooltipContent>
-                      </Tooltip>
+                      </UITooltip>
                     </div>
                     <div className="flex items-center gap-2">
                       <Slider
@@ -3243,14 +3600,14 @@ export function RealDataFactorySimulation() {
                 <div className="md:col-span-2 space-y-1 p-2 bg-white border rounded">
                   <div className="flex items-center gap-1.5">
                     <Label className="text-xs">Rüstzeit (Stunden)</Label>
-                    <Tooltip>
+                    <UITooltip>
                       <TooltipTrigger asChild>
                         <Info className="h-3 w-3 text-muted-foreground cursor-help" />
                       </TooltipTrigger>
                       <TooltipContent>
                         <p className="max-w-xs text-xs">Zeit für Umrüstung zwischen verschiedenen Baugruppen-Typen an einem Slot</p>
                       </TooltipContent>
-                    </Tooltip>
+                    </UITooltip>
                   </div>
                   <Input
                     type="number"
@@ -3281,6 +3638,56 @@ export function RealDataFactorySimulation() {
 
                 {showDebugInfo && (
                   <div className="space-y-3">
+
+                {/* Queue Status - GANZ OBEN */}
+                <div className="mb-3 border-2 border-green-600 bg-green-50 p-3 rounded">
+                  <div className="text-sm font-bold text-green-900 mb-2">
+                    🔍 QUEUE STATUS (Sim t={getSimMinutes()}min)
+                  </div>
+                  <div className="text-xs text-green-900 space-y-2 bg-white p-2 rounded">
+                    {queueDebugInfo ? (
+                      <>
+                        <div className="grid grid-cols-3 gap-2 text-[11px]">
+                          <div className="font-semibold">Queue</div>
+                          <div className="font-semibold">Orders (Ready)</div>
+                          <div className="font-semibold">Wait Time</div>
+
+                          <div>PreAcceptance:</div>
+                          <div className={queueDebugInfo.preAcceptanceReady > 0 ? 'text-green-600 font-bold' : ''}>
+                            {queueDebugInfo.preAcceptanceCount} ({queueDebugInfo.preAcceptanceReady} ready)
+                          </div>
+                          <div className="text-muted-foreground">{queueDebugInfo.config?.preAcceptanceReleaseMinutes || 0} min</div>
+
+                          <div>PreInspection:</div>
+                          <div className={queueDebugInfo.preInspectionReady > 0 ? 'text-green-600 font-bold' : ''}>
+                            {queueDebugInfo.preInspectionCount} ({queueDebugInfo.preInspectionReady} ready)
+                          </div>
+                          <div className="text-muted-foreground">{queueDebugInfo.config?.preInspectionReleaseMinutes || 0} min</div>
+
+                          <div>PostInspection:</div>
+                          <div className={queueDebugInfo.postInspectionReady > 0 ? 'text-green-600 font-bold' : ''}>
+                            {queueDebugInfo.postInspectionCount} ({queueDebugInfo.postInspectionReady} ready)
+                          </div>
+                          <div className="text-muted-foreground">{queueDebugInfo.config?.postInspectionReleaseMinutes || 0} min</div>
+                        </div>
+
+                        {queueDebugInfo.lastRelease && (
+                          <div className="border-t pt-2 mt-2 bg-green-100 p-2 rounded">
+                            <div className="text-[10px] font-bold text-green-800">
+                              🎉 Last Release: {queueDebugInfo.lastRelease.queue} released {queueDebugInfo.lastRelease.count} order(s) at sim t={queueDebugInfo.lastRelease.simTime}min
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="border-t pt-2 mt-2 text-[10px] text-muted-foreground">
+                          Last checked: sim t={queueDebugInfo.lastCheck}min | Current: sim t={getSimMinutes()}min
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-yellow-600 font-bold">⏳ Waiting for queue data... (updates every sim minute)</div>
+                    )}
+                  </div>
+                </div>
 
                 {/* React Flow Debug Section */}
                 <div className="mb-3 border-2 border-blue-600 bg-blue-50 p-3 rounded">
@@ -3383,6 +3790,77 @@ export function RealDataFactorySimulation() {
                       <div>Current Sim Time: {getSimMinutes()} minutes (Speed: {speed}x, Setup: {setupTimeHours}h = {Math.round(setupTimeHours * 60)}min)</div>
                       <div>DEM Slots: {demSlotsRef.current.length} ({demSlotsRef.current.filter(s => s.busy).length} busy)</div>
                       <div>Slot Details: {demSlotsRef.current.map((s, i) => `S${i}:${s.busy?'B':'F'}${s.flex?'flex':'rigid'}${s.specialization?`(${normalizeOperationKey(s.specialization)})`:''}`).join(' ')}</div>
+                      <div className="text-[9px] text-blue-700 mt-1">
+                        DEM Active Ops: {demActivesRef.current.length} - {demActivesRef.current.map(a => `${a.orderId.slice(-4)}:${a.label}@S${a.slotIdx}`).join(', ') || 'none'}
+                      </div>
+                      <div className="text-[9px] text-purple-700">
+                        MON Active Ops: {monActivesRef.current.length} - {monActivesRef.current.map(a => `${a.orderId.slice(-4)}:${a.label}@S${a.slotIdx}`).join(', ') || 'none'}
+                      </div>
+                      <div className="mt-2 p-2 bg-red-50 border border-red-300 rounded">
+                        <div className="font-semibold text-red-900 mb-1">🔍 Slot Consistency Check:</div>
+                        {(() => {
+                          const demBusySlots = demSlotsRef.current.map((s, i) => ({ idx: i, busy: s.busy })).filter(s => s.busy)
+                          const demActiveSlots = demActivesRef.current.map(a => a.slotIdx)
+                          const demOrphans = demBusySlots.filter(s => !demActiveSlots.includes(s.idx))
+
+                          const monBusySlots = monSlotsRef.current.map((s, i) => ({ idx: i, busy: s.busy })).filter(s => s.busy)
+                          const monActiveSlots = monActivesRef.current.map(a => a.slotIdx)
+                          const monOrphans = monBusySlots.filter(s => !monActiveSlots.includes(s.idx))
+
+                          return (
+                            <div className="text-[9px] space-y-1">
+                              <div className={demOrphans.length > 0 ? 'text-red-700 font-bold' : 'text-green-700'}>
+                                DEM: {demBusySlots.length} busy slots [{demBusySlots.map(s => s.idx).join(',')}], {demActiveSlots.length} active ops [{demActiveSlots.join(',')}]
+                                {demOrphans.length > 0 && <span className="ml-2">⚠️ ORPHAN SLOTS: [{demOrphans.map(s => s.idx).join(',')}]</span>}
+                              </div>
+                              <div className={monOrphans.length > 0 ? 'text-red-700 font-bold' : 'text-green-700'}>
+                                MON: {monBusySlots.length} busy slots [{monBusySlots.map(s => s.idx).join(',')}], {monActiveSlots.length} active ops [{monActiveSlots.join(',')}]
+                                {monOrphans.length > 0 && <span className="ml-2">⚠️ ORPHAN SLOTS: [{monOrphans.map(s => s.idx).join(',')}]</span>}
+                              </div>
+                            </div>
+                          )
+                        })()}
+                      </div>
+                      <div className="mt-1 p-1 bg-yellow-50 border border-yellow-300 rounded">
+                        <div className="font-semibold text-yellow-900">⚠️ Multi-Slot Check:</div>
+                        {(() => {
+                          const orderSlotMap: Record<string, number[]> = {}
+                          demActivesRef.current.forEach((active, idx) => {
+                            if (!orderSlotMap[active.orderId]) orderSlotMap[active.orderId] = []
+                            orderSlotMap[active.orderId].push(active.slotIdx)
+                          })
+                          const violations = Object.entries(orderSlotMap).filter(([_, slots]) => slots.length > 1)
+                          return violations.length > 0 ? (
+                            <div className="text-[9px] text-red-700">
+                              {violations.map(([orderId, slots]) => (
+                                <div key={orderId}>
+                                  🔴 Order {orderId.slice(-6)} occupies {slots.length} DEM slots: [{slots.join(', ')}]
+                                </div>
+                              ))}
+                            </div>
+                          ) : <div className="text-[9px] text-green-700">✅ No order occupies multiple DEM slots</div>
+                        })()}
+                      </div>
+                      <div className="mt-1 p-1 bg-yellow-50 border border-yellow-300 rounded">
+                        <div className="font-semibold text-yellow-900">⚠️ Multi-Slot Check (MON):</div>
+                        {(() => {
+                          const orderSlotMap: Record<string, number[]> = {}
+                          monActivesRef.current.forEach((active, idx) => {
+                            if (!orderSlotMap[active.orderId]) orderSlotMap[active.orderId] = []
+                            orderSlotMap[active.orderId].push(active.slotIdx)
+                          })
+                          const violations = Object.entries(orderSlotMap).filter(([_, slots]) => slots.length > 1)
+                          return violations.length > 0 ? (
+                            <div className="text-[9px] text-red-700">
+                              {violations.map(([orderId, slots]) => (
+                                <div key={orderId}>
+                                  🔴 Order {orderId.slice(-6)} occupies {slots.length} MON slots: [{slots.join(', ')}]
+                                </div>
+                              ))}
+                            </div>
+                          ) : <div className="text-[9px] text-green-700">✅ No order occupies multiple MON slots</div>
+                        })()}
+                      </div>
                       <div>Simulation Running: {isRunning ? 'YES' : 'NO'}</div>
                       <div>Aggregate View: {aggregateView ? 'YES' : 'NO'}</div>
                       <div className="mt-2 border-t pt-2">
@@ -3446,8 +3924,45 @@ export function RealDataFactorySimulation() {
           </CardHeader>
           <CardContent>
             <div className="space-y-6">
-              {activeOrders.length === 0 ? (
-                <p className="text-center text-gray-500 py-8">Keine aktiven Aufträge</p>
+              {activeOrders.length === 0 && simulationOrdersRef.current.length === 0 ? (
+                <p className="text-center text-gray-500 py-8">Keine Aufträge geladen. Bitte Simulation initialisieren.</p>
+              ) : activeOrders.length === 0 ? (
+                <div className="space-y-4">
+                  <p className="text-center text-amber-600 py-4">
+                    {simulationOrdersRef.current.length} Aufträge in Terminierung (Warteschlange)
+                  </p>
+                  <div className="rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[150px]">Kunde</TableHead>
+                          <TableHead className="w-[200px]">Produktvariante</TableHead>
+                          <TableHead className="w-[150px]">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {simulationOrdersRef.current.slice(0, 10).map((order: any) => (
+                          <TableRow key={order.id}>
+                            <TableCell className="font-medium">{order.kundeName}</TableCell>
+                            <TableCell>{order.produktvariante}</TableCell>
+                            <TableCell>
+                              <span className="px-2 py-1 bg-amber-100 text-amber-800 rounded text-xs font-medium">
+                                Terminierung (Warteschlange)
+                              </span>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                        {simulationOrdersRef.current.length > 10 && (
+                          <TableRow>
+                            <TableCell colSpan={3} className="text-center text-gray-500 text-sm">
+                              ... und {simulationOrdersRef.current.length - 10} weitere Aufträge
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
               ) : (
                 <>
                   {/* Summary Table */}
@@ -3468,7 +3983,7 @@ export function RealDataFactorySimulation() {
                           const currentStationData = stations.find(s => s.id === order.currentStation);
                           const currentStationDuration = order.stationDurations[order.currentStation];
                           const progressPercent = (order.progress / (currentStationDuration?.actual || currentStationData?.processingTime || 1)) * 100;
-                          
+
                           // Calculate total delay across all completed stations
                           const completedStations = Object.entries(order.stationDurations).filter(([stationId, duration]) => {
                             return duration.actual && order.processSequence.indexOf(order.currentStation) > order.processSequence.indexOf(stationId);
@@ -3476,17 +3991,27 @@ export function RealDataFactorySimulation() {
                           const totalDelay = completedStations.reduce((acc, [, duration]) => {
                             return acc + (duration.actual! - duration.expected);
                           }, 0);
-                          
+
                           // Calculate total time spent so far
                           const totalTimeSpent = completedStations.reduce((acc, [, duration]) => acc + duration.actual!, 0) + order.progress;
-                          
+
+                          // Determine station name with better handling for queue waiting states
+                          let stationName = currentStationData?.name || 'Unbekannt'
+                          if (order.currentStation === 'waiting-inspection') {
+                            stationName = 'Terminierung (Warteschlange vor Inspektion)'
+                          } else if (order.currentStation === 'waiting-demontage') {
+                            stationName = 'Terminierung (Warteschlange vor Demontage)'
+                          } else if (!currentStationData) {
+                            stationName = 'Terminierung'
+                          }
+
                           return (
                             <TableRow key={order.id}>
                               <TableCell className="font-medium">{order.kundeName}</TableCell>
                               <TableCell>{order.produktvariante}</TableCell>
                               <TableCell>
                                 <span className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium">
-                                  {currentStationData?.name || 'Unbekannt'}
+                                  {stationName}
                                 </span>
                               </TableCell>
                               <TableCell>
