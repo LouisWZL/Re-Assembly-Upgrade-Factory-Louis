@@ -1,13 +1,7 @@
 {
   "buildCommand": "npm run build:vercel",
   "env": {
-    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true",
-    "DATABASE_URL": "file:/tmp/production.db"
-  },
-  "build": {
-    "env": {
-      "DATABASE_URL": "file:/tmp/production.db"
-    }
+    "PRISMA_GENERATE_SKIP_AUTOINSTALL": "true"
   },
   "functions": {
     "app/**/*.js": {

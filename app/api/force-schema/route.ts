@@ -5,7 +5,10 @@ export async function POST() {
   try {
     console.log('🔧 Forcing database schema creation...')
     
-    const dbUrl = process.env.DATABASE_URL || 'file:/tmp/production.db'
+    const dbUrl = process.env.DATABASE_URL
+    if (!dbUrl || (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://'))) {
+      throw new Error('DATABASE_URL is not configured for PostgreSQL. Please set the Supabase connection string in the environment.')
+    }
     console.log('Database URL:', dbUrl)
     
     // Force schema push with all possible flags

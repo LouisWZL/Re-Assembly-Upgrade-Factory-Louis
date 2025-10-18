@@ -5,6 +5,9 @@ export async function GET() {
   try {
     // Get database URL from environment
     const dbUrl = process.env.DATABASE_URL
+    if (!dbUrl || (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://'))) {
+      throw new Error('DATABASE_URL is not configured for PostgreSQL. Please set the Supabase connection string in the environment.')
+    }
     const nodeEnv = process.env.NODE_ENV
     const isVercel = !!process.env.VERCEL
     
@@ -84,10 +87,8 @@ export async function GET() {
     
     return NextResponse.json({
       database: {
-        url: dbUrl || 'NOT SET',
-        expected: isVercel ? 'file:/tmp/production.db' : 'file:./prisma/dev.db',
-        actual: dbUrl,
-        matches: dbUrl === (isVercel ? 'file:/tmp/production.db' : 'file:./prisma/dev.db')
+        url: dbUrl,
+        provider: dbUrl.split(':')[0]
       },
       environment: {
         NODE_ENV: nodeEnv,

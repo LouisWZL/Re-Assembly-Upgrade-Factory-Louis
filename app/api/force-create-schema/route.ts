@@ -1,29 +1,13 @@
 import { NextResponse } from 'next/server'
 import { execSync } from 'child_process'
-import fs from 'fs'
-import path from 'path'
 
 export async function POST() {
   try {
     console.log('🔨 Forcing database schema creation...')
     
-    const dbUrl = process.env.DATABASE_URL || 'file:/tmp/production.db'
-    console.log('Database URL:', dbUrl)
-    
-    // Extract the file path from the URL
-    const dbPath = dbUrl.replace('file:', '')
-    const dbDir = path.dirname(dbPath)
-    
-    // Ensure directory exists
-    if (!fs.existsSync(dbDir)) {
-      fs.mkdirSync(dbDir, { recursive: true })
-      console.log('Created directory:', dbDir)
-    }
-    
-    // Create empty database file if it doesn't exist
-    if (!fs.existsSync(dbPath)) {
-      fs.writeFileSync(dbPath, '')
-      console.log('Created database file:', dbPath)
+    const dbUrl = process.env.DATABASE_URL
+    if (!dbUrl || (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://'))) {
+      throw new Error('DATABASE_URL is not configured for PostgreSQL. Please set the Supabase connection string in the environment.')
     }
     
     const results: any[] = []

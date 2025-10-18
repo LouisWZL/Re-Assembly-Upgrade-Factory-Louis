@@ -5,8 +5,10 @@ export async function POST() {
   try {
     console.log('🔄 Resetting database with complete schema and data...')
     
-    // Set database URL for Vercel
-    const dbUrl = process.env.DATABASE_URL || 'file:/tmp/production.db'
+    const dbUrl = process.env.DATABASE_URL
+    if (!dbUrl || (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://'))) {
+      throw new Error('DATABASE_URL is not configured for PostgreSQL. Please set the Supabase connection string in the environment.')
+    }
     
     // Run these commands in order - EXACTLY like your local setup
     const commands = [
