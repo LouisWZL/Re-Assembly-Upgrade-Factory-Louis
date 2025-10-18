@@ -52,7 +52,7 @@ async function testConnection() {
 
       // Validate Supabase session pooler format
       if (parsed.hostname.includes('pooler.supabase.com')) {
-        log('green', '    ✅ Using Supabase session pooler (recommended)')
+        log('green', '    ✅ Using Supabase connection pooler (recommended for serverless)')
       } else if (parsed.hostname.includes('supabase.co')) {
         log('yellow', '    ⚠️  Using Supabase direct connection (consider using pooler)')
       } else {
@@ -65,7 +65,7 @@ async function testConnection() {
   } else {
     log('red', '  ❌ DATABASE_URL is not set!')
     log('yellow', '\n  Set DATABASE_URL in your .env file:')
-    console.log('     DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-X-region.pooler.supabase.com:5432/postgres"')
+    console.log('     DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-X-region.pooler.supabase.com:6543/postgres"')
     process.exit(1)
   }
 

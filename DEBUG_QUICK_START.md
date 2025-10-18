@@ -96,11 +96,11 @@ See `DEBUGGING.md` for full error reference.
 Your `.env` should contain:
 
 ```env
-DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:5432/postgres"
-DIRECT_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:5432/postgres"
+DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
+DIRECT_URL="postgresql://postgres:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres"
 ```
 
-✅ Using **Session Pooler** (recommended for performance and IPv4 compatibility)
+✅ Using **Transaction Pooler** for serverless runtimes (recommended)
 
 ## Files Modified
 
