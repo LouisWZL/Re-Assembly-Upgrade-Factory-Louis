@@ -65,13 +65,13 @@ The enhanced error logging provides specific guidance for common errors:
 Current setup in `.env`:
 
 ```
-DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
+DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1"
 DIRECT_URL="postgresql://postgres:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres?sslmode=require"
 ```
 
 ### Session Pooler (Recommended)
 
-Format: `postgresql://postgres.PROJECT_REF:[PASSWORD]@aws-X-region.pooler.supabase.com:6543/postgres`
+Format: `postgresql://postgres.PROJECT_REF:[PASSWORD]@aws-X-region.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1`
 
 Benefits:
 - IPv4 compatible

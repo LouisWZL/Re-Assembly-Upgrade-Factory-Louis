@@ -65,7 +65,7 @@ async function testConnection() {
   } else {
     log('red', '  ❌ DATABASE_URL is not set!')
     log('yellow', '\n  Set DATABASE_URL in your .env file:')
-    console.log('     DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-X-region.pooler.supabase.com:6543/postgres"')
+    console.log('     DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-X-region.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true&connection_limit=1"')
     process.exit(1)
   }
 
