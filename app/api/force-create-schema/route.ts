@@ -221,10 +221,7 @@ export async function POST() {
       return NextResponse.json({
         success: allTablesExist,
         message: allTablesExist ? 'Schema created successfully!' : 'Schema partially created',
-        results,
-        databasePath: dbPath,
-        databaseExists: fs.existsSync(dbPath),
-        databaseSize: fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0
+        results
       })
       
     } catch (testError: any) {
