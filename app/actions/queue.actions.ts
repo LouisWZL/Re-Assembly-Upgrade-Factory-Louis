@@ -33,6 +33,26 @@ export async function enqueueOrder(
   try {
     await ensureDatabaseInitialized()
 
+    const queueModel = queue === 'preAcceptance'
+      ? prisma.preAcceptanceQueue
+      : queue === 'preInspection'
+      ? prisma.preInspectionQueue
+      : prisma.postInspectionQueue
+
+    const existingEntry = await queueModel.findUnique({ where: { orderId } })
+
+    if (existingEntry && existingEntry.releasedAtSimMinute === null) {
+      console.warn(`⚠️ Order ${orderId} already pending in ${queue} queue, skipping enqueue.`)
+      return {
+        success: true,
+        skipped: true
+      }
+    }
+
+    if (existingEntry && existingEntry.releasedAtSimMinute !== null) {
+      await queueModel.delete({ where: { id: existingEntry.id } })
+    }
+
     // Get factory config to determine releaseAfterMinutes
     const order = await prisma.auftrag.findUnique({
       where: { id: orderId },
@@ -90,23 +110,10 @@ export async function enqueueOrder(
     }
 
     // Get max processing order for this queue
-    let maxOrder = 0
-    if (queue === 'preAcceptance') {
-      const max = await prisma.preAcceptanceQueue.findFirst({
-        orderBy: { processingOrder: 'desc' }
-      })
-      maxOrder = max?.processingOrder ?? 0
-    } else if (queue === 'preInspection') {
-      const max = await prisma.preInspectionQueue.findFirst({
-        orderBy: { processingOrder: 'desc' }
-      })
-      maxOrder = max?.processingOrder ?? 0
-    } else {
-      const max = await prisma.postInspectionQueue.findFirst({
-        orderBy: { processingOrder: 'desc' }
-      })
-      maxOrder = max?.processingOrder ?? 0
-    }
+    const max = await queueModel.findFirst({
+      orderBy: { processingOrder: 'desc' }
+    })
+    const maxOrder = max?.processingOrder ?? 0
 
     // Create queue entry
     const data = {

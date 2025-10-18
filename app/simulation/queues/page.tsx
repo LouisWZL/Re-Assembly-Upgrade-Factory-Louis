@@ -3,9 +3,6 @@
 import { QueueViewer } from '@/components/advanced-simulation/QueueViewer'
 import { QueueConfigPanel } from '@/components/advanced-simulation/QueueConfigPanel'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ArrowLeft } from 'lucide-react'
-import Link from 'next/link'
-import { Button } from '@/components/ui/button'
 import { useSearchParams } from 'next/navigation'
 import { Suspense, useEffect, useState } from 'react'
 
@@ -63,15 +60,6 @@ function QueuesContent() {
 
   return (
     <div className="container mx-auto p-6 max-w-7xl">
-      <div className="mb-6">
-        <Link href="/simulation">
-          <Button variant="ghost" size="sm">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to Simulation
-          </Button>
-        </Link>
-      </div>
-
       <div className="mb-6">
         <h1 className="text-3xl font-bold">Simulation Queue Monitor</h1>
         <p className="text-muted-foreground mt-2">

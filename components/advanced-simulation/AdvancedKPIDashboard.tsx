@@ -1,15 +1,11 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Download } from 'lucide-react';
 import { exportToCSV } from '@/lib/csv-export';
 import { getOrdersForExport } from '@/app/actions/export.actions';
 import { toast } from 'sonner';
 import { useFactory } from '@/contexts/factory-context';
-import { getQueueConfig, updateQueueConfig } from '@/app/actions/queue.actions';
-import { useState, useEffect } from 'react';
 
 import { AdvancedOrder, ProductionStation } from '@/types/advanced-factory';
 
@@ -59,79 +55,15 @@ export function AdvancedKPIDashboard({
 }: AdvancedKPIDashboardProps) {
   const { activeFactory } = useFactory();
 
-  // Queue configuration state
-  const [preAcceptanceMinutes, setPreAcceptanceMinutes] = useState(0);
-  const [preInspectionMinutes, setPreInspectionMinutes] = useState(0);
-  const [postInspectionMinutes, setPostInspectionMinutes] = useState(0);
-  const [loadingQueueConfig, setLoadingQueueConfig] = useState(false);
-
   // Use calculated KPIs from Gantt events if available, otherwise fallback to old calculation
   const avgProcessingTime = calculatedKPIs?.avgProcessingTime ?? 0;
   const avgWaitingTime = calculatedKPIs?.avgWaitingTime ?? 0;
   const avgTotalTime = calculatedKPIs?.avgLeadTime ?? (avgProcessingTime + avgWaitingTime);
-  const totalProcessingTime = calculatedKPIs?.totalProcessingTime ?? 0;
-  const totalWaitingTime = calculatedKPIs?.totalWaitingTime ?? 0;
-
   // Utilization now from Gantt calculation (over entire simulation duration)
   const demUtilization = calculatedKPIs?.demUtilization ?? 0;
   const monUtilization = calculatedKPIs?.monUtilization ?? 0;
 
-  const busyStations = stations.filter((s: any) => s.currentOrderId != null || s.currentOrder != null).length;
-  const currentUtilizationRate = stations.length > 0 ? (busyStations / stations.length) * 100 : 0;
-
   const totalWaitingOrders = stations.reduce((sum, station) => sum + ((station as any).waitingQueue?.length || 0), 0);
-
-  // Load queue configuration on mount
-  useEffect(() => {
-    if (activeFactory?.id) {
-      loadQueueConfiguration();
-    }
-  }, [activeFactory?.id]);
-
-  const loadQueueConfiguration = async () => {
-    if (!activeFactory?.id) return;
-
-    setLoadingQueueConfig(true);
-    try {
-      const result = await getQueueConfig(activeFactory.id);
-      if (result.success && result.data) {
-        setPreAcceptanceMinutes(result.data.preAcceptanceReleaseMinutes);
-        setPreInspectionMinutes(result.data.preInspectionReleaseMinutes);
-        setPostInspectionMinutes(result.data.postInspectionReleaseMinutes);
-      }
-    } catch (error) {
-      console.error('Error loading queue config:', error);
-    } finally {
-      setLoadingQueueConfig(false);
-    }
-  };
-
-  const handleSaveQueueConfig = async () => {
-    if (!activeFactory?.id) {
-      toast.error('Keine Fabrik ausgewählt');
-      return;
-    }
-
-    setLoadingQueueConfig(true);
-    try {
-      const result = await updateQueueConfig(activeFactory.id, {
-        preAcceptanceReleaseMinutes: preAcceptanceMinutes,
-        preInspectionReleaseMinutes: preInspectionMinutes,
-        postInspectionReleaseMinutes: postInspectionMinutes
-      });
-
-      if (result.success) {
-        toast.success('Warteschlangen-Konfiguration gespeichert');
-      } else {
-        toast.error('Fehler beim Speichern der Konfiguration');
-      }
-    } catch (error) {
-      console.error('Error saving queue config:', error);
-      toast.error('Fehler beim Speichern der Konfiguration');
-    } finally {
-      setLoadingQueueConfig(false);
-    }
-  };
 
   const handleExportOrders = async () => {
     try {
@@ -168,127 +100,28 @@ export function AdvancedKPIDashboard({
       </div>
       
       {/* KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{completedOrders.length}</div>
-            <p className="text-xs text-muted-foreground">Abgeschlossene Aufträge</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{avgTotalTime.toFixed(1)} min</div>
-            <p className="text-xs text-muted-foreground">Ø Durchlaufzeit</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold text-green-600">{avgProcessingTime.toFixed(1)} min</div>
-            <p className="text-xs text-muted-foreground">Ø Bearbeitungszeit</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold text-orange-600">{avgWaitingTime.toFixed(1)} min</div>
-            <p className="text-xs text-muted-foreground">Ø Wartezeit</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{((avgWaitingTime / avgTotalTime) * 100 || 0).toFixed(1)}%</div>
-            <p className="text-xs text-muted-foreground">Wartezeit-Anteil</p>
-          </CardContent>
-        </Card>
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap md:flex-nowrap gap-4 overflow-x-auto pb-1">
+          {[
+            { label: 'Abgeschlossene Aufträge', value: completedOrders.length.toString() },
+            { label: 'Ø Durchlaufzeit', value: `${avgTotalTime.toFixed(1)} min` },
+            { label: 'Ø Bearbeitungszeit', value: `${avgProcessingTime.toFixed(1)} min`, accent: 'text-green-600' },
+            { label: 'Ø Wartezeit', value: `${avgWaitingTime.toFixed(1)} min`, accent: 'text-orange-600' },
+            { label: 'Wartezeit-Anteil', value: `${((avgWaitingTime / avgTotalTime) * 100 || 0).toFixed(1)}%` },
+            { label: 'Demontage Auslastung', value: `${demUtilization.toFixed(1)}%`, accent: 'text-blue-600' },
+            { label: 'Montage Auslastung', value: `${monUtilization.toFixed(1)}%`, accent: 'text-green-600' },
+            { label: 'Aktive Aufträge', value: orders.length.toString() },
+            { label: 'In Warteschlangen', value: totalWaitingOrders.toString() }
+          ].map(({ label, value, accent }, idx) => (
+            <Card key={idx} className="min-w-[160px] flex-1 md:min-w-[140px]">
+              <CardContent className="pt-6">
+                <div className={`text-2xl font-bold ${accent ?? ''}`}>{value}</div>
+                <p className="text-xs text-muted-foreground">{label}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       </div>
-
-      {/* Utilization Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold text-blue-600">{demUtilization.toFixed(1)}%</div>
-            <p className="text-xs text-muted-foreground">Demontage Auslastung</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold text-green-600">{monUtilization.toFixed(1)}%</div>
-            <p className="text-xs text-muted-foreground">Montage Auslastung</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{orders.length}</div>
-            <p className="text-xs text-muted-foreground">Aktive Aufträge</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="text-2xl font-bold">{totalWaitingOrders}</div>
-            <p className="text-xs text-muted-foreground">In Warteschlangen</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Queue Configuration Card */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Warteschlangen-Konfiguration (Freigabezeiten)</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div className="space-y-2">
-              <Label htmlFor="preAcceptance">Pre-Acceptance Queue (Minuten)</Label>
-              <Input
-                id="preAcceptance"
-                type="number"
-                min="0"
-                value={preAcceptanceMinutes}
-                onChange={(e) => setPreAcceptanceMinutes(parseInt(e.target.value) || 0)}
-                disabled={loadingQueueConfig}
-              />
-              <p className="text-xs text-muted-foreground">
-                Wartezeit vor Auftragsannahme
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="preInspection">Pre-Inspection Queue (Minuten)</Label>
-              <Input
-                id="preInspection"
-                type="number"
-                min="0"
-                value={preInspectionMinutes}
-                onChange={(e) => setPreInspectionMinutes(parseInt(e.target.value) || 0)}
-                disabled={loadingQueueConfig}
-              />
-              <p className="text-xs text-muted-foreground">
-                Wartezeit vor Inspektion
-              </p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="postInspection">Post-Inspection Queue (Minuten)</Label>
-              <Input
-                id="postInspection"
-                type="number"
-                min="0"
-                value={postInspectionMinutes}
-                onChange={(e) => setPostInspectionMinutes(parseInt(e.target.value) || 0)}
-                disabled={loadingQueueConfig}
-              />
-              <p className="text-xs text-muted-foreground">
-                Wartezeit nach Inspektion
-              </p>
-            </div>
-          </div>
-          <div className="mt-4 flex justify-end">
-            <Button
-              onClick={handleSaveQueueConfig}
-              disabled={loadingQueueConfig}
-            >
-              {loadingQueueConfig ? 'Speichert...' : 'Konfiguration speichern'}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* Detailed Order View from Simulation */}
       <OrderDetailsCardSection orders={orders} stations={stations} />
