@@ -97,7 +97,7 @@ Your `.env` should contain:
 
 ```env
 DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:6543/postgres"
-DIRECT_URL="postgresql://postgres:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres"
+DIRECT_URL="postgresql://postgres:PASSWORD@db.PROJECT_REF.supabase.co:5432/postgres?sslmode=require"
 ```
 
 ✅ Using **Transaction Pooler** for serverless runtimes (recommended)
