@@ -67,7 +67,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
   const [stations, setStations] = useState<SimulationStation[]>([]);
   const [simulationStartTime, setSimulationStartTime] = useState<Date | null>(null);
   const [isRunning, setIsRunning] = useState<boolean>(false);
-  const [speed, setSpeed] = useState<number>(1);
+  const [speed, setSpeed] = useState<number>(5);
   const [simulationTime, setSimulationTime] = useState<Date>(new Date());
   const [waitingOrders, setWaitingOrders] = useState<SimulationOrder[]>([]);
   const lastRealTimeRef = useRef<number>(Date.now());
@@ -89,7 +89,7 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
     setStations([]);
     setSimulationStartTime(null);
     setIsRunning(false);
-    setSpeed(1);
+    setSpeed(5);
     setSimulationTime(new Date());
     setWaitingOrders([]);
     lastRealTimeRef.current = Date.now();
@@ -110,7 +110,10 @@ export function SimulationProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const deltaMinutes = (realTimeDelta / 1000) * speed;
+      // FIXED: Match RealDataFactorySimulation time calculation
+      // 60000ms (60 seconds) real time = 1 simulation minute at speed 1x
+      // This ensures simulationTime and order progress stay in sync
+      const deltaMinutes = (realTimeDelta / 60000) * speed;
       if (deltaMinutes <= 0) {
         return;
       }

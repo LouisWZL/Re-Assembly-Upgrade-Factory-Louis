@@ -5,12 +5,15 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "dev:seed": "npm run db:seed && next dev --turbopack",
+    "dev:debug": "DEBUG_DB=true next dev --turbopack",
     "build": "node scripts/setup-vercel-db.js && prisma generate && next build",
     "build:vercel": "./scripts/build-vercel.sh",
     "start": "next start",
     "lint": "next lint",
     "postinstall": "prisma generate",
-    "db:seed": "prisma db seed"
+    "db:seed": "prisma db seed",
+    "db:test": "ts-node scripts/test-db-connection.ts",
+    "sim:test-time": "ts-node scripts/verify-time-consistency.ts"
   },
   "prisma": {
     "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"

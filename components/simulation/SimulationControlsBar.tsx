@@ -43,7 +43,7 @@ interface SimulationControlsBarProps {
 
 export function SimulationControlsBar({ simulationTime, isPlaying, onSimulationUpdate }: SimulationControlsBarProps) {
   const [playing, setPlaying] = useState(false)
-  const [speed, setSpeed] = useState([1])
+  const [speed, setSpeed] = useState([5])
   const [autoOrders, setAutoOrders] = useState(false)
   const [currentSimulationTime, setCurrentSimulationTime] = useState(new Date())
   const [showResetDialog, setShowResetDialog] = useState(false)
@@ -399,11 +399,11 @@ export function SimulationControlsBar({ simulationTime, isPlaying, onSimulationU
                 value={speed}
                 onValueChange={handleSpeedChange}
                 min={0.5}
-                max={2}
-                step={0.1}
+                max={20}
+                step={0.5}
                 className="w-32"
               />
-              <span className="text-sm text-muted-foreground w-10">{speed[0]}x</span>
+              <span className="text-sm text-muted-foreground w-12 text-right">{speed[0]}x</span>
             </div>
           </div>
         </div>

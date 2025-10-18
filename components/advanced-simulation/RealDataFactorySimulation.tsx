@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info } from 'lucide-react';
+import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   ReactFlow,
@@ -30,6 +30,7 @@ import {
 import { PhaseNode } from './nodes/PhaseNode'
 import { QueueCircleNode } from './QueueCircleNode'
 import '@xyflow/react/dist/style.css';
+import { getSimulationBuffer } from '@/lib/simulation-buffer';
 import {
   Dialog,
   DialogContent,
@@ -172,7 +173,10 @@ export function RealDataFactorySimulation() {
   // Local simulation data
   const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
   const [factoryData, setFactoryData] = useState<any>(null);
-  
+
+  // Simulation buffer for batched DB writes
+  const bufferRef = useRef(getSimulationBuffer());
+
   // Phase capacity & flexibility controls
   const [demSlots, setDemSlots] = useState<number>(4)
   const [monSlots, setMonSlots] = useState<number>(6)
@@ -191,6 +195,10 @@ export function RealDataFactorySimulation() {
   const [hoveredOrderRow, setHoveredOrderRow] = useState<string | null>(null)
   const [hoveredDemSlot, setHoveredDemSlot] = useState<number | null>(null)
   const [hoveredMonSlot, setHoveredMonSlot] = useState<number | null>(null)
+
+  // Collapsible sections state
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
+  const [showDebugPanel, setShowDebugPanel] = useState(false)
 
   // Phase slot state (approximation of rigid/flexible slots)
   type SlotState = { flex: boolean; specialization?: string | null; currentType?: string | null; idleSince?: number | null; busy?: boolean }
@@ -467,6 +475,25 @@ export function RealDataFactorySimulation() {
   // Keep a ref mirror of activeOrders to avoid stale closures inside tight loops
   const activeOrdersRef = useRef(activeOrders)
   useEffect(() => { activeOrdersRef.current = activeOrders }, [activeOrders])
+
+  // Manage simulation buffer lifecycle
+  useEffect(() => {
+    if (isRunning) {
+      console.log('[RealDataFactorySimulation] Starting simulation buffer');
+      bufferRef.current.start();
+    } else {
+      console.log('[RealDataFactorySimulation] Stopping simulation buffer');
+      bufferRef.current.stop();
+    }
+  }, [isRunning]);
+
+  // Cleanup buffer on unmount
+  useEffect(() => {
+    return () => {
+      console.log('[RealDataFactorySimulation] Component unmounting, stopping buffer');
+      bufferRef.current.stop();
+    };
+  }, []);
 
   // FCFS dispatcher data structures (aggregate mode)
   type OpItem = { label: string; duration: number; display?: string; typeKey?: string }
@@ -1665,6 +1692,9 @@ export function RealDataFactorySimulation() {
                   const done = { ...ord, completedAt: new Date(), schedulingAlgorithm: currentSchedulingAlgorithm }
                   newCompletedOrders.push(done as any)
                   addCompletedOrder(done as any)
+
+                  // Buffer completion for potential DB persistence (high priority)
+                  bufferRef.current.addCompletionUpdate(finishedOrderId, new Date(), 'high')
                 }
               }
             }
@@ -2220,6 +2250,9 @@ export function RealDataFactorySimulation() {
               newCompletedOrders.push(order);
               // Add to shared context for KPI Dashboard
               addCompletedOrder(order);
+
+              // Buffer completion for potential DB persistence (high priority)
+              bufferRef.current.addCompletionUpdate(order.id, new Date(), 'high');
             }
           } else {
             // Order still processing
@@ -2556,8 +2589,8 @@ export function RealDataFactorySimulation() {
   };
 
   const handleSpeedChange = (value: number[]) => {
-    // Limit speed to max 4x to handle 250ms database latency
-    setSpeed(Math.min(value[0], 4));
+    // Speed range: 0.5x - 20x (previously limited to 4x for latency)
+    setSpeed(value[0]);
   };
 
   const handleCreateNewOrder = async () => {
@@ -2839,8 +2872,8 @@ export function RealDataFactorySimulation() {
         })()}
 
         {/* Simple Gantt (beta): recent segments */}
-        {/* Gantt Tabelle (letzte Segmente) */}
-        <Card>
+        {/* Gantt Tabelle (letzte Segmente) - AUSGEBLENDET */}
+        {/* <Card>
           <CardHeader>
             <CardTitle>Gantt Tabelle – letzte Segmente</CardTitle>
           </CardHeader>
@@ -2908,7 +2941,7 @@ export function RealDataFactorySimulation() {
               }
             })()}
           </CardContent>
-        </Card>
+        </Card> */}
 
         {/* Gantt Plot */}
         <Card>
@@ -3447,9 +3480,9 @@ export function RealDataFactorySimulation() {
                   <Slider
                     value={[speed]}
                     onValueChange={handleSpeedChange}
-                    min={1}
-                    max={10}
-                    step={1}
+                    min={0.5}
+                    max={50}
+                    step={0.5}
                     className="w-24"
                   />
                   <span className="text-xs font-medium w-8">{speed}x</span>
@@ -3517,7 +3550,21 @@ export function RealDataFactorySimulation() {
               </div>
             </div>
 
-            {/* Phase Capacity & Flexibility Settings */}
+            {/* Advanced Settings Toggle */}
+            <div className="border-t pt-2">
+              <Button
+                onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+                variant="ghost"
+                size="sm"
+                className="w-full justify-between text-xs"
+              >
+                <span>Erweiterte Einstellungen (Kapazität, Flexibilität, Rüstzeit)</span>
+                {showAdvancedSettings ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </Button>
+            </div>
+
+            {/* Phase Capacity & Flexibility Settings - Collapsible */}
+            {showAdvancedSettings && (
             <TooltipProvider>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2 p-2 bg-gray-50 border rounded">
                 {/* Demontage Section */}
@@ -3653,8 +3700,23 @@ export function RealDataFactorySimulation() {
                 </div>
               </div>
             </TooltipProvider>
+            )}
 
-              {/* Debug Info Panel */}
+            {/* Debug Panel Toggle */}
+            <div className="border-t pt-2">
+              <Button
+                onClick={() => setShowDebugPanel(!showDebugPanel)}
+                variant="ghost"
+                size="sm"
+                className="w-full justify-between text-xs"
+              >
+                <span>Debug Panel</span>
+                {showDebugPanel ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+              </Button>
+            </div>
+
+            {/* Debug Info Panel - Collapsible */}
+            {showDebugPanel && (
               <div className="bg-yellow-50 border border-yellow-200 rounded p-3" key={debugRefreshKey}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-xs font-bold text-yellow-900">🔍 Debug Info (Live)</div>
@@ -3919,6 +3981,7 @@ export function RealDataFactorySimulation() {
                 </div>
                 )}
               </div>
+            )}
           </CardContent>
         </Card>
 
