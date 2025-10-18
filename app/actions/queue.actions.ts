@@ -33,13 +33,17 @@ export async function enqueueOrder(
   try {
     await ensureDatabaseInitialized()
 
-    const queueModel = queue === 'preAcceptance'
-      ? prisma.preAcceptanceQueue
-      : queue === 'preInspection'
-      ? prisma.preInspectionQueue
-      : prisma.postInspectionQueue
+    const findExistingEntry = async () => {
+      if (queue === 'preAcceptance') {
+        return prisma.preAcceptanceQueue.findUnique({ where: { orderId } })
+      }
+      if (queue === 'preInspection') {
+        return prisma.preInspectionQueue.findUnique({ where: { orderId } })
+      }
+      return prisma.postInspectionQueue.findUnique({ where: { orderId } })
+    }
 
-    const existingEntry = await queueModel.findUnique({ where: { orderId } })
+    const existingEntry = await findExistingEntry()
 
     if (existingEntry && existingEntry.releasedAtSimMinute === null) {
       console.warn(`⚠️ Order ${orderId} already pending in ${queue} queue, skipping enqueue.`)
@@ -50,7 +54,13 @@ export async function enqueueOrder(
     }
 
     if (existingEntry && existingEntry.releasedAtSimMinute !== null) {
-      await queueModel.delete({ where: { id: existingEntry.id } })
+      if (queue === 'preAcceptance') {
+        await prisma.preAcceptanceQueue.delete({ where: { id: existingEntry.id } })
+      } else if (queue === 'preInspection') {
+        await prisma.preInspectionQueue.delete({ where: { id: existingEntry.id } })
+      } else {
+        await prisma.postInspectionQueue.delete({ where: { id: existingEntry.id } })
+      }
     }
 
     // Get factory config to determine releaseAfterMinutes
@@ -110,10 +120,18 @@ export async function enqueueOrder(
     }
 
     // Get max processing order for this queue
-    const max = await queueModel.findFirst({
-      orderBy: { processingOrder: 'desc' }
-    })
-    const maxOrder = max?.processingOrder ?? 0
+    const maxOrder = await (async () => {
+      if (queue === 'preAcceptance') {
+        const max = await prisma.preAcceptanceQueue.findFirst({ orderBy: { processingOrder: 'desc' } })
+        return max?.processingOrder ?? 0
+      }
+      if (queue === 'preInspection') {
+        const max = await prisma.preInspectionQueue.findFirst({ orderBy: { processingOrder: 'desc' } })
+        return max?.processingOrder ?? 0
+      }
+      const max = await prisma.postInspectionQueue.findFirst({ orderBy: { processingOrder: 'desc' } })
+      return max?.processingOrder ?? 0
+    })()
 
     // Create queue entry
     const data = {
