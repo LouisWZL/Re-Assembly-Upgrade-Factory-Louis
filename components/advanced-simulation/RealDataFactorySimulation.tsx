@@ -4388,45 +4388,45 @@ export function RealDataFactorySimulation() {
                 const setupRatio = avgProdPerOrder > 0 ? (avgSetupPerOrder / avgProdPerOrder) * 100 : 0
 
                 return (
-                  <div className="space-y-4">
+                  <div className="space-y-2">
                     {/* Summary Cards */}
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                      <div className="p-2 bg-orange-50 border border-orange-200 rounded-lg">
-                        <div className="text-[10px] text-orange-700 font-medium">Eingestellte Rüstzeit</div>
-                        <div className="text-lg font-bold text-orange-900">{setupMinutes} min</div>
+                    <div className="grid grid-cols-1 gap-1.5">
+                      <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                        <div className="text-xs text-slate-600 font-medium">Eingestellte Rüstzeit</div>
+                        <div className="text-xl font-bold text-slate-900">{setupMinutes} min</div>
                       </div>
-                      <div className="p-2 bg-red-50 border border-red-200 rounded-lg">
-                        <div className="text-[10px] text-red-700 font-medium">Anzahl Umrüstungen</div>
-                        <div className="text-lg font-bold text-red-900">{setupEventCount}</div>
+                      <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                        <div className="text-xs text-slate-600 font-medium">Anzahl Umrüstungen</div>
+                        <div className="text-xl font-bold text-slate-900">{setupEventCount}</div>
                       </div>
-                      <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg">
-                        <div className="text-[10px] text-blue-700 font-medium">Ø Rüstzeit / Auftrag</div>
-                        <div className="text-lg font-bold text-blue-900">{avgSetupPerOrder.toFixed(1)} min</div>
+                      <div className="p-2 bg-blue-50 border border-blue-200 rounded">
+                        <div className="text-xs text-blue-700 font-medium">Ø Rüstzeit / Auftrag</div>
+                        <div className="text-xl font-bold text-blue-900">{avgSetupPerOrder.toFixed(1)} min</div>
                       </div>
-                      <div className="p-2 bg-green-50 border border-green-200 rounded-lg">
-                        <div className="text-[10px] text-green-700 font-medium">Ø Fertigungszeit / Auftrag</div>
-                        <div className="text-lg font-bold text-green-900">{avgProdPerOrder.toFixed(1)} min</div>
+                      <div className="p-2 bg-blue-50 border border-blue-200 rounded">
+                        <div className="text-xs text-blue-700 font-medium">Ø Fertigungszeit / Auftrag</div>
+                        <div className="text-xl font-bold text-blue-900">{avgProdPerOrder.toFixed(1)} min</div>
                       </div>
                     </div>
 
                     {/* Ratio Visualization */}
-                    <div className="p-3 bg-gradient-to-r from-orange-50 to-green-50 border rounded-lg">
-                      <h4 className="text-[10px] font-semibold mb-2">Rüstzeit im Verhältnis zur Fertigungszeit</h4>
+                    <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                      <h4 className="text-xs font-semibold mb-1.5 text-slate-700">Rüstzeit im Verhältnis zur Fertigungszeit</h4>
                       <div className="flex items-center gap-2">
                         <div className="flex-1">
-                          <div className="flex items-center justify-between text-[9px] mb-1">
-                            <span className="text-orange-700 font-medium">Rüstzeit: {avgSetupPerOrder.toFixed(1)} min</span>
-                            <span className="text-green-700 font-medium">Fertigungszeit: {avgProdPerOrder.toFixed(1)} min</span>
+                          <div className="flex items-center justify-between text-[11px] mb-1">
+                            <span className="text-slate-600 font-medium">Rüstzeit: {avgSetupPerOrder.toFixed(1)} min</span>
+                            <span className="text-slate-600 font-medium">Fertigungszeit: {avgProdPerOrder.toFixed(1)} min</span>
                           </div>
-                          <div className="h-4 bg-gray-200 rounded-full overflow-hidden flex">
+                          <div className="h-5 bg-slate-200 rounded overflow-hidden flex">
                             <div
-                              className="bg-orange-500 flex items-center justify-center text-[9px] text-white font-semibold"
+                              className="bg-blue-600 flex items-center justify-center text-[11px] text-white font-medium"
                               style={{ width: `${Math.min((avgSetupPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
                             >
                               {setupRatio > 5 && `${setupRatio.toFixed(1)}%`}
                             </div>
                             <div
-                              className="bg-green-500 flex items-center justify-center text-[9px] text-white font-semibold"
+                              className="bg-blue-900 flex items-center justify-center text-[11px] text-white font-medium"
                               style={{ width: `${Math.min((avgProdPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
                             >
                               {setupRatio < 95 && `${(100 - setupRatio).toFixed(1)}%`}
@@ -4434,29 +4434,29 @@ export function RealDataFactorySimulation() {
                           </div>
                         </div>
                       </div>
-                      <div className="mt-2 text-center">
-                        <span className={`text-sm font-bold ${setupRatio > 30 ? 'text-red-600' : setupRatio > 15 ? 'text-orange-600' : 'text-green-600'}`}>
+                      <div className="mt-1.5 text-center">
+                        <span className={`text-sm font-semibold ${setupRatio > 30 ? 'text-slate-700' : setupRatio > 15 ? 'text-slate-700' : 'text-blue-700'}`}>
                           Verhältnis: {setupRatio.toFixed(1)}% Rüstzeit
                         </span>
-                        <p className="text-[10px] text-muted-foreground mt-1">
-                          {setupRatio > 30 && '⚠️ Hoher Rüstzeitanteil - Flexibilität prüfen'}
-                          {setupRatio <= 30 && setupRatio > 15 && '⚡ Moderater Rüstzeitanteil'}
-                          {setupRatio <= 15 && '✅ Niedriger Rüstzeitanteil - Effiziente Nutzung'}
+                        <p className="text-xs text-slate-600 mt-0.5">
+                          {setupRatio > 30 && 'Hoher Rüstzeitanteil - Flexibilität prüfen'}
+                          {setupRatio <= 30 && setupRatio > 15 && 'Moderater Rüstzeitanteil'}
+                          {setupRatio <= 15 && 'Niedriger Rüstzeitanteil - Effiziente Nutzung'}
                         </p>
                       </div>
                     </div>
 
                     {/* Phase Details */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div className="p-4 border rounded-lg">
-                        <h4 className="text-sm font-semibold mb-2 text-blue-700">Demontage</h4>
-                        <div className="text-sm text-muted-foreground">Umrüstungen: {demChanges}</div>
-                        <div className="text-sm text-muted-foreground">Operationen: {demOps.length}</div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                        <h4 className="text-xs font-semibold mb-1 text-blue-800">Demontage</h4>
+                        <div className="text-xs text-slate-600">Umrüstungen: {demChanges}</div>
+                        <div className="text-xs text-slate-600">Operationen: {demOps.length}</div>
                       </div>
-                      <div className="p-4 border rounded-lg">
-                        <h4 className="text-sm font-semibold mb-2 text-green-700">Montage</h4>
-                        <div className="text-sm text-muted-foreground">Umrüstungen: {monChanges}</div>
-                        <div className="text-sm text-muted-foreground">Operationen: {monOps.length}</div>
+                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                        <h4 className="text-xs font-semibold mb-1 text-blue-800">Montage</h4>
+                        <div className="text-xs text-slate-600">Umrüstungen: {monChanges}</div>
+                        <div className="text-xs text-slate-600">Operationen: {monOps.length}</div>
                       </div>
                     </div>
                   </div>
