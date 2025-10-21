@@ -1,15 +1,20 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Target, Settings, Zap } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Target, Settings, Zap, Edit2, ExternalLink } from 'lucide-react'
+import { getAllAlgorithmBundles, setActiveAlgorithmBundle } from '@/app/actions/algorithm-bundle.actions'
+import { toast } from 'sonner'
+import Link from 'next/link'
 
 interface TerminierungModalProps {
   isOpen: boolean
   onClose: () => void
   type: 'grobterminierung' | 'durchlaufterminierung' | 'feinterminierung'
+  factoryId?: string
 }
 
 // Grobterminierung (Long-term scheduling) algorithms
@@ -108,165 +113,199 @@ const feinterminierungAlgorithms = {
   }
 }
 
-export function TerminierungModal({ isOpen, onClose, type }: TerminierungModalProps) {
-  // Local state for selected algorithms
-  const [selectedGrobAlgorithm, setSelectedGrobAlgorithm] = useState('incoming_plus_avg')
-  const [selectedDurchlaufAlgorithm, setSelectedDurchlaufAlgorithm] = useState('adaptive_fifo')
-  const [selectedFeinAlgorithm, setSelectedFeinAlgorithm] = useState('real_time_sjf')
+export function TerminierungModal({ isOpen, onClose, type, factoryId }: TerminierungModalProps) {
+  // Algorithm Bundles state
+  const [bundles, setBundles] = useState<any[]>([])
+  const [selectedBundleId, setSelectedBundleId] = useState<string>('')
+  const [loading, setLoading] = useState(false)
 
-  const getModalContent = () => {
-    switch (type) {
-      case 'grobterminierung':
-        return {
-          title: 'Langzeit-Terminierung',
-          icon: <Target className="h-5 w-5 text-blue-600" />,
-          color: 'blue',
-          content: (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-600">
-                Strategische Terminplanung für die erste Terminschätzung bei Auftragseingang
-              </p>
-              
-              <div className="space-y-3">
-                <div>
-                  <Label className="text-sm font-medium">Terminierungs-Algorithmus:</Label>
-                  <Select value={selectedGrobAlgorithm} onValueChange={setSelectedGrobAlgorithm}>
-                    <SelectTrigger className="w-full mt-1">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(grobterminierungAlgorithms).map(([key, algo]) => (
-                        <SelectItem key={key} value={key} disabled={key.includes('empty_slot')}>
-                          <div>
-                            <div className="font-medium">{algo.name}</div>
-                            <div className="text-xs text-gray-500">{algo.description}</div>
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+  // Load bundles when modal opens
+  useEffect(() => {
+    if (isOpen && factoryId) {
+      loadBundles()
+    }
+  }, [isOpen, factoryId])
 
-                <div className="p-3 border rounded-lg bg-blue-50">
-                  <div className="font-medium text-blue-800">
-                    {grobterminierungAlgorithms[selectedGrobAlgorithm as keyof typeof grobterminierungAlgorithms].name}
-                  </div>
-                  <div className="text-sm text-blue-600 mt-1">
-                    {grobterminierungAlgorithms[selectedGrobAlgorithm as keyof typeof grobterminierungAlgorithms].description}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )
-        }
+  const loadBundles = async () => {
+    setLoading(true)
+    const result = await getAllAlgorithmBundles(factoryId)
+    if (result.success && result.data) {
+      setBundles(result.data)
+      // Find active bundle
+      const activeBundle = result.data.find((b: any) => b.isActive && b.factoryId === factoryId)
+      if (activeBundle) {
+        setSelectedBundleId(activeBundle.id)
+      }
+    }
+    setLoading(false)
+  }
 
-      case 'durchlaufterminierung':
-        return {
-          title: 'Mittelfristige Terminierung',
-          icon: <Settings className="h-5 w-5 text-orange-600" />,
-          color: 'orange',
-          content: (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-600">
-                Mittelfristige Planungsstrategien für optimierte Durchlaufzeiten
-              </p>
-              
-              <div className="space-y-3">
-                <div>
-                  <Label className="text-sm font-medium">Planungs-Algorithmus:</Label>
-                  <Select value={selectedDurchlaufAlgorithm} onValueChange={setSelectedDurchlaufAlgorithm}>
-                    <SelectTrigger className="w-full mt-1">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(durchlaufterminierungAlgorithms).map(([key, algo]) => (
-                        <SelectItem key={key} value={key} disabled={key.includes('empty_slot')}>
-                          <div>
-                            <div className="font-medium">{algo.name}</div>
-                            <div className="text-xs text-gray-500">{algo.description}</div>
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+  const handleBundleChange = async (bundleId: string) => {
+    if (!factoryId) return
 
-                <div className="p-3 border rounded-lg bg-orange-50">
-                  <div className="font-medium text-orange-800">
-                    {durchlaufterminierungAlgorithms[selectedDurchlaufAlgorithm as keyof typeof durchlaufterminierungAlgorithms].name}
-                  </div>
-                  <div className="text-sm text-orange-600 mt-1">
-                    {durchlaufterminierungAlgorithms[selectedDurchlaufAlgorithm as keyof typeof durchlaufterminierungAlgorithms].description}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )
-        }
+    setSelectedBundleId(bundleId)
+    const result = await setActiveAlgorithmBundle(bundleId, factoryId)
 
-      case 'feinterminierung':
-        return {
-          title: 'Kurzzeit-Terminierung',
-          icon: <Zap className="h-5 w-5 text-green-600" />,
-          color: 'green',
-          content: (
-            <div className="space-y-4">
-              <p className="text-sm text-gray-600">
-                Echzeit-Scheduling für optimale Stationszuweisungen
-              </p>
-              
-              <div className="space-y-3">
-                <div>
-                  <Label className="text-sm font-medium">Scheduling-Algorithmus:</Label>
-                  <Select value={selectedFeinAlgorithm} onValueChange={setSelectedFeinAlgorithm}>
-                    <SelectTrigger className="w-full mt-1">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(feinterminierungAlgorithms).map(([key, algo]) => (
-                        <SelectItem key={key} value={key} disabled={key.includes('empty_slot')}>
-                          <div>
-                            <div className="font-medium">{algo.name}</div>
-                            <div className="text-xs text-gray-500">{algo.description}</div>
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="p-3 border rounded-lg bg-green-50">
-                  <div className="font-medium text-green-800">
-                    {feinterminierungAlgorithms[selectedFeinAlgorithm as keyof typeof feinterminierungAlgorithms].name}
-                  </div>
-                  <div className="text-sm text-green-600 mt-1">
-                    {feinterminierungAlgorithms[selectedFeinAlgorithm as keyof typeof feinterminierungAlgorithms].description}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )
-        }
-
-      default:
-        return { title: '', icon: null, color: 'blue', content: null }
+    if (result.success) {
+      toast.success('Algorithmus-Bundle aktiviert')
+      loadBundles() // Reload to update active state
+    } else {
+      toast.error(result.error)
     }
   }
 
-  const modalData = getModalContent()
+  const selectedBundle = bundles.find(b => b.id === selectedBundleId)
+
+  const getModalConfig = () => {
+    switch (type) {
+      case 'grobterminierung':
+        return {
+          title: 'PAP - Grobterminierung',
+          icon: <Target className="h-5 w-5 text-blue-600" />,
+          color: 'blue',
+          description: 'Pre-Acceptance Processing: Strategische Terminplanung für die erste Terminschätzung bei Auftragseingang',
+          scriptField: 'papScriptPath' as const,
+          descriptionField: 'papDescription' as const
+        }
+      case 'durchlaufterminierung':
+        return {
+          title: 'PIP - Durchlaufterminierung',
+          icon: <Settings className="h-5 w-5 text-orange-600" />,
+          color: 'orange',
+          description: 'Pre-Inspection Processing: Mittelfristige Planungsstrategien für optimierte Durchlaufzeiten',
+          scriptField: 'pipScriptPath' as const,
+          descriptionField: 'pipDescription' as const
+        }
+      case 'feinterminierung':
+        return {
+          title: 'PIPO - Feinterminierung',
+          icon: <Zap className="h-5 w-5 text-green-600" />,
+          color: 'green',
+          description: 'Post-Inspection Processing Optimization: Echtzeit-Scheduling für optimale Stationszuweisungen',
+          scriptField: 'pipoScriptPath' as const,
+          descriptionField: 'pipoDescription' as const
+        }
+      default:
+        return {
+          title: '',
+          icon: null,
+          color: 'blue',
+          description: '',
+          scriptField: 'papScriptPath' as const,
+          descriptionField: 'papDescription' as const
+        }
+    }
+  }
+
+  const config = getModalConfig()
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            {modalData.icon}
-            {modalData.title}
+          <DialogTitle className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              Terminierungs-Konfiguration
+            </div>
+            <Link href="/simulation/algorithms" target="_blank">
+              <Button variant="outline" size="sm" className="gap-2">
+                <Edit2 className="h-4 w-4" />
+                Bundles bearbeiten
+                <ExternalLink className="h-3 w-3" />
+              </Button>
+            </Link>
           </DialogTitle>
         </DialogHeader>
-        
-        <div className="mt-4">
-          {modalData.content}
+
+        <div className="mt-4 space-y-4">
+          <p className="text-sm text-gray-600">
+            Python-Skripte für Warteschlangen-Terminierung
+          </p>
+
+          {loading ? (
+            <div className="p-4 text-center text-gray-500">Lade Bundles...</div>
+          ) : (
+            <>
+              <div className="space-y-3">
+                <Label className="text-sm font-medium">Aktives Algorithmus-Bundle:</Label>
+                <Select value={selectedBundleId} onValueChange={handleBundleChange}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Bundle auswählen..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {bundles.map((bundle) => (
+                      <SelectItem key={bundle.id} value={bundle.id}>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{bundle.name}</span>
+                          {bundle.isActive && (
+                            <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded">Aktiv</span>
+                          )}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {selectedBundle && (
+                <div className="p-4 border rounded-lg bg-gray-50 space-y-4">
+                  <div className="pb-3 border-b">
+                    <div className="font-semibold text-lg">{selectedBundle.name}</div>
+                    {selectedBundle.author && (
+                      <div className="text-xs text-gray-500 mt-1">Autor: {selectedBundle.author}</div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    {/* PreAcceptanceQueue */}
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                        <span className="font-medium text-sm">PreAcceptanceQueue</span>
+                      </div>
+                      {selectedBundle.papScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {selectedBundle.papScriptPath}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+
+                    {/* PreInspectionQueue */}
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <div className="w-2 h-2 rounded-full bg-orange-500"></div>
+                        <span className="font-medium text-sm">PreInspectionQueue</span>
+                      </div>
+                      {selectedBundle.pipScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {selectedBundle.pipScriptPath}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+
+                    {/* PostInspectionQueue */}
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <div className="w-2 h-2 rounded-full bg-green-500"></div>
+                        <span className="font-medium text-sm">PostInspectionQueue</span>
+                      </div>
+                      {selectedBundle.pipoScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {selectedBundle.pipoScriptPath}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>

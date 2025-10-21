@@ -52,6 +52,11 @@ CREATE TABLE "Auftrag" (
     "processGraphDataBg" JSONB,
     "processGraphDataBgt" JSONB,
     "processSequences" JSONB,
+    "dispatcherOrderPreAcceptance" INTEGER,
+    "dispatcherOrderPreInspection" INTEGER,
+    "dispatcherOrderPostInspection" INTEGER,
+    "plannedDeliverySimMinute" DOUBLE PRECISION,
+    "finalCompletionSimMinute" DOUBLE PRECISION,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
@@ -473,4 +478,3 @@ ALTER TABLE "_BaugruppeToProzess" ADD CONSTRAINT "_BaugruppeToProzess_A_fkey" FO
 
 -- AddForeignKey
 ALTER TABLE "_BaugruppeToProzess" ADD CONSTRAINT "_BaugruppeToProzess_B_fkey" FOREIGN KEY ("B") REFERENCES "Prozess"("id") ON DELETE CASCADE ON UPDATE CASCADE;
-

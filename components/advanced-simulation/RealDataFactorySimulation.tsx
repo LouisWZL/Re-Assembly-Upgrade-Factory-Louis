@@ -6,6 +6,7 @@ import { useFactory } from '@/contexts/factory-context';
 import { useSimulation } from '@/contexts/simulation-context';
 import { useRouter } from 'next/navigation';
 import { getAdvancedSimulationData } from '@/app/actions/advanced-simulation.actions';
+import { getAllAlgorithmBundles, setActiveAlgorithmBundle } from '@/app/actions/algorithm-bundle.actions';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -14,7 +15,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info, ChevronDown, ChevronUp } from 'lucide-react';
+import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info, ChevronDown, ChevronUp, Database } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   ReactFlow,
@@ -83,6 +84,8 @@ interface SimulationOrder {
   processSequences?: any; // JSON data from database containing all possible sequences
   selectedSequence?: any; // The randomly selected sequence for this order
   currentSequenceStep?: number; // Current step index in the selected sequence
+  plannedDeliverySimMinute?: number | null;
+  finalCompletionSimMinute?: number | null;
 }
 
 // Scheduling algorithms enum and interface
@@ -106,7 +109,10 @@ import { AdvancedKPIDashboard } from './AdvancedKPIDashboard';
 // Helper function to calculate process times from baugruppen
 function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
   const baugruppen = order.baugruppenInstances || []
+  console.log(`🔍 [calculateProcessTimesFromBaugruppen] Order ${order.id?.slice(-4)}: ${baugruppen.length} Baugruppen-Instanzen`)
+
   if (baugruppen.length === 0) {
+    console.log(`⚠️ [calculateProcessTimesFromBaugruppen] No Baugruppen, using factory defaults: dem=${factory.defaultDemontagezeit}, mon=${factory.defaultMontagezeit}`)
     return {
       demontage: factory.defaultDemontagezeit || 30,
       montage: factory.defaultMontagezeit || 45
@@ -115,23 +121,125 @@ function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
 
   let totalDemontage = 0
   let totalMontage = 0
-  let count = 0
+  let countDem = 0
+  let countMon = 0
 
-  baugruppen.forEach((bg: any) => {
-    if (bg.baugruppe?.demontagezeit) {
-      totalDemontage += bg.baugruppe.demontagezeit
-      count++
+  baugruppen.forEach((bg: any, idx: number) => {
+    const demZeit = bg.baugruppe?.demontagezeit
+    const monZeit = bg.baugruppe?.montagezeit
+    const bgName = bg.baugruppe?.bezeichnung || 'Unknown'
+
+    console.log(`  [${idx}] ${bgName}: demontagezeit=${demZeit}, montagezeit=${monZeit}`)
+
+    if (demZeit != null && demZeit > 0) {
+      totalDemontage += demZeit
+      countDem++
     }
-    if (bg.baugruppe?.montagezeit) {
-      totalMontage += bg.baugruppe.montagezeit
+    if (monZeit != null && monZeit > 0) {
+      totalMontage += monZeit
+      countMon++
     }
   })
 
+  const finalDem = countDem > 0 ? Math.round(totalDemontage / countDem) : (factory.defaultDemontagezeit || 30)
+  const finalMon = countMon > 0 ? Math.round(totalMontage / countMon) : (factory.defaultMontagezeit || 45)
+
+  console.log(`✅ [calculateProcessTimesFromBaugruppen] Final: dem=${finalDem} (${countDem} values, fallback=${factory.defaultDemontagezeit}), mon=${finalMon} (${countMon} values, fallback=${factory.defaultMontagezeit})`)
+
   return {
-    demontage: count > 0 ? Math.round(totalDemontage / count) : (factory.defaultDemontagezeit || 30),
-    montage: count > 0 ? Math.round(totalMontage / count) : (factory.defaultMontagezeit || 45)
+    demontage: finalDem,
+    montage: finalMon
   }
 }
+
+type QueueStage = 'preAcceptance' | 'preInspection' | 'postInspection'
+type SchedulingStageKey = 'pap' | 'pip' | 'pipo'
+
+type SchedulingStageStats = {
+  runs: number
+  lastRun: number | null
+  lastReleased: number
+  totalReleased: number
+  lastReorder: number
+  totalReorder: number
+  lastQueueSize: number
+  lastBatches: number
+  lastPythonDiff: number
+  totalPythonDiff: number
+}
+
+type SchedulingStats = Record<SchedulingStageKey, SchedulingStageStats>
+
+type SchedulingSummaryPayload = {
+  stage: QueueStage
+  queueSize?: number
+  releasedCount?: number
+  reorderCount?: number
+  batchCount?: number
+  releaseListCount?: number
+  simMinute?: number
+  timestamp?: number
+  orderSequence?: string[]
+  pythonReleaseList?: string[]
+  pythonEtaList?: Array<{ orderId: string; eta: number }>
+  pythonPriorities?: Array<{ orderId: string; priority: number }>
+  pythonBatches?: Array<{ id: string; size: number }>
+  pythonAssignments?: Array<{ orderId: string; eta: number | null; priorityScore: number | null }>
+  pythonDebug?: Array<Record<string, unknown>>
+  pythonDiffCount?: number
+}
+
+const createInitialSchedulingStats = (): SchedulingStats => ({
+  pap: {
+    runs: 0,
+    lastRun: null,
+    lastReleased: 0,
+    totalReleased: 0,
+    lastReorder: 0,
+    totalReorder: 0,
+    lastQueueSize: 0,
+    lastBatches: 0,
+    lastPythonDiff: 0,
+    totalPythonDiff: 0,
+  },
+  pip: {
+    runs: 0,
+    lastRun: null,
+    lastReleased: 0,
+    totalReleased: 0,
+    lastReorder: 0,
+    totalReorder: 0,
+    lastQueueSize: 0,
+    lastBatches: 0,
+    lastPythonDiff: 0,
+    totalPythonDiff: 0,
+  },
+  pipo: {
+    runs: 0,
+    lastRun: null,
+    lastReleased: 0,
+    totalReleased: 0,
+    lastReorder: 0,
+    totalReorder: 0,
+    lastQueueSize: 0,
+    lastBatches: 0,
+    lastPythonDiff: 0,
+    totalPythonDiff: 0,
+  },
+})
+
+const schedulingStageLabels: Record<SchedulingStageKey, string> = {
+  pap: 'Pre-Acceptance (PAP)',
+  pip: 'Pre-Inspection (PIP)',
+  pipo: 'Post-Inspection (PIPo)',
+}
+
+type SchedulingHistory = Record<SchedulingStageKey, SchedulingSummaryPayload[]>
+const createInitialSchedulingHistory = (): SchedulingHistory => ({
+  pap: [],
+  pip: [],
+  pipo: [],
+})
 
 export function RealDataFactorySimulation() {
   const { activeFactory } = useFactory();
@@ -169,6 +277,15 @@ export function RealDataFactorySimulation() {
   useEffect(() => {
     simulationTimeRef.current = simulationTime;
   }, [simulationTime]);
+
+  useEffect(() => {
+    setSchedulingStats(createInitialSchedulingStats())
+    setSchedulingHistory(createInitialSchedulingHistory())
+    setDeliveryMetrics(null)
+    setDeliveryMetricsError(null)
+    // Set to 0 to load ALL orders on first load, not just recent ones
+    deliveryMetricsSinceRef.current = 0
+  }, [activeFactory?.id])
   
   // Local simulation data
   const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
@@ -190,6 +307,9 @@ export function RealDataFactorySimulation() {
   const dispatcherLogsRef = useRef<string[]>([])
   const [pickSlotDebugLogs, setPickSlotDebugLogs] = useState<string[]>([])
   const pickSlotDebugLogsRef = useRef<string[]>([])
+  const [deliveryMetrics, setDeliveryMetrics] = useState<any>(null)
+  const [deliveryMetricsError, setDeliveryMetricsError] = useState<string | null>(null)
+  const deliveryMetricsSinceRef = useRef<number>(Date.now())
 
   // Gantt chart hover states
   const [hoveredOrderRow, setHoveredOrderRow] = useState<string | null>(null)
@@ -199,6 +319,12 @@ export function RealDataFactorySimulation() {
   // Collapsible sections state
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
   const [showDebugPanel, setShowDebugPanel] = useState(false)
+
+  // Terminierung modal state
+  const [terminierungModalOpen, setTerminierungModalOpen] = useState(false)
+  const [selectedBundleId, setSelectedBundleId] = useState<string>('')
+  const [algorithmBundles, setAlgorithmBundles] = useState<any[]>([])
+  const [loadingBundles, setLoadingBundles] = useState(false)
 
   // Phase slot state (approximation of rigid/flexible slots)
   type SlotState = { flex: boolean; specialization?: string | null; currentType?: string | null; idleSince?: number | null; busy?: boolean }
@@ -419,7 +545,12 @@ export function RealDataFactorySimulation() {
   const [selectedStation, setSelectedStation] = useState<SimulationStation | null>(null);
   const [stationDialogOpen, setStationDialogOpen] = useState(false);
   const [tempProcessingTime, setTempProcessingTime] = useState(0);
-  
+
+  // Phase variation dialog (for Demontage/Montage)
+  const [selectedPhase, setSelectedPhase] = useState<'demontage' | 'montage' | null>(null);
+  const [phaseDialogOpen, setPhaseDialogOpen] = useState(false);
+  const [tempPhaseVariation, setTempPhaseVariation] = useState(0.3);
+
   // Inspection settings
   const [inspectionDialogOpen, setInspectionDialogOpen] = useState(false);
   const [reassemblyPercentage, setReassemblyPercentage] = useState(25); // Default 25% need reassembly
@@ -451,7 +582,19 @@ export function RealDataFactorySimulation() {
       count: number
       simTime: number
     }
+    scheduling?: SchedulingStats
+    schedulingHistory?: SchedulingHistory
   } | null>(null)
+  const [schedulingStats, setSchedulingStats] = useState<SchedulingStats>(() => createInitialSchedulingStats())
+  const [schedulingHistory, setSchedulingHistory] = useState<SchedulingHistory>(
+    () => createInitialSchedulingHistory()
+  )
+  useEffect(() => {
+    setQueueDebugInfo(prev => (prev ? { ...prev, scheduling: schedulingStats } : prev))
+  }, [schedulingStats])
+  useEffect(() => {
+    setQueueDebugInfo(prev => (prev ? { ...prev, schedulingHistory } : prev))
+  }, [schedulingHistory])
   useEffect(() => {
     const min = getSimMinutes()
     const bucket = Math.floor(min / 10)
@@ -509,20 +652,55 @@ export function RealDataFactorySimulation() {
   useEffect(() => {
     if (activeFactory) {
       loadSimulationData();
+      loadAlgorithmBundles();
     }
   }, [activeFactory]);
+
+  // Load algorithm bundles
+  const loadAlgorithmBundles = async () => {
+    if (!activeFactory) return;
+    setLoadingBundles(true);
+    try {
+      const result = await getAllAlgorithmBundles(activeFactory.id);
+      if (result.success && result.data) {
+        setAlgorithmBundles(result.data);
+        // Set the active bundle as selected
+        const activeBundle = result.data.find((b: any) => b.isActive);
+        if (activeBundle) {
+          setSelectedBundleId(activeBundle.id);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to load algorithm bundles:', error);
+    } finally {
+      setLoadingBundles(false);
+    }
+  };
+
+  // Scheduling algorithms run server-side during queue release events (PAP/PIP/PIPo)
 
   const loadSimulationData = async () => {
     if (!activeFactory) return;
     
     setLoading(true);
     try {
+      deliveryMetricsSinceRef.current = Date.now();
+      setDeliveryMetrics(null);
+      setDeliveryMetricsError(null);
+
       const result = await getAdvancedSimulationData(activeFactory.id);
       
       if (result.success && result.data) {
         setFactoryData(result.data);
+        await refreshDeliveryMetrics();
         
         // Initialize stations with stochastic variations and capacity limits
+        // Stochastic Variation = Schwankung der Bearbeitungszeiten (z.B. 0.3 = ±30%)
+        // - Auftragsannahme: ±20%
+        // - Inspektion: ±30%
+        // - Demontage: ±30%
+        // - Montage: ±25%
+        // - Quality-Shipping: ±30%
         const mainStations: SimulationStation[] = [
           { id: 'order-acceptance', name: 'Auftragsannahme', type: 'MAIN', phase: 'AUFTRAGSANNAHME', processingTime: 5, stochasticVariation: 0.2, currentOrder: null, waitingQueue: [], capacity: 1 },
           { id: 'inspection', name: 'Inspektion', type: 'MAIN', phase: 'INSPEKTION', processingTime: 15, stochasticVariation: 0.3, currentOrder: null, waitingQueue: [], capacity: 1 },
@@ -572,34 +750,90 @@ export function RealDataFactorySimulation() {
         };
         
         const usedBaugruppentypen = getUsedBaugruppentypen();
-        console.log('Used Baugruppentypen:', usedBaugruppentypen.map(b => b.name));
+        console.log('🏭 Factory Settings:');
+        console.log('  - Default Demontagezeit:', result.data.factory?.defaultDemontagezeit, 'min');
+        console.log('  - Default Montagezeit:', result.data.factory?.defaultMontagezeit, 'min');
+        console.log('  - Total Baugruppen in Factory:', result.data.factory?.baugruppen?.length || 0);
+        console.log('📋 Used Baugruppentypen:', usedBaugruppentypen.map(b => b.name));
+
+        // Helper function to get average processing times for a Baugruppentyp from factory baugruppen
+        const getProcessingTimesForBaugruppentyp = (baugruppentypId: string) => {
+          const factoryBaugruppen = result.data.factory?.baugruppen || [];
+
+          // Find all Baugruppen that belong to this Baugruppentyp
+          const baugruppenOfType = factoryBaugruppen.filter(
+            (bg: any) => bg.baugruppentypId === baugruppentypId
+          );
+
+          if (baugruppenOfType.length === 0) {
+            console.warn(`⚠️ No Baugruppen found for Baugruppentyp ${baugruppentypId}, using factory defaults`);
+            return {
+              demontage: result.data.factory?.defaultDemontagezeit || 30,
+              montage: result.data.factory?.defaultMontagezeit || 45
+            };
+          }
+
+          // Calculate average demontage and montage times
+          let totalDem = 0, totalMon = 0, countDem = 0, countMon = 0;
+
+          baugruppenOfType.forEach((bg: any) => {
+            if (bg.demontagezeit != null && bg.demontagezeit > 0) {
+              totalDem += bg.demontagezeit;
+              countDem++;
+            }
+            if (bg.montagezeit != null && bg.montagezeit > 0) {
+              totalMon += bg.montagezeit;
+              countMon++;
+            }
+          });
+
+          const avgDem = countDem > 0
+            ? Math.round(totalDem / countDem)
+            : (result.data.factory?.defaultDemontagezeit || 30);
+          const avgMon = countMon > 0
+            ? Math.round(totalMon / countMon)
+            : (result.data.factory?.defaultMontagezeit || 45);
+
+          console.log(`📊 Baugruppentyp ${baugruppentypId}: ${baugruppenOfType.length} Baugruppen, avgDem=${avgDem}min (${countDem} values), avgMon=${avgMon}min (${countMon} values)`);
+
+          return {
+            demontage: avgDem,
+            montage: avgMon
+          };
+        };
 
         // Add sub-stations for Demontage and Re-Assembly based on actually used Baugruppentypen
-        const demontageSubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => ({
-          id: `demontage-${sub.id}`,
-          name: sub.name,
-          type: 'SUB' as const,
-          parent: 'demontage',
-          baugruppentypId: sub.baugruppentypId,
-          processingTime: 30, // Default 30 minutes
-          stochasticVariation: 0.3,
-          currentOrder: null,
-          waitingQueue: [],
-          capacity: 1
-        }));
-        
-        const reassemblySubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => ({
-          id: `reassembly-${sub.id}`,
-          name: sub.name.replace('Demontage', 'Montage'), // Convert Demontage to Montage for reassembly stations
-          type: 'SUB' as const,
-          parent: 'reassembly',
-          baugruppentypId: sub.baugruppentypId,
-          processingTime: 45, // Default 45 minutes
-          stochasticVariation: 0.25,
-          currentOrder: null,
-          waitingQueue: [],
-          capacity: 1
-        }));
+        const demontageSubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => {
+          const times = getProcessingTimesForBaugruppentyp(sub.baugruppentypId);
+          return {
+            id: `demontage-${sub.id}`,
+            name: sub.name,
+            type: 'SUB' as const,
+            parent: 'demontage',
+            baugruppentypId: sub.baugruppentypId,
+            processingTime: times.demontage,
+            stochasticVariation: 0.3,
+            currentOrder: null,
+            waitingQueue: [],
+            capacity: 1
+          };
+        });
+
+        const reassemblySubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => {
+          const times = getProcessingTimesForBaugruppentyp(sub.baugruppentypId);
+          return {
+            id: `reassembly-${sub.id}`,
+            name: sub.name.replace('Demontage', 'Montage'), // Convert Demontage to Montage for reassembly stations
+            type: 'SUB' as const,
+            parent: 'reassembly',
+            baugruppentypId: sub.baugruppentypId,
+            processingTime: times.montage,
+            stochasticVariation: 0.25,
+            currentOrder: null,
+            waitingQueue: [],
+            capacity: 1
+          };
+        });
         
         const allStations = [...mainStations, ...demontageSubStations, ...reassemblySubStations];
         setLocalStations(allStations);
@@ -636,7 +870,9 @@ export function RealDataFactorySimulation() {
             isWaiting: false,
             processSequences: order.processSequences, // Include the JSON data from database
             selectedSequence: selectedSequence, // Store the selected sequence
-            currentSequenceStep: 0 // Start at beginning of sequence
+            currentSequenceStep: 0, // Start at beginning of sequence
+            plannedDeliverySimMinute: order.plannedDeliverySimMinute ?? null,
+            finalCompletionSimMinute: null,
           };
         });
 
@@ -1379,6 +1615,169 @@ export function RealDataFactorySimulation() {
     }
   };
 
+  const refreshDeliveryMetrics = useCallback(async (forceAll = false) => {
+    if (!activeFactory?.id) return
+    try {
+      const params = new URLSearchParams({ factoryId: activeFactory.id })
+      // Only add 'since' parameter if not forcing a full reload AND we have a timestamp
+      if (!forceAll && deliveryMetricsSinceRef.current) {
+        params.append('since', deliveryMetricsSinceRef.current.toString())
+      }
+      const response = await fetch(`/api/delivery-metrics?${params.toString()}`, {
+        cache: 'no-store',
+      })
+      let result: any = null
+      try {
+        result = await response.json()
+      } catch (parseError) {
+        console.warn('Failed to parse delivery metrics response:', parseError)
+      }
+      if (!response.ok || !(result?.success && result.data)) {
+        const errorMessage =
+          (result && result.error) || `Keine Liefertermin-Daten verfügbar (Status ${response.status})`
+        setDeliveryMetrics(null)
+        setDeliveryMetricsError(errorMessage)
+        return
+      }
+      setDeliveryMetrics(result.data)
+      setDeliveryMetricsError(null)
+    } catch (error) {
+      console.error('Delivery metrics refresh failed:', error)
+      setDeliveryMetricsError('Fehler beim Laden der Liefertermin-Analysen')
+    }
+  }, [activeFactory?.id])
+
+  const formatDeviationMinutes = (minutes: number) => {
+    if (!Number.isFinite(minutes)) return 'n/a'
+    const sign = minutes > 0 ? '+' : minutes < 0 ? '-' : ''
+    const absolute = Math.abs(minutes)
+    const days = Math.floor(absolute / (60 * 24))
+    const hours = Math.floor((absolute % (60 * 24)) / 60)
+    const mins = Math.round(absolute % 60)
+    const parts: string[] = []
+    if (days) parts.push(`${days}d`)
+    if (hours) parts.push(`${hours}h`)
+    if (mins || parts.length === 0) parts.push(`${mins}m`)
+    const magnitude = parts.join(' ')
+    return sign ? `${sign}${magnitude}` : magnitude
+  }
+
+  const formatIsoDateTime = (iso: string | null | undefined) => {
+    if (!iso) return '--'
+    const date = new Date(iso)
+    if (Number.isNaN(date.getTime())) return '--'
+    return date.toLocaleString('de-DE', {
+      hour: '2-digit',
+      minute: '2-digit',
+      day: '2-digit',
+      month: '2-digit',
+    })
+  }
+
+  const formatSimMinuteDateTime = (simMinute?: number | null) => {
+    if (typeof simMinute !== 'number' || Number.isNaN(simMinute)) return '–'
+    const date = new Date(simMinute * 60000)
+    if (Number.isNaN(date.getTime())) return '–'
+    const pad = (value: number) => String(Math.floor(Math.abs(value))).padStart(2, '0')
+    const day = pad(date.getDate())
+    const month = pad(date.getMonth() + 1)
+    const year = date.getFullYear()
+    const hours = pad(date.getHours())
+    const minutes = pad(date.getMinutes())
+    const seconds = pad(date.getSeconds())
+    return `${day}.${month}.${year}, ${hours}:${minutes}.${seconds}`
+  }
+
+  const updateSchedulingStats = useCallback((summary?: SchedulingSummaryPayload, simMinute?: number) => {
+    if (!summary) return
+    const stageMap: Record<QueueStage, SchedulingStageKey> = {
+      preAcceptance: 'pap',
+      preInspection: 'pip',
+      postInspection: 'pipo',
+    }
+    const stageKey = stageMap[summary.stage]
+    const effectiveSimMinute = simMinute ?? summary.simMinute ?? getSimMinutes()
+
+    setSchedulingStats(prev => {
+      const stageStats = prev[stageKey]
+      const released = summary.releasedCount ?? 0
+      const reorder = summary.reorderCount ?? 0
+      const pythonDiff = summary.pythonDiffCount ?? reorder
+      const queueSize = summary.queueSize ?? stageStats.lastQueueSize
+      const batches = summary.batchCount ?? stageStats.lastBatches
+
+      return {
+        ...prev,
+        [stageKey]: {
+          runs: stageStats.runs + 1,
+          lastRun: effectiveSimMinute,
+          lastReleased: released,
+          totalReleased: stageStats.totalReleased + released,
+          lastReorder: reorder,
+          totalReorder: stageStats.totalReorder + reorder,
+          lastQueueSize: queueSize,
+          lastBatches: batches,
+          lastPythonDiff: pythonDiff,
+          totalPythonDiff: stageStats.totalPythonDiff + pythonDiff,
+        },
+      }
+    })
+    setSchedulingHistory(prev => {
+      const stageHistory = prev[stageKey] ?? []
+      const nextEntry: SchedulingSummaryPayload = {
+        ...summary,
+        simMinute: effectiveSimMinute,
+      }
+      return {
+        ...prev,
+        [stageKey]: [nextEntry, ...stageHistory].slice(0, 6),
+      }
+    })
+    if (stageKey === 'pap') {
+      let assignments: Array<{ orderId: string; eta: number | null }> | null = null
+      if (Array.isArray(summary.pythonAssignments) && summary.pythonAssignments.length) {
+        assignments = summary.pythonAssignments.map((item) => ({
+          orderId: String(item.orderId),
+          eta: typeof item.eta === 'number' ? Number(item.eta) : null,
+        }))
+      } else if (Array.isArray(summary.pythonEtaList) && summary.pythonEtaList.length) {
+        assignments = summary.pythonEtaList.map((item) => ({
+          orderId: String(item.orderId),
+          eta: typeof item.eta === 'number' ? Number(item.eta) : null,
+        }))
+      }
+      if (assignments?.length) {
+        const assignmentMap = new Map<string, number | null>()
+        assignments.forEach(({ orderId, eta }) => {
+          assignmentMap.set(orderId, eta ?? null)
+        })
+        simulationOrdersRef.current = simulationOrdersRef.current.map((order) =>
+          assignmentMap.has(order.id)
+            ? {
+                ...order,
+                plannedDeliverySimMinute: assignmentMap.get(order.id) ?? null,
+                finalCompletionSimMinute: null,
+              }
+            : order
+        )
+        setActiveOrders((prev) =>
+          prev.map((order) =>
+            assignmentMap.has(order.id)
+              ? {
+                  ...order,
+                  plannedDeliverySimMinute: assignmentMap.get(order.id) ?? null,
+                  finalCompletionSimMinute: null,
+                }
+              : order
+          )
+        )
+      }
+    }
+    if (stageKey === 'pap' || stageKey === 'pipo') {
+      refreshDeliveryMetrics()
+    }
+  }, [getSimMinutes, refreshDeliveryMetrics, setActiveOrders])
+
   const processOrders = async (deltaMinutes: number) => {
     // Check database queues for batch releases
     const currentSimMinute = getSimMinutes()
@@ -1398,6 +1797,7 @@ export function RealDataFactorySimulation() {
           count: preAcceptanceResult.count,
           orderIds: preAcceptanceResult.orderIds?.map(id => id.slice(-4))
         })
+        updateSchedulingStats(preAcceptanceResult.summary as SchedulingSummaryPayload | undefined, currentSimMinute)
         if (preAcceptanceResult.batchReleased && preAcceptanceResult.orderIds) {
           console.log(`🎉 Released ${preAcceptanceResult.count} orders from PreAcceptanceQueue at sim t=${currentSimMinute}`)
 
@@ -1457,7 +1857,9 @@ export function RealDataFactorySimulation() {
           postInspectionReady: postInspStatus.data?.readyCount || 0,
           lastCheck: currentSimMinute,
           config: config.data || null,
-          lastRelease: queueDebugInfo?.lastRelease // Preserve previous release info
+          lastRelease: queueDebugInfo?.lastRelease, // Preserve previous release info
+          scheduling: schedulingStats,
+          schedulingHistory,
         }
 
         setQueueDebugInfo(queueInfo)
@@ -1472,6 +1874,7 @@ export function RealDataFactorySimulation() {
         // Check PreInspectionQueue
         console.log(`⏰ [t=${currentSimMinute}] Checking PreInspectionQueue for batch release...`)
         const preInspectionResult = await checkAndReleaseBatch('preInspection', currentSimMinute, activeFactory.id)
+        updateSchedulingStats(preInspectionResult.summary as SchedulingSummaryPayload | undefined, currentSimMinute)
         if (preInspectionResult.batchReleased && preInspectionResult.orderIds) {
           console.log(`🎉 Released ${preInspectionResult.count} orders from PreInspectionQueue at sim t=${currentSimMinute}`)
 
@@ -1508,6 +1911,7 @@ export function RealDataFactorySimulation() {
         // Check PostInspectionQueue
         console.log(`⏰ [t=${currentSimMinute}] Checking PostInspectionQueue for batch release...`)
         const postInspectionResult = await checkAndReleaseBatch('postInspection', currentSimMinute, activeFactory.id)
+        updateSchedulingStats(postInspectionResult.summary as SchedulingSummaryPayload | undefined, currentSimMinute)
         if (postInspectionResult.batchReleased && postInspectionResult.orderIds) {
           console.log(`🎉 Released ${postInspectionResult.count} orders from PostInspectionQueue at sim t=${currentSimMinute}`)
 
@@ -1660,6 +2064,19 @@ export function RealDataFactorySimulation() {
                 }
               })()
 
+              const completionSimMinute = getSimMinutes()
+
+              // Convert relative sim minute to absolute timestamp (minutes since Unix epoch)
+              // plannedDeliverySimMinute is stored as absolute, so finalCompletionSimMinute should match
+              const absoluteCompletionMinutes = simulationStartTimeRef.current
+                ? simulationStartTimeRef.current.getTime() / 60000 + completionSimMinute
+                : completionSimMinute
+
+              const completedOrderSnapshot =
+                stationId === 'quality-shipping'
+                  ? activeOrdersRef.current.find(o => o.id === finishedOrderId)
+                  : null
+
               setActiveOrders(prev => {
                 let updated: SimulationOrder[];
 
@@ -1687,11 +2104,31 @@ export function RealDataFactorySimulation() {
               })
               // quality-shipping completion to KPI
               if (stationId === 'quality-shipping') {
-              const ord = activeOrdersRef.current.find(o => o.id === finishedOrderId)
-                if (ord) {
-                  const done = { ...ord, completedAt: new Date(), schedulingAlgorithm: currentSchedulingAlgorithm }
+                if (completedOrderSnapshot && !completedOrderSnapshot.finalCompletionSimMinute) {
+                  simulationOrdersRef.current = simulationOrdersRef.current.map((order) =>
+                    order.id === finishedOrderId
+                      ? { ...order, finalCompletionSimMinute: absoluteCompletionMinutes }
+                      : order
+                  )
+                  const done = {
+                    ...completedOrderSnapshot,
+                    completedAt: new Date(),
+                    schedulingAlgorithm: currentSchedulingAlgorithm,
+                    finalCompletionSimMinute: absoluteCompletionMinutes,
+                  }
                   newCompletedOrders.push(done as any)
                   addCompletedOrder(done as any)
+
+                  ;(async () => {
+                    try {
+                      const { setOrderCompletionSimMinute } = await import(
+                        '@/app/actions/advanced-simulation.actions'
+                      )
+                      await setOrderCompletionSimMinute(finishedOrderId, absoluteCompletionMinutes)
+                    } catch (error) {
+                      console.error('Failed to persist final completion sim minute:', error)
+                    }
+                  })()
 
                   // Buffer completion for potential DB persistence (high priority)
                   bufferRef.current.addCompletionUpdate(finishedOrderId, new Date(), 'high')
@@ -2553,6 +2990,25 @@ export function RealDataFactorySimulation() {
   };
 
   const handleStationClick = (stationId: string) => {
+    // Check if clicking on a phase node
+    if (stationId === 'demontage-phase') {
+      // Get the variation from any demontage sub-station
+      const demSub = stations.find(s => s.id.startsWith('demontage-'));
+      setSelectedPhase('demontage');
+      setTempPhaseVariation(demSub?.stochasticVariation || 0.3);
+      setPhaseDialogOpen(true);
+      return;
+    }
+
+    if (stationId === 'reassembly-phase') {
+      // Get the variation from any reassembly sub-station
+      const monSub = stations.find(s => s.id.startsWith('reassembly-'));
+      setSelectedPhase('montage');
+      setTempPhaseVariation(monSub?.stochasticVariation || 0.25);
+      setPhaseDialogOpen(true);
+      return;
+    }
+
     const station = stations.find(s => s.id === stationId);
     if (station) {
       if (station.id === 'inspection') {
@@ -2569,22 +3025,47 @@ export function RealDataFactorySimulation() {
 
   const handleSaveStationTime = () => {
     if (selectedStation) {
-      setContextStations(prev => 
-        prev.map(s => 
-          s.id === selectedStation.id 
+      setContextStations(prev =>
+        prev.map(s =>
+          s.id === selectedStation.id
             ? { ...s, processingTime: tempProcessingTime }
             : s
         )
       );
-      setLocalStations(prev => 
-        prev.map(s => 
-          s.id === selectedStation.id 
+      setLocalStations(prev =>
+        prev.map(s =>
+          s.id === selectedStation.id
             ? { ...s, processingTime: tempProcessingTime }
             : s
         )
       );
       toast.success(`Bearbeitungszeit für ${selectedStation.name} aktualisiert`);
       setStationDialogOpen(false);
+    }
+  };
+
+  const handleSavePhaseVariation = () => {
+    if (selectedPhase) {
+      const prefix = selectedPhase === 'demontage' ? 'demontage-' : 'reassembly-';
+
+      setContextStations(prev =>
+        prev.map(s =>
+          s.id.startsWith(prefix)
+            ? { ...s, stochasticVariation: tempPhaseVariation }
+            : s
+        )
+      );
+      setLocalStations(prev =>
+        prev.map(s =>
+          s.id.startsWith(prefix)
+            ? { ...s, stochasticVariation: tempPhaseVariation }
+            : s
+        )
+      );
+
+      const phaseName = selectedPhase === 'demontage' ? 'Demontage' : 'Montage';
+      toast.success(`Schwankung für ${phaseName} auf ±${Math.round(tempPhaseVariation * 100)}% aktualisiert`);
+      setPhaseDialogOpen(false);
     }
   };
 
@@ -2663,6 +3144,9 @@ export function RealDataFactorySimulation() {
         // Clear active orders and waiting orders in context
         setActiveOrders([]);
         setWaitingOrders([]);
+        deliveryMetricsSinceRef.current = Date.now();
+        setDeliveryMetrics(null);
+        setDeliveryMetricsError(null);
         
         // Reset simulation time
         setSimulationTime(new Date());
@@ -3095,6 +3579,7 @@ export function RealDataFactorySimulation() {
           </CardContent>
         </Card>
 
+
         {/* Demontage Slot Capacity Gantt */}
         <Card>
           <CardHeader>
@@ -3103,6 +3588,22 @@ export function RealDataFactorySimulation() {
           <CardContent key={`dem-slot-gantt-${ganttRefreshKey}`}>
             {(() => {
               try {
+                // Helper: Generate consistent color for each Baugruppe
+                const getColorForBaugruppe = (baugruppe: string): string => {
+                  // Simple hash function
+                  let hash = 0
+                  for (let i = 0; i < baugruppe.length; i++) {
+                    hash = baugruppe.charCodeAt(i) + ((hash << 5) - hash)
+                  }
+
+                  // Generate HSL color with good saturation and lightness
+                  const hue = Math.abs(hash) % 360
+                  const saturation = 65 + (Math.abs(hash) % 20) // 65-85%
+                  const lightness = 45 + (Math.abs(hash >> 8) % 15) // 45-60%
+
+                  return `hsl(${hue}, ${saturation}%, ${lightness}%)`
+                }
+
                 const events = [...simEventsRef.current]
                 const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
                 const segs: Array<{ slot:number; sub_op:string; order_id:string; start:number; end:number; duration:number }>=[]
@@ -3180,7 +3681,7 @@ export function RealDataFactorySimulation() {
                                     width: `${(s.duration/maxEnd)*100}%`,
                                     top: isBarHovered ? 0 : 4,
                                     height: isBarHovered ? '40px' : '24px',
-                                    background: '#2563eb',
+                                    background: getColorForBaugruppe(s.sub_op),
                                     zIndex: isBarHovered ? 50 : 1
                                   }}
                                   onMouseEnter={() => setHoveredDemSlot(barId)}
@@ -3235,6 +3736,22 @@ export function RealDataFactorySimulation() {
           <CardContent key={`mon-slot-gantt-${ganttRefreshKey}`}>
             {(() => {
               try {
+                // Helper: Generate consistent color for each Baugruppe
+                const getColorForBaugruppe = (baugruppe: string): string => {
+                  // Simple hash function
+                  let hash = 0
+                  for (let i = 0; i < baugruppe.length; i++) {
+                    hash = baugruppe.charCodeAt(i) + ((hash << 5) - hash)
+                  }
+
+                  // Generate HSL color with good saturation and lightness
+                  const hue = Math.abs(hash) % 360
+                  const saturation = 65 + (Math.abs(hash) % 20) // 65-85%
+                  const lightness = 45 + (Math.abs(hash >> 8) % 15) // 45-60%
+
+                  return `hsl(${hue}, ${saturation}%, ${lightness}%)`
+                }
+
                 const events = [...simEventsRef.current]
                 const starts: Record<string, { t:number; activity:string; order_id:string }> = {}
                 const segs: Array<{ slot:number; sub_op:string; order_id:string; start:number; end:number; duration:number }>=[]
@@ -3312,7 +3829,7 @@ export function RealDataFactorySimulation() {
                                     width: `${(s.duration/maxEnd)*100}%`,
                                     top: isBarHovered ? 0 : 4,
                                     height: isBarHovered ? '40px' : '24px',
-                                    background: '#16a34a',
+                                    background: getColorForBaugruppe(s.sub_op),
                                     zIndex: isBarHovered ? 50 : 1
                                   }}
                                   onMouseEnter={() => setHoveredMonSlot(barId)}
@@ -3481,7 +3998,7 @@ export function RealDataFactorySimulation() {
                     value={[speed]}
                     onValueChange={handleSpeedChange}
                     min={0.5}
-                    max={50}
+                    max={100}
                     step={0.5}
                     className="w-24"
                   />
@@ -3498,33 +4015,46 @@ export function RealDataFactorySimulation() {
 
                 {/* Terminierung */}
                 <div className="space-y-1">
-                  <Label className="text-xs">Terminierung</Label>
-                  <Select
-                    value={currentSchedulingAlgorithm}
-                    onValueChange={(value: SchedulingAlgorithm | string) => {
-                      if (value in SchedulingAlgorithm) {
-                        setCurrentSchedulingAlgorithm(value as SchedulingAlgorithm);
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="w-full h-8 text-xs">
-                      <SelectValue placeholder="Wähle Algorithmus" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={SchedulingAlgorithm.FIFO}>
-                        FIFO - First In First Out
-                      </SelectItem>
-                      <SelectItem value="empty1" disabled>
-                        --- Leer ---
-                      </SelectItem>
-                      <SelectItem value="empty2" disabled>
-                        --- Leer ---
-                      </SelectItem>
-                      <SelectItem value="empty3" disabled>
-                        --- Leer ---
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label className="text-xs">Terminierung Bundle</Label>
+                  <div className="flex gap-1">
+                    <Select
+                      value={selectedBundleId}
+                      onValueChange={async (bundleId) => {
+                        setSelectedBundleId(bundleId);
+                        // Activate the selected bundle
+                        if (activeFactory) {
+                          const result = await setActiveAlgorithmBundle(bundleId, activeFactory.id);
+                          if (result.success) {
+                            toast.success('Bundle aktiviert');
+                            loadAlgorithmBundles(); // Reload to update active state
+                          } else {
+                            toast.error(result.error || 'Fehler beim Aktivieren');
+                          }
+                        }
+                      }}
+                      disabled={loadingBundles}
+                    >
+                      <SelectTrigger className="flex-1 h-8 text-xs">
+                        <SelectValue placeholder={loadingBundles ? "Lade..." : "Bundle auswählen..."} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {algorithmBundles.map((bundle) => (
+                          <SelectItem key={bundle.id} value={bundle.id}>
+                            {bundle.name} {bundle.isActive && '(Aktiv)'}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 w-8 p-0"
+                      onClick={() => setTerminierungModalOpen(true)}
+                      title="Terminierung Einstellungen"
+                    >
+                      <Settings className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
 
                 {/* Beschaffungsplanung */}
@@ -3781,6 +4311,99 @@ export function RealDataFactorySimulation() {
                       <div className="text-yellow-600 font-bold">⏳ Waiting for queue data... (updates every sim minute)</div>
                     )}
                   </div>
+                </div>
+
+                <div className="mb-3 border-2 border-purple-600 bg-purple-50 p-3 rounded">
+                  <div className="text-sm font-bold text-purple-900 mb-2">🧠 Terminierung (Live)</div>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {(Object.keys(schedulingStageLabels) as SchedulingStageKey[]).map((stageKey) => {
+                      const stats = schedulingStats[stageKey]
+                      return (
+                        <div
+                          key={stageKey}
+                          className="bg-white border border-purple-200 rounded p-2 space-y-1"
+                        >
+                          <div className="text-xs font-semibold text-purple-900">
+                            {schedulingStageLabels[stageKey]}
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-purple-900">
+                            <span>Läufe</span>
+                            <span className="text-right font-medium">{stats.runs}</span>
+                            <span>Letzter Lauf</span>
+                            <span className="text-right">{stats.lastRun !== null ? `${stats.lastRun} min` : '–'}</span>
+                            <span>Letzte Freigaben</span>
+                            <span className="text-right">{stats.lastReleased}</span>
+                            <span>Summe Freigaben</span>
+                            <span className="text-right">{stats.totalReleased}</span>
+                            <span>Letzte Änderungen</span>
+                            <span className="text-right">{stats.lastReorder}</span>
+                            <span>Summe Änderungen</span>
+                            <span className="text-right">{stats.totalReorder}</span>
+                            <span>Letzte Queuegröße</span>
+                            <span className="text-right">{stats.lastQueueSize}</span>
+                            <span>Letzte Batches</span>
+                            <span className="text-right">{stats.lastBatches}</span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div className="mt-3 border-t border-purple-200 pt-2">
+                    <div className="text-xs font-semibold text-purple-900 mb-1">Run-Historie (letzte 3)</div>
+                    <div className="space-y-2">
+                      {(Object.keys(schedulingStageLabels) as SchedulingStageKey[]).map((stageKey) => (
+                        <div key={stageKey} className="bg-white border border-purple-100 rounded p-2 text-[10px] text-purple-900">
+                          <div className="font-semibold mb-1">{schedulingStageLabels[stageKey]}</div>
+                          {schedulingHistory[stageKey].length === 0 ? (
+                            <div className="text-muted-foreground">Keine Läufe protokolliert.</div>
+                          ) : (
+                            schedulingHistory[stageKey].slice(0, 3).map((entry, idx) => (
+                              <div key={idx} className="border-t border-dashed pt-1 mt-1">
+                                <div>
+                                  t={entry.simMinute ?? '–'}min • Released: {entry.releasedCount ?? 0} • Changes: {entry.reorderCount ?? 0}
+                                </div>
+                                {Array.isArray(entry.orderSequence) && entry.orderSequence.length > 0 && (
+                                  <div>
+                                    Seq: {entry.orderSequence.slice(0, 5).join(', ')}
+                                    {entry.orderSequence.length > 5 ? ' …' : ''}
+                                  </div>
+                                )}
+                                {Array.isArray(entry.pythonReleaseList) && entry.pythonReleaseList.length > 0 && (
+                                  <div>
+                                    Python: {entry.pythonReleaseList.slice(0, 5).join(', ')}
+                                    {entry.pythonReleaseList.length > 5 ? ' …' : ''}
+                                  </div>
+                                )}
+                                <div>PyDiff: {entry.pythonDiffCount ?? entry.reorderCount ?? 0}</div>
+                                {Array.isArray(entry.pythonDebug) && entry.pythonDebug.length > 0 && (
+                                  <div>
+                                    Debug:{' '}
+                                    {entry.pythonDebug
+                                      .slice(0, 2)
+                                      .map((d: any, idx: number) => {
+                                        const stage = typeof d?.stage === 'string' ? d.stage : `step-${idx + 1}`
+                                        const message =
+                                          typeof d?.message === 'string'
+                                            ? d.message
+                                            : JSON.stringify(d)
+                                        return `${stage}: ${message}`
+                                      })
+                                      .join(' | ')}
+                                    {entry.pythonDebug.length > 2 ? ' …' : ''}
+                                  </div>
+                                )}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {Object.values(schedulingStats).every(stats => stats.runs === 0) && (
+                    <div className="text-[10px] text-purple-700 mt-2">
+                      Noch keine Terminierung durchgeführt.
+                    </div>
+                  )}
                 </div>
 
                 {/* React Flow Debug Section */}
@@ -4065,15 +4688,16 @@ export function RealDataFactorySimulation() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="w-[150px]">Kunde</TableHead>
-                          <TableHead className="w-[200px]">Produktvariante</TableHead>
-                          <TableHead className="w-[150px]">Aktuelle Station</TableHead>
-                          <TableHead className="w-[120px]">Fortschritt</TableHead>
-                          <TableHead className="w-[100px]">Verzögerung</TableHead>
-                          <TableHead className="w-[100px]">Gesamtzeit</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
+                      <TableHead className="w-[150px]">Kunde</TableHead>
+                      <TableHead className="w-[200px]">Produktvariante</TableHead>
+                      <TableHead className="w-[150px]">Aktuelle Station</TableHead>
+                      <TableHead className="w-[120px]">Fortschritt</TableHead>
+                      <TableHead className="w-[160px]">Liefertermin (PAP)</TableHead>
+                      <TableHead className="w-[100px]">Verzögerung</TableHead>
+                      <TableHead className="w-[100px]">Gesamtzeit</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                         {activeOrders.map((order) => {
                           const currentStationData = stations.find(s => s.id === order.currentStation);
                           const currentStationDuration = order.stationDurations[order.currentStation];
@@ -4099,6 +4723,7 @@ export function RealDataFactorySimulation() {
                           } else if (!currentStationData) {
                             stationName = 'Terminierung'
                           }
+                          const plannedDeliveryDisplay = formatSimMinuteDateTime(order.plannedDeliverySimMinute)
 
                           return (
                             <TableRow key={order.id}>
@@ -4119,6 +4744,9 @@ export function RealDataFactorySimulation() {
                                   </div>
                                   <span className="text-xs font-medium">{progressPercent.toFixed(0)}%</span>
                                 </div>
+                              </TableCell>
+                              <TableCell className="text-xs font-medium text-slate-700">
+                                {plannedDeliveryDisplay}
                               </TableCell>
                               <TableCell>
                                 <span className={`text-xs font-medium ${
@@ -4468,6 +5096,131 @@ export function RealDataFactorySimulation() {
             })()}
           </CardContent>
         </Card>
+
+        {/* Lieferterminverzug (Simulation) */}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-lg">Liefertermin-Analyse</CardTitle>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => refreshDeliveryMetrics(true)}
+              className="h-8"
+            >
+              <RefreshCw className="h-4 w-4 mr-1" />
+              Alle laden
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {(() => {
+              try {
+                if (deliveryMetricsError) {
+                  return <div className="text-sm text-red-500">{deliveryMetricsError}</div>
+                }
+                if (!deliveryMetrics) {
+                  return <div className="text-sm text-muted-foreground">Noch keine Liefertermin-Prognosen verfügbar.</div>
+                }
+
+                const completed = Number(deliveryMetrics.completedCount ?? 0)
+                const pending = Number(deliveryMetrics.pendingCount ?? 0)
+                const averageDeviation = Number(deliveryMetrics.averageDeviationMinutes ?? 0)
+                const averageAbsDeviation = Number(deliveryMetrics.averageAbsoluteDeviationMinutes ?? 0)
+                const lateCount = Number(deliveryMetrics.lateCount ?? 0)
+                const earlyCount = Number(deliveryMetrics.earlyCount ?? 0)
+                const onTimeCount = Number(deliveryMetrics.onTimeCount ?? 0)
+
+                if (completed === 0) {
+                  return (
+                    <div className="space-y-3 text-sm text-muted-foreground">
+                      <p>
+                        Es wurden noch keine finalen Liefertermine prognostiziert. Sobald PAP/PIPo Durchläufe
+                        abgeschlossen sind, erscheint hier die durchschnittliche Abweichung.
+                      </p>
+                      {pending > 0 && (
+                        <p className="text-xs">{pending} Aufträge haben bereits einen geplanten Liefertermin, warten aber noch auf eine Feinplanung.</p>
+                      )}
+                    </div>
+                  )
+                }
+
+                const sample = Array.isArray(deliveryMetrics.sample) ? deliveryMetrics.sample : []
+
+                return (
+                  <div className="space-y-4">
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+                        <div className="text-xs text-slate-600">Ø Abweichung</div>
+                        <div className={`text-xl font-semibold ${averageDeviation > 0 ? 'text-red-600' : averageDeviation < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                          {formatDeviationMinutes(averageDeviation)}
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-1">
+                          {averageDeviation > 0 ? 'Verspätet' : averageDeviation < 0 ? 'Früher' : 'Pünktlich'}
+                        </div>
+                      </div>
+                      <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+                        <div className="text-xs text-slate-600">Bewertete Aufträge</div>
+                        <div className="text-xl font-semibold text-slate-700">{completed}</div>
+                        {pending > 0 && (
+                          <div className="text-[11px] text-slate-500">{pending} weitere warten auf einen finalen Termin</div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 md:grid-cols-3 text-xs text-slate-600">
+                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                        <span>Verspätet</span>
+                        <span className="font-semibold text-red-600">{lateCount}</span>
+                      </div>
+                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                        <span>Pünktlich</span>
+                        <span className="font-semibold text-slate-700">{onTimeCount}</span>
+                      </div>
+                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                        <span>Früher fertig</span>
+                        <span className="font-semibold text-emerald-600">{earlyCount}</span>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 p-3">
+                      <div className="text-xs font-semibold text-slate-700 mb-1">Größte Abweichungen</div>
+                      {sample.length === 0 ? (
+                        <div className="text-xs text-muted-foreground">Noch keine Feinplanungsdaten verfügbar.</div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          {sample.map((item: any) => (
+                            <div key={item.orderId} className="flex items-center justify-between text-xs">
+                              <div className="flex flex-col">
+                                <span className="font-mono text-slate-700">{item.orderId.slice(0, 8)}</span>
+                                <span className="text-[11px] text-slate-500">{item.productVariant || 'Produktvariante unbekannt'}</span>
+                              </div>
+                              <div className="text-right">
+                                <div className={`font-semibold ${item.deviationMinutes > 0 ? 'text-red-600' : item.deviationMinutes < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                                  {formatDeviationMinutes(Number(item.deviationMinutes ?? 0))}
+                                </div>
+                                <div className="text-[11px] text-slate-500">
+                                  Plan: {formatIsoDateTime(item.plannedIso)} | Prog.: {formatIsoDateTime(item.finalIso)}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                      <span>Positive Werte entsprechen Verspätungen.</span>
+                      <span>Stand: {formatIsoDateTime(deliveryMetrics.lastUpdated)}</span>
+                    </div>
+                  </div>
+                )
+              } catch (error) {
+                console.error('Delivery analysis render error:', error)
+                return <div className="text-sm text-red-500">Fehler bei der Liefertermin-Analyse</div>
+              }
+            })()}
+          </CardContent>
+        </Card>
+
       </div>
 
       {/* Station Configuration Dialog */}
@@ -4495,6 +5248,50 @@ export function RealDataFactorySimulation() {
           </div>
           <DialogFooter>
             <Button onClick={handleSaveStationTime}>Speichern</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Phase Variation Configuration Dialog */}
+      <Dialog open={phaseDialogOpen} onOpenChange={setPhaseDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {selectedPhase === 'demontage' ? 'Demontage' : 'Montage'} Schwankung konfigurieren
+            </DialogTitle>
+            <DialogDescription>
+              Passen Sie die stochastische Variation (Schwankung) der Bearbeitungszeiten für alle {selectedPhase === 'demontage' ? 'Demontage' : 'Montage'}-Baugruppen an.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="phase-variation" className="text-right">
+                Schwankung (%)
+              </Label>
+              <div className="col-span-3">
+                <Input
+                  id="phase-variation"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={Math.round(tempPhaseVariation * 100)}
+                  onChange={(e) => setTempPhaseVariation(Number(e.target.value) / 100)}
+                  className="mb-2"
+                />
+                <p className="text-sm text-muted-foreground">
+                  Aktuell: ±{Math.round(tempPhaseVariation * 100)}%
+                  <br />
+                  (z.B. bei 30 Min: {Math.round(30 * (1 - tempPhaseVariation))}-{Math.round(30 * (1 + tempPhaseVariation))} Min)
+                </p>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPhaseDialogOpen(false)}>
+              Abbrechen
+            </Button>
+            <Button onClick={handleSavePhaseVariation}>Speichern</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -4552,6 +5349,91 @@ export function RealDataFactorySimulation() {
               Speichern
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Terminierung Bundle Management Modal */}
+      <Dialog open={terminierungModalOpen} onOpenChange={setTerminierungModalOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Terminierungs-Konfiguration</DialogTitle>
+            <DialogDescription>
+              Python-Skripte für Warteschlangen-Terminierung
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-4">
+            {selectedBundleId && algorithmBundles.length > 0 && (() => {
+              const bundle = algorithmBundles.find(b => b.id === selectedBundleId);
+              if (!bundle) return <div>Bundle nicht gefunden</div>;
+
+              return (
+                <div className="p-4 border rounded-lg bg-gray-50 space-y-4">
+                  <div className="pb-3 border-b">
+                    <div className="font-semibold text-lg">{bundle.name}</div>
+                    {bundle.author && (
+                      <div className="text-xs text-gray-500 mt-1">Autor: {bundle.author}</div>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <Database className="w-4 h-4 text-blue-500" />
+                        <span className="font-medium text-sm">PreAcceptanceQueue</span>
+                      </div>
+                      {bundle.papScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {bundle.papScriptPath.split('/').pop()}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <Database className="w-4 h-4 text-orange-500" />
+                        <span className="font-medium text-sm">PreInspectionQueue</span>
+                      </div>
+                      {bundle.pipScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {bundle.pipScriptPath.split('/').pop()}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
+                      <div className="flex items-center gap-2 flex-1">
+                        <Database className="w-4 h-4 text-green-500" />
+                        <span className="font-medium text-sm">PostInspectionQueue</span>
+                      </div>
+                      {bundle.pipoScriptPath ? (
+                        <code className="text-xs text-gray-600 font-mono">
+                          {bundle.pipoScriptPath.split('/').pop()}
+                        </code>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setTerminierungModalOpen(false)}>
+                Schließen
+              </Button>
+              <Button onClick={() => {
+                window.open('/simulation/algorithms', '_blank');
+              }}>
+                Bundles bearbeiten
+              </Button>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
 

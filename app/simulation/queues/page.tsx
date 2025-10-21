@@ -2,6 +2,7 @@
 
 import { QueueViewer } from '@/components/advanced-simulation/QueueViewer'
 import { QueueConfigPanel } from '@/components/advanced-simulation/QueueConfigPanel'
+import { SchedulingDashboard } from '@/components/advanced-simulation/SchedulingDashboard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { useSearchParams } from 'next/navigation'
 import { Suspense, useEffect, useState } from 'react'
@@ -81,6 +82,12 @@ function QueuesContent() {
           </Card>
         )}
       </div>
+
+      {factoryId && (
+        <div className="mb-6">
+          <SchedulingDashboard factoryId={factoryId} />
+        </div>
+      )}
 
       <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-3">
         <div className={highlight === 'preAcceptance' ? 'ring-2 ring-blue-500 rounded-lg' : ''}>

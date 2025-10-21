@@ -5,8 +5,16 @@ export async function GET() {
   try {
     // Get database URL from environment
     const dbUrl = process.env.DATABASE_URL
-    if (!dbUrl || (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://'))) {
-      throw new Error('DATABASE_URL is not configured for PostgreSQL. Please set the Supabase connection string in the environment.')
+    if (!dbUrl) {
+      throw new Error('DATABASE_URL is not configured. Please run `npm run dev` to select a database.')
+    }
+
+    // Support both PostgreSQL and SQLite
+    const isPostgres = dbUrl.startsWith('postgresql://') || dbUrl.startsWith('postgres://')
+    const isSQLite = dbUrl.startsWith('file:')
+
+    if (!isPostgres && !isSQLite) {
+      throw new Error('DATABASE_URL must be either PostgreSQL or SQLite (file:)')
     }
     const nodeEnv = process.env.NODE_ENV
     const isVercel = !!process.env.VERCEL

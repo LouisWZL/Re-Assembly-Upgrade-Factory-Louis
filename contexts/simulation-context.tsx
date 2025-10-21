@@ -21,6 +21,8 @@ interface SimulationOrder {
   selectedSequence?: any;
   currentSequenceStep?: number;
   schedulingAlgorithm?: string;
+  plannedDeliverySimMinute?: number | null;
+  finalCompletionSimMinute?: number | null;
 }
 
 interface SimulationStation {

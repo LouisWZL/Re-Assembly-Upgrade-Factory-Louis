@@ -22,11 +22,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { auftragsabwicklungAlgorithmen, terminierungAlgorithmen, beschaffungAlgorithmen } from '@/components/simulation/registry'
 import { FactorySwitcher } from '@/components/factory-switcher'
 import { useFactory } from '@/contexts/factory-context'
 import { deleteAllAuftraege } from '@/app/actions/auftrag.actions'
-import { Simulation } from '@/components/simulation/simulation'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -53,9 +51,6 @@ export function SiteHeader({ onSimulationUpdate }: SiteHeaderProps) {
   const [hasStarted, setHasStarted] = useState(false)
   const [minThreshold, setMinThreshold] = useState(30) // Minimum-Schwelle für Auto-Aufträge
   const [batchSize, setBatchSize] = useState(20) // Batch-Größe für Auto-Aufträge
-  const [auftragsabwicklungIndex, setAuftragsabwicklungIndex] = useState(0) // Standard: Algorithmus 1
-  const [terminierungIndex, setTerminierungIndex] = useState(0) // Standard: Algorithmus 1
-  const [beschaffungIndex, setBeschaffungIndex] = useState(0) // Standard: Algorithmus 1
   const { activeFactory } = useFactory()
   const pathname = usePathname()
   const isConfigurator = pathname.startsWith('/factory-configurator/')
@@ -345,22 +340,6 @@ export function SiteHeader({ onSimulationUpdate }: SiteHeaderProps) {
           )}
         </div>
       </div>
-      
-      {/* Simulation Component */}
-      {activeFactory && getCurrentTab() === 'auftragsübersicht' && (
-        <Simulation
-          factoryId={activeFactory.id}
-          isPlaying={isPlaying}
-          speed={speed[0]}
-          autoOrders={autoOrders}
-          minThreshold={minThreshold}
-          batchSize={batchSize}
-          auftragsabwicklungIndex={auftragsabwicklungIndex}
-          terminierungIndex={terminierungIndex}
-          beschaffungIndex={beschaffungIndex}
-          onTimeUpdate={setSimulationTime}
-        />
-      )}
 
       {/* Reset Confirmation Dialog */}
       <AlertDialog open={showResetDialog} onOpenChange={setShowResetDialog}>

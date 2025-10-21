@@ -1,7 +1,46 @@
 'use server'
 
+/**
+ * Queue Management System with Algorithm Bundle Support
+ *
+ * This module manages three scheduling queues (PAP, PIP, PIPO) and integrates
+ * with the configurable Algorithm Bundle system for scheduling optimization.
+ *
+ * ## Architecture Overview:
+ *
+ * ### Algorithm Bundles
+ * Algorithm bundles are configurable sets of scheduling algorithms that can be
+ * assigned to factories. Each bundle defines:
+ * - **PAP Script**: Pre-Acceptance Processing (Grobterminierung) - Initial scheduling
+ * - **PIP Script**: Pre-Inspection Processing (Durchlaufterminierung) - Mid-term optimization
+ * - **PIPO Script**: Post-Inspection Processing Optimization (Feinterminierung) - Final scheduling
+ *
+ * ### How It Works:
+ * 1. Each factory has a QueueConfig that references an active AlgorithmBundle
+ * 2. When orders are enqueued, the system loads the active bundle's configuration
+ * 3. The bundle's script paths (papScriptPath, pipScriptPath, pipoScriptPath) define
+ *    which scheduling algorithms to use
+ * 4. The scheduling-daemon.actions.ts executes these scripts to optimize order sequences
+ *
+ * ### Queues:
+ * - **preAcceptance (PAP)**: Orders waiting for initial acceptance and scheduling
+ * - **preInspection (PIP)**: Orders waiting for inspection slot assignment
+ * - **postInspection (PIPO)**: Orders waiting for final production scheduling
+ *
+ * ### Usage:
+ * - Configure bundles at /simulation/algorithms
+ * - Assign bundles to factories in QueueConfig
+ * - Set one bundle as active per factory
+ * - The system automatically uses the active bundle's algorithms
+ *
+ * @see AlgorithmBundle model in prisma/schema.prisma
+ * @see /app/simulation/algorithms for bundle management UI
+ * @see scheduling-daemon.actions.ts for algorithm execution
+ */
+
 import { prisma, ensureDatabaseInitialized } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
+import { runPapStage, runPipStage, runPipoStage, logSchedulingSummaryEntry } from './scheduling-daemon.actions'
 
 export type QueueType = 'preAcceptance' | 'preInspection' | 'postInspection'
 
@@ -10,13 +49,6 @@ function getBatchStartField(queue: QueueType): 'preAcceptanceBatchStartSimMinute
   if (queue === 'preAcceptance') return 'preAcceptanceBatchStartSimMinute'
   if (queue === 'preInspection') return 'preInspectionBatchStartSimMinute'
   return 'postInspectionBatchStartSimMinute'
-}
-
-// Helper to get Python script field name
-function getPythonScriptField(queue: QueueType): 'preAcceptancePythonScript' | 'preInspectionPythonScript' | 'postInspectionPythonScript' {
-  if (queue === 'preAcceptance') return 'preAcceptancePythonScript'
-  if (queue === 'preInspection') return 'preInspectionPythonScript'
-  return 'postInspectionPythonScript'
 }
 
 /**
@@ -64,12 +96,17 @@ export async function enqueueOrder(
     }
 
     // Get factory config to determine releaseAfterMinutes
+    // Also fetch the active algorithm bundle for potential Python script execution
     const order = await prisma.auftrag.findUnique({
       where: { id: orderId },
       include: {
         factory: {
           include: {
-            queueConfig: true
+            queueConfig: {
+              include: {
+                algorithmBundle: true
+              }
+            }
           }
         }
       }
@@ -187,48 +224,150 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
   try {
     await ensureDatabaseInitialized()
 
-    // Find the next ready order (ordered by processingOrder, queuedAtSimMinute)
-    let nextEntry: any
+    const firstEntry =
+      queue === 'preAcceptance'
+        ? await prisma.preAcceptanceQueue.findFirst({
+            where: { releasedAtSimMinute: null },
+            orderBy: [
+              { processingOrder: 'asc' },
+              { queuedAtSimMinute: 'asc' }
+            ],
+            include: { order: true }
+          })
+        : queue === 'preInspection'
+        ? await prisma.preInspectionQueue.findFirst({
+            where: { releasedAtSimMinute: null },
+            orderBy: [
+              { processingOrder: 'asc' },
+              { queuedAtSimMinute: 'asc' }
+            ],
+            include: { order: true }
+          })
+        : await prisma.postInspectionQueue.findFirst({
+            where: { releasedAtSimMinute: null },
+            orderBy: [
+              { processingOrder: 'asc' },
+              { queuedAtSimMinute: 'asc' }
+            ],
+            include: { order: true }
+          })
 
-    if (queue === 'preAcceptance') {
-      nextEntry = await prisma.preAcceptanceQueue.findFirst({
-        where: {
-          releasedAtSimMinute: null
-        },
-        orderBy: [
-          { processingOrder: 'asc' },
-          { queuedAtSimMinute: 'asc' }
-        ],
-        include: {
-          order: true
+    if (!firstEntry) {
+      return {
+        success: true,
+        released: false,
+        message: 'Queue is empty'
+      }
+    }
+
+    const factoryId = firstEntry.order.factoryId
+    let scheduling: any = null
+    try {
+      if (queue === 'preAcceptance') {
+        scheduling = await runPapStage(factoryId)
+      } else if (queue === 'preInspection') {
+        scheduling = await runPipStage(factoryId)
+      } else {
+        scheduling = await runPipoStage(factoryId)
+      }
+    } catch (error) {
+      console.error(`[Scheduling] Failed to run ${queue} stage:`, error)
+      scheduling = null
+    }
+
+    const stageEntries = (scheduling?.orderedEntries as any[]) || []
+    const nextEntry = stageEntries.length ? stageEntries[0] : firstEntry
+    console.log(`[Scheduling] releaseNext(${queue})`, {
+      orderId: nextEntry?.orderId,
+      scheduled: stageEntries.length,
+    })
+
+    const pythonReleaseList = Array.isArray(scheduling?.result?.releaseList)
+      ? (scheduling?.result?.releaseList as any[])
+          .slice(0, 8)
+          .map((orderId: any) => String(orderId))
+      : undefined
+    const pythonEtaList = Array.isArray(scheduling?.result?.etaList)
+      ? (scheduling?.result?.etaList as any[])
+          .slice(0, 6)
+          .map((eta: any) => ({
+            orderId: String(eta.orderId ?? ''),
+            eta: Number(eta.eta ?? 0),
+          }))
+      : undefined
+    const pythonPriorities = Array.isArray(scheduling?.result?.priorities)
+      ? (scheduling?.result?.priorities as any[])
+          .slice(0, 6)
+          .map((p: any) => ({
+            orderId: String(p.orderId ?? ''),
+            priority: Number(p.priority ?? 0),
+          }))
+      : undefined
+    const pythonBatches = Array.isArray(scheduling?.result?.batches)
+      ? (scheduling?.result?.batches as any[])
+          .slice(0, 5)
+          .map((batch: any) => ({
+            id: String(batch.id ?? ''),
+            size: Array.isArray(batch.orderIds) ? batch.orderIds.length : 0,
+          }))
+      : undefined
+    const debugEntries = Array.isArray(scheduling?.result?.debug)
+      ? (scheduling.result.debug as any[])
+      : []
+    const pythonDebug = debugEntries.slice(0, 10)
+    const assignmentsEntry = debugEntries.find(
+      (entry: any) => entry?.stage === 'PAP_ASSIGNMENTS' && Array.isArray(entry.sequence)
+    )
+    const pythonAssignments = assignmentsEntry
+      ? (assignmentsEntry.sequence as any[])
+          .slice(0, 10)
+          .map((item: any) => ({
+            orderId: String(item.orderId ?? ''),
+            eta: typeof item.eta === 'number' ? Number(item.eta) : null,
+            priorityScore:
+              typeof item.priorityScore === 'number' ? Number(item.priorityScore) : null,
+          }))
+      : undefined
+
+    const orderSequence = stageEntries.length
+      ? stageEntries.map((entry: any) => String(entry.orderId)).slice(0, 10)
+      : [String(firstEntry.orderId)]
+
+    let pythonDiffCount = reorderCount
+    if (pythonReleaseList && pythonReleaseList.length > 0 && orderSequence.length > 0) {
+      const compareLength = Math.min(orderSequence.length, pythonReleaseList.length)
+      pythonDiffCount = 0
+      for (let i = 0; i < compareLength; i += 1) {
+        if (orderSequence[i] !== pythonReleaseList[i]) {
+          pythonDiffCount += 1
         }
-      })
-    } else if (queue === 'preInspection') {
-      nextEntry = await prisma.preInspectionQueue.findFirst({
-        where: {
-          releasedAtSimMinute: null
-        },
-        orderBy: [
-          { processingOrder: 'asc' },
-          { queuedAtSimMinute: 'asc' }
-        ],
-        include: {
-          order: true
-        }
-      })
-    } else {
-      nextEntry = await prisma.postInspectionQueue.findFirst({
-        where: {
-          releasedAtSimMinute: null
-        },
-        orderBy: [
-          { processingOrder: 'asc' },
-          { queuedAtSimMinute: 'asc' }
-        ],
-        include: {
-          order: true
-        }
-      })
+      }
+      pythonDiffCount += Math.max(orderSequence.length, pythonReleaseList.length) - compareLength
+    }
+
+    const summary = {
+      stage: queue,
+      queueSize: stageEntries.length || 1,
+      releasedCount: 1,
+      reorderCount: stageEntries.length ? (stageEntries[0]?.orderId !== firstEntry.orderId ? 1 : 0) : 0,
+      batchCount: scheduling?.result?.batches?.length ?? 0,
+      releaseListCount: pythonReleaseList?.length ?? 0,
+      orderSequence,
+      pythonReleaseList,
+      pythonEtaList,
+      pythonPriorities,
+      pythonBatches,
+      pythonAssignments,
+      pythonDebug,
+      pythonDiffCount,
+      simMinute: currentSimMinute,
+      timestamp: Date.now(),
+    }
+
+    try {
+      await logSchedulingSummaryEntry(factoryId, queue, summary)
+    } catch (error) {
+      console.warn(`[SchedulingLog] Failed to log summary for ${queue}:`, error)
     }
 
     if (!nextEntry) {
@@ -271,11 +410,76 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
       })
     }
 
+    // ✅ CRITICAL: Write Python-calculated ETA to Liefertermin table
+    if (pythonEtaList && pythonEtaList.length > 0) {
+      const etaForThisOrder = pythonEtaList.find((eta: any) => eta.orderId === nextEntry.orderId)
+      if (etaForThisOrder && etaForThisOrder.eta > 0) {
+        try {
+          // Get active bundle info for debugging
+          const queueConfig = await prisma.queueConfig.findUnique({
+            where: { factoryId },
+            include: { algorithmBundle: true }
+          })
+
+          const bundleName = queueConfig?.algorithmBundle?.name || 'unknown'
+          const scriptPath = queue === 'preAcceptance'
+            ? queueConfig?.algorithmBundle?.papScriptPath
+            : queue === 'preInspection'
+            ? queueConfig?.algorithmBundle?.pipScriptPath
+            : queueConfig?.algorithmBundle?.pipoScriptPath
+
+          const scriptName = scriptPath ? scriptPath.split('/').pop() : 'unknown'
+
+          // Convert simulation minute to actual date
+          const etaDate = new Date(Date.now() + etaForThisOrder.eta * 60 * 1000)
+
+          // Mark old Liefertermine as not current
+          await prisma.liefertermin.updateMany({
+            where: {
+              auftragId: nextEntry.orderId,
+              istAktuell: true
+            },
+            data: {
+              istAktuell: false
+            }
+          })
+
+          // Create new Liefertermin from Python calculation
+          await prisma.liefertermin.create({
+            data: {
+              auftragId: nextEntry.orderId,
+              typ: `${queue}_python_eta`,
+              datum: etaDate,
+              istAktuell: true,
+              bemerkung: `Calculated by Python script: ${scriptName} (Bundle: ${bundleName}) at queue: ${queue}`
+            }
+          })
+
+          console.log(`[Python→DB] ✅ Liefertermin created for order ${nextEntry.orderId}:`, {
+            queue,
+            eta: etaForThisOrder.eta,
+            etaDate: etaDate.toISOString(),
+            scriptName,
+            bundleName,
+            pythonScriptExecuted: true
+          })
+        } catch (error) {
+          console.error(`[Python→DB] ❌ Failed to create Liefertermin for order ${nextEntry.orderId}:`, error)
+        }
+      } else {
+        console.warn(`[Python→DB] ⚠️  No ETA found for order ${nextEntry.orderId} in pythonEtaList`)
+      }
+    } else {
+      console.warn(`[Python→DB] ⚠️  pythonEtaList is empty or undefined - Python script may have failed`)
+    }
+
     revalidatePath('/simulation')
 
     return {
       success: true,
       released: true,
+      scheduling,
+      summary,
       data: {
         orderId: nextEntry.orderId,
         order: nextEntry.order,
@@ -682,22 +886,143 @@ export async function checkAndReleaseBatch(
       }
     }
 
-    // Check if Python optimization script is configured
-    const pythonScriptField = getPythonScriptField(queue)
-    const pythonScriptPath = queueConfig[pythonScriptField]
-
+    console.log(`[Scheduling] checkAndReleaseBatch(${queue})`, {
+      queue,
+      entries: entries.length,
+      releaseAfterMinutes,
+      batchStartSimMinute,
+      currentSimMinute,
+    })
+    let scheduling: any = null
     let orderedEntries = entries
 
-    // TODO: Call Python script for optimization if configured
-    if (pythonScriptPath) {
-      console.log(`🐍 Python script configured: ${pythonScriptPath}`)
-      console.log(`📊 Would optimize ${entries.length} orders, but Python integration not yet implemented`)
-      // For now, keep FIFO order
-      // Future: Call Python script, pass order data, get optimized sequence back
+    try {
+      if (queue === 'preAcceptance') {
+        scheduling = await runPapStage(factoryId)
+      } else if (queue === 'preInspection') {
+        scheduling = await runPipStage(factoryId)
+      } else {
+        scheduling = await runPipoStage(factoryId)
+      }
+    } catch (error) {
+      console.error(`[Scheduling] Failed to run ${queue} stage:`, error)
+      scheduling = null
     }
 
-    // Mark all orders as released
-    const orderIds = orderedEntries.map(e => e.orderId)
+    if (scheduling?.orderedEntries?.length) {
+      const stageEntries = scheduling.orderedEntries as any[]
+      const lookup = new Map(entries.map((entry: any) => [entry.orderId, entry]))
+      const mapped = stageEntries
+        .map((entry: any) => lookup.get(entry.orderId) ?? entry)
+        .filter(Boolean)
+      if (mapped.length) {
+        orderedEntries = mapped as any
+      }
+    }
+
+    const ownOrderIds = entries.map((entry: any) => entry.orderId)
+    const orderIds = orderedEntries.map((e: any) => e.orderId)
+    const reorderCount = orderIds.reduce((acc: number, id: string, idx: number) => {
+      return acc + (ownOrderIds[idx] !== id ? 1 : 0)
+    }, 0)
+
+    const pythonReleaseList =
+      Array.isArray(scheduling?.result?.releaseList) && scheduling.result.releaseList.length
+        ? (scheduling.result.releaseList as any[])
+            .slice(0, 12)
+            .map((orderId: any) => String(orderId))
+        : undefined
+    const pythonEtaList = Array.isArray(scheduling?.result?.etaList)
+      ? (scheduling?.result?.etaList as any[])
+          .slice(0, 8)
+          .map((eta: any) => ({
+            orderId: String(eta.orderId),
+            eta: Number(eta.eta ?? 0),
+          }))
+      : undefined
+    const pythonPriorities = Array.isArray(scheduling?.result?.priorities)
+      ? (scheduling?.result?.priorities as any[])
+          .slice(0, 8)
+          .map((p: any) => ({
+            orderId: String(p.orderId ?? ''),
+            priority: Number(p.priority ?? 0),
+          }))
+      : undefined
+    const pythonBatches = Array.isArray(scheduling?.result?.batches)
+      ? (scheduling?.result?.batches as any[])
+          .slice(0, 6)
+          .map((batch: any) => ({
+            id: String(batch.id ?? ''),
+            size: Array.isArray(batch.orderIds) ? batch.orderIds.length : 0,
+          }))
+      : undefined
+    const debugEntries = Array.isArray(scheduling?.result?.debug)
+      ? (scheduling.result.debug as any[])
+      : []
+    const pythonDebug = debugEntries.slice(0, 12)
+    const assignmentsEntry = debugEntries.find(
+      (entry: any) => entry?.stage === 'PAP_ASSIGNMENTS' && Array.isArray(entry.sequence)
+    )
+    const pythonAssignments = assignmentsEntry
+      ? (assignmentsEntry.sequence as any[])
+          .slice(0, 12)
+          .map((item: any) => ({
+            orderId: String(item.orderId ?? ''),
+            eta: typeof item.eta === 'number' ? Number(item.eta) : null,
+            priorityScore:
+              typeof item.priorityScore === 'number' ? Number(item.priorityScore) : null,
+          }))
+      : undefined
+
+    const orderSequence = orderIds.map((id) => String(id)).slice(0, 20)
+
+    let pythonDiffCount = reorderCount
+    if (pythonReleaseList && pythonReleaseList.length > 0 && orderSequence.length > 0) {
+      const compareLength = Math.min(orderSequence.length, pythonReleaseList.length)
+      pythonDiffCount = 0
+      for (let i = 0; i < compareLength; i += 1) {
+        if (orderSequence[i] !== pythonReleaseList[i]) {
+          pythonDiffCount += 1
+        }
+      }
+      pythonDiffCount += Math.max(orderSequence.length, pythonReleaseList.length) - compareLength
+    }
+
+    const summary = {
+      stage: queue,
+      queueSize: entries.length,
+      releasedCount: orderIds.length,
+      reorderCount,
+      batchCount: scheduling?.result?.batches?.length ?? 0,
+      releaseListCount: pythonReleaseList?.length ?? 0,
+      orderSequence,
+      pythonReleaseList,
+      pythonEtaList,
+      pythonPriorities,
+      pythonBatches,
+      pythonAssignments,
+      pythonDebug,
+      pythonDiffCount,
+      simMinute: currentSimMinute,
+      timestamp: Date.now(),
+    }
+
+    console.log(`[Scheduling] ${queue} stage result:`, {
+      stage: queue,
+      batches: summary.batchCount,
+      releaseList: summary.releaseListCount,
+      orderedCount: Array.isArray(scheduling?.orderedEntries) ? scheduling.orderedEntries.length : undefined,
+      reorderCount,
+      orderIds,
+      pythonDebugCount: summary.pythonDebug?.length ?? 0,
+      pythonDiffCount,
+    })
+
+    try {
+      await logSchedulingSummaryEntry(factoryId, queue, summary)
+    } catch (error) {
+      console.warn(`[SchedulingLog] Failed to log batch summary for ${queue}:`, error)
+    }
 
     if (queue === 'preAcceptance') {
       await prisma.preAcceptanceQueue.updateMany({
@@ -716,6 +1041,75 @@ export async function checkAndReleaseBatch(
       })
     }
 
+    // ✅ CRITICAL: Write Python-calculated ETAs to Liefertermin table for ALL released orders
+    if (pythonEtaList && pythonEtaList.length > 0) {
+      try {
+        // Get active bundle info for debugging
+        const queueConfigWithBundle = await prisma.queueConfig.findUnique({
+          where: { factoryId },
+          include: { algorithmBundle: true }
+        })
+
+        const bundleName = queueConfigWithBundle?.algorithmBundle?.name || 'unknown'
+        const scriptPath = queue === 'preAcceptance'
+          ? queueConfigWithBundle?.algorithmBundle?.papScriptPath
+          : queue === 'preInspection'
+          ? queueConfigWithBundle?.algorithmBundle?.pipScriptPath
+          : queueConfigWithBundle?.algorithmBundle?.pipoScriptPath
+
+        const scriptName = scriptPath ? scriptPath.split('/').pop() : 'unknown'
+
+        let etasCreated = 0
+        let etasSkipped = 0
+
+        // Create Liefertermine for all released orders that have ETAs
+        for (const orderId of orderIds) {
+          const etaForOrder = pythonEtaList.find((eta: any) => eta.orderId === orderId)
+          if (etaForOrder && etaForOrder.eta > 0) {
+            const etaDate = new Date(Date.now() + etaForOrder.eta * 60 * 1000)
+
+            // Mark old Liefertermine as not current
+            await prisma.liefertermin.updateMany({
+              where: {
+                auftragId: orderId,
+                istAktuell: true
+              },
+              data: {
+                istAktuell: false
+              }
+            })
+
+            // Create new Liefertermin from Python calculation
+            await prisma.liefertermin.create({
+              data: {
+                auftragId: orderId,
+                typ: `${queue}_python_eta_batch`,
+                datum: etaDate,
+                istAktuell: true,
+                bemerkung: `Calculated by Python script: ${scriptName} (Bundle: ${bundleName}) at queue: ${queue} [BATCH RELEASE]`
+              }
+            })
+
+            etasCreated++
+          } else {
+            etasSkipped++
+          }
+        }
+
+        console.log(`[Python→DB] ✅ Batch: Created ${etasCreated} Liefertermine (skipped ${etasSkipped}):`, {
+          queue,
+          scriptName,
+          bundleName,
+          totalOrders: orderIds.length,
+          pythonScriptExecuted: true
+        })
+      } catch (error) {
+        console.error(`[Python→DB] ❌ Failed to create Liefertermine for batch:`, error)
+      }
+    } else {
+      console.warn(`[Python→DB] ⚠️  pythonEtaList is empty for batch release - Python script may have failed`)
+    }
+
     // Reset batch window for next batch (only if we're using batch mechanism)
     if (releaseAfterMinutes > 0) {
       await prisma.queueConfig.update({
@@ -731,10 +1125,12 @@ export async function checkAndReleaseBatch(
     return {
       success: true,
       batchReleased: true,
+      scheduling,
+      summary,
       orderIds,
       orders: orderedEntries.map(e => e.order),
       count: orderIds.length,
-      optimized: !!pythonScriptPath
+      optimized: !!scheduling
     }
   } catch (error) {
     console.error('Error releasing batch:', error)

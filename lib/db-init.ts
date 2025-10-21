@@ -19,40 +19,54 @@ function log(level: 'info' | 'error' | 'warn' | 'debug', message: string, ...arg
 
 function getDatabaseUrl(): string {
   const url = process.env.DATABASE_URL
+  const dbSource = process.env.DB_SOURCE || 'supabase'
 
   log('debug', 'Environment check:', {
     NODE_ENV: process.env.NODE_ENV,
     VERCEL: process.env.VERCEL,
+    DB_SOURCE: dbSource,
     DATABASE_URL_exists: !!url,
     DATABASE_URL_length: url?.length || 0,
   })
 
   if (!url) {
     throw new Error(
-      'DATABASE_URL is not set. Please configure your Supabase/Postgres connection string before starting the app.'
+      'DATABASE_URL is not set. Please run `npm run dev` to select a database.'
     )
   }
 
-  if (!url.startsWith('postgresql://') && !url.startsWith('postgres://')) {
+  // Support both PostgreSQL and SQLite
+  const isSQLite = url.startsWith('file:')
+  const isPostgres = url.startsWith('postgresql://') || url.startsWith('postgres://')
+
+  if (!isSQLite && !isPostgres) {
     throw new Error(
-      `DATABASE_URL must start with "postgresql://" or "postgres://". Received: ${url.substring(0, 20)}…`
+      `DATABASE_URL must start with "postgresql://", "postgres://", or "file:". Received: ${url.substring(0, 20)}…`
     )
   }
 
   // Validate URL format
-  try {
-    const parsed = new URL(url)
-    log('debug', 'Parsed DATABASE_URL:', {
-      protocol: parsed.protocol,
-      hostname: parsed.hostname,
-      port: parsed.port,
-      pathname: parsed.pathname,
-      hasPassword: !!parsed.password,
-      username: parsed.username,
+  if (isSQLite) {
+    log('debug', 'Using SQLite database:', {
+      path: url.replace('file:', ''),
+      provider: 'sqlite',
     })
-  } catch (error) {
-    log('error', 'Failed to parse DATABASE_URL as valid URL:', error)
-    throw new Error('DATABASE_URL is not a valid URL format')
+  } else {
+    try {
+      const parsed = new URL(url)
+      log('debug', 'Parsed DATABASE_URL:', {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port,
+        pathname: parsed.pathname,
+        hasPassword: !!parsed.password,
+        username: parsed.username,
+        provider: 'postgresql',
+      })
+    } catch (error) {
+      log('error', 'Failed to parse DATABASE_URL as valid URL:', error)
+      throw new Error('DATABASE_URL is not a valid PostgreSQL URL format')
+    }
   }
 
   return url
