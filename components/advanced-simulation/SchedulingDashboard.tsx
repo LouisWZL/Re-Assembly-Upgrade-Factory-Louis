@@ -487,19 +487,19 @@ function StageDetailsDisplay({
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
                 Freigegeben
               </div>
-              <div className="text-lg font-semibold">{lastSummary.releasedCount}</div>
+              <div className="text-base font-semibold">{lastSummary.releasedCount}</div>
             </div>
             <div className="rounded border bg-white p-2">
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
                 Änderungen
               </div>
-              <div className="text-lg font-semibold">{lastSummary.reorderCount}</div>
+              <div className="text-base font-semibold">{lastSummary.reorderCount}</div>
             </div>
             <div className="rounded border bg-white p-2">
               <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
                 Python Diff
               </div>
-              <div className="text-lg font-semibold">
+              <div className="text-base font-semibold">
                 {lastSummary.pythonDiffCount ?? lastSummary.reorderCount}
               </div>
             </div>
