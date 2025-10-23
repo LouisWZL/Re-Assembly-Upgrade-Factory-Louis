@@ -847,13 +847,41 @@ export function RealDataFactorySimulation() {
         const simulationOrders: SimulationOrder[] = activeOrders.map((order: any) => {
           const requiredBgt = extractRequiredBaugruppentypen(order);
           const requiredUpgrades = extractRequiredUpgrades(order);
-          
+
           // Use the new function to select a random sequence and convert it
           const { processSequence: processSeq, selectedSequence } = selectRandomSequenceAndConvert(
-            order, 
+            order,
             [...mainStations, ...demontageSubStations, ...reassemblySubStations]
           );
-          
+
+          // Calculate individual process times for this order based on its Baugruppen
+          const orderProcessTimes = calculateProcessTimesFromBaugruppen(order, result.data.factory);
+          console.log(`⏱️ [Order Init] ${order.kunde.vorname} ${order.kunde.nachname}: demontage=${orderProcessTimes.demontage}min, montage=${orderProcessTimes.montage}min`);
+
+          // Pre-initialize stationDurations with order-specific times
+          const initialStationDurations: { [stationId: string]: { expected: number; actual?: number; startTime?: Date; completed?: boolean; waitingTime?: number } } = {};
+
+          // Set expected times for all stations in the process sequence
+          processSeq.forEach(stationId => {
+            const station = [...mainStations, ...demontageSubStations, ...reassemblySubStations].find(s => s.id === stationId);
+            let expectedTime = station?.processingTime || 30; // fallback
+
+            // Use order-specific times for demontage/montage stations
+            if (station?.type === 'SUB') {
+              if (station.phase === 'DEMONTAGE') {
+                expectedTime = orderProcessTimes.demontage;
+              } else if (station.phase === 'REASSEMBLY') {
+                expectedTime = orderProcessTimes.montage;
+              }
+            }
+
+            initialStationDurations[stationId] = {
+              expected: expectedTime,
+              completed: false,
+              waitingTime: 0
+            };
+          });
+
           return {
             id: order.id,
             kundeId: order.kundeId,
@@ -866,7 +894,7 @@ export function RealDataFactorySimulation() {
             processSequence: processSeq,
             requiredBaugruppentypen: requiredBgt,
             requiredUpgrades: requiredUpgrades,
-            stationDurations: {},
+            stationDurations: initialStationDurations,
             isWaiting: false,
             processSequences: order.processSequences, // Include the JSON data from database
             selectedSequence: selectedSequence, // Store the selected sequence
@@ -1998,10 +2026,13 @@ export function RealDataFactorySimulation() {
         const processMainStation = (stationId: string) => {
           const station = updatedStations.find(s => s.id === stationId)
           if (!station) return
-          const expected = station.processingTime || 1
           const active = mainActiveRef.current[stationId]
 
           if (active) {
+            // Get order-specific expected time from stationDurations if available
+            const activeOrder = activeOrdersRef.current.find(o => o.id === active.orderId)
+            const expected = activeOrder?.stationDurations?.[stationId]?.expected || station.processingTime || 1
+
             // progress active order
             active.remaining = Math.max(0, active.remaining - deltaMinutes)
             setActiveOrders(prev => prev.map(o => {
@@ -2146,6 +2177,8 @@ export function RealDataFactorySimulation() {
           if (nextId) {
             const next = activeOrdersRef.current.find(o => o.id === nextId)
             if (!next) return
+            // Get order-specific expected time
+            const expected = next.stationDurations?.[stationId]?.expected || station.processingTime || 1
             // initialize and hold capacity
             mainActiveRef.current[stationId] = { orderId: next.id, remaining: expected, total: expected }
             // ensure stationDurations entry exists

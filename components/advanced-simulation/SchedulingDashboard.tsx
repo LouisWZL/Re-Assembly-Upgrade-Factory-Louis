@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -34,11 +34,40 @@ interface StageData {
   orders: OrderPosition[]
 }
 
+interface StageSummaryInsight {
+  createdAt: string
+  queueSize: number
+  releasedCount: number
+  reorderCount: number
+  orderSequence?: string[]
+  pythonReleaseList?: string[]
+  pythonEtaList?: Array<{ orderId: string; eta: number }>
+  pythonPriorities?: Array<{ orderId: string; priority: number }>
+  pythonBatches?: Array<{ id: string; size: number }>
+  pythonAssignments?: Array<{ orderId: string; eta: number | null; priorityScore: number | null }>
+  pythonDebug?: Array<Record<string, unknown>>
+  pythonDiffCount?: number
+  simMinute: number | null
+}
+
+interface StagePythonInsight {
+  createdAt: string
+  details: Record<string, any> | null
+  debug?: Array<Record<string, unknown>>
+}
+
+interface StageInsight {
+  python?: StagePythonInsight
+  lastSummary?: StageSummaryInsight
+}
+
 interface QueueMonitorData {
   pap: StageData
   pip: StageData
   pipo: StageData
   lastUpdated: string
+  insights?: Record<SchedulingStageKey, StageInsight>
+  summaryUpdated?: string
 }
 
 const stageLabels: Record<SchedulingStageKey, string> = {
@@ -66,13 +95,35 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
       setLoading(true)
       setError(null)
 
-      const res = await fetch(`/api/queue-monitor?factoryId=${factoryId}`)
-      if (!res.ok) {
-        throw new Error(`Status ${res.status}`)
+      const [queueRes, summaryRes] = await Promise.all([
+        fetch(`/api/queue-monitor?factoryId=${factoryId}`),
+        fetch(`/api/scheduling-summary?factoryId=${factoryId}`),
+      ])
+
+      if (!queueRes.ok) {
+        throw new Error(`Status ${queueRes.status}`)
       }
 
-      const result = await res.json()
-      setData(result)
+      const queueData = await queueRes.json()
+      let insights: Record<SchedulingStageKey, StageInsight> | undefined
+      let summaryUpdated: string | undefined
+
+      if (summaryRes.ok) {
+        const summary = await summaryRes.json()
+        insights = summary?.insights ?? undefined
+        summaryUpdated = summary?.lastUpdated ?? undefined
+      } else {
+        console.warn(
+          '[SchedulingDashboard] scheduling-summary request failed:',
+          summaryRes.status
+        )
+      }
+
+      setData({
+        ...queueData,
+        insights,
+        summaryUpdated,
+      })
     } catch (err) {
       console.error('[SchedulingDashboard] Failed to fetch data:', err)
       setError('Fehler beim Laden der Queue-Daten')
@@ -152,6 +203,11 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
           {data?.lastUpdated && (
             <span className="text-xs text-muted-foreground">
               Aktualisiert: {new Date(data.lastUpdated).toLocaleTimeString()}
+            </span>
+          )}
+          {data?.summaryUpdated && (
+            <span className="text-xs text-muted-foreground">
+              Terminierung: {new Date(data.summaryUpdated).toLocaleTimeString()}
             </span>
           )}
           <Button
@@ -281,15 +337,10 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
                             </Button>
                           </CollapsibleTrigger>
                           <CollapsibleContent className="mt-4">
-                            <div className="rounded-md border bg-muted/50 p-4">
-                              <p className="text-sm text-muted-foreground">
-                                Details zur Terminierung (Batches, ETAs, Priorities) werden hier
-                                angezeigt.
-                              </p>
-                              <p className="mt-2 text-xs text-muted-foreground">
-                                Platzhalter - wird später implementiert
-                              </p>
-                            </div>
+                            <StageDetailsDisplay
+                              stageKey={stageKey}
+                              insight={data?.insights?.[stageKey]}
+                            />
                           </CollapsibleContent>
                         </Collapsible>
                       </div>
@@ -302,5 +353,228 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function StageDetailsDisplay({
+  stageKey,
+  insight,
+}: {
+  stageKey: SchedulingStageKey
+  insight: StageInsight | undefined
+}) {
+  if (!insight?.python && !insight?.lastSummary) {
+    return (
+      <div className="rounded-md border bg-muted/50 p-4">
+        <p className="text-sm text-muted-foreground">
+          Keine Terminierungsdetails vorhanden
+        </p>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Der letzte Lauf hat keine detaillierten Ergebnisse geliefert.
+        </p>
+      </div>
+    )
+  }
+
+  const pythonDetails = insight.python?.details ?? null
+  const pythonDebug = insight.python?.debug ?? []
+  const lastSummary = insight.lastSummary
+
+  const scriptInfo = pythonDetails?._scriptExecution ?? null
+  const scriptPath =
+    typeof scriptInfo?.scriptPath === 'string' ? scriptInfo.scriptPath : undefined
+  const scriptName = scriptPath ? scriptPath.split(/[\\/]/).pop() : undefined
+  const scriptDuration =
+    typeof scriptInfo?.startTime === 'number' && typeof scriptInfo?.endTime === 'number'
+      ? scriptInfo.endTime - scriptInfo.startTime
+      : null
+
+  const sanitizedPythonDetails =
+    pythonDetails && typeof pythonDetails === 'object'
+      ? Object.fromEntries(
+          Object.entries(pythonDetails).filter(([key]) => key !== '_scriptExecution')
+        )
+      : null
+
+  const renderList = (obj: Record<string, any>) => {
+    return (
+      <div className="grid gap-2 text-xs sm:grid-cols-2">
+        {Object.entries(obj).map(([key, value]) => {
+          if (key.startsWith('_')) return null
+          if (value === null || value === undefined) return null
+          if (Array.isArray(value) && value.length === 0) return null
+          const label = key
+            .replace(/([A-Z])/g, ' $1')
+            .replace(/_/g, ' ')
+            .trim()
+          let display: ReactNode = value as ReactNode
+          if (Array.isArray(value)) {
+            if (typeof value[0] === 'object') {
+              display = (
+                <pre className="mt-1 rounded bg-muted p-2 text-[10px] text-muted-foreground">
+                  {JSON.stringify(value.slice(0, 8), null, 2)}
+                </pre>
+              )
+            } else {
+              display = value.join(', ')
+            }
+          } else if (typeof value === 'object') {
+            display = (
+              <pre className="mt-1 rounded bg-muted p-2 text-[10px] text-muted-foreground">
+                {JSON.stringify(value, null, 2)}
+              </pre>
+            )
+          }
+          return (
+            <div key={key}>
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                {label}
+              </div>
+              <div className="text-xs text-foreground">{display}</div>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
+  const renderDebugEntry = (entry: Record<string, any>, index: number) => {
+    const stage = typeof entry.stage === 'string' ? entry.stage : `Debug-${index + 1}`
+    const media = entry.media
+    const mediaData =
+      media && typeof media === 'object' && typeof media.data === 'string'
+        ? media.data
+        : null
+
+    return (
+      <div key={`${stage}-${index}`} className="rounded-md border p-3 text-xs">
+        <div className="font-semibold text-purple-900">{stage}</div>
+        <div className="mt-1 space-y-2">
+          {mediaData ? (
+            <div className="rounded bg-white p-2">
+              <img
+                src={`data:${media.type ?? 'image/png'};base64,${mediaData}`}
+                alt={stage}
+                className="mx-auto max-h-64"
+              />
+            </div>
+          ) : null}
+            <pre className="rounded bg-muted p-2 text-[10px] text-muted-foreground">
+              {JSON.stringify(
+                Object.fromEntries(
+                  Object.entries(entry).filter(
+                    ([key]) => key !== 'media' && key !== 'stage'
+                  )
+                ),
+                null,
+                2
+              )}
+            </pre>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4 rounded-md border bg-muted/30 p-4">
+      {lastSummary && (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold text-purple-900">
+            Letzte Freigabe {lastSummary.simMinute !== null ? `@ t=${lastSummary.simMinute}min` : ''}
+          </div>
+          <div className="grid gap-2 text-xs sm:grid-cols-3">
+            <div className="rounded border bg-white p-2">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Freigegeben
+              </div>
+              <div className="text-lg font-semibold">{lastSummary.releasedCount}</div>
+            </div>
+            <div className="rounded border bg-white p-2">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Änderungen
+              </div>
+              <div className="text-lg font-semibold">{lastSummary.reorderCount}</div>
+            </div>
+            <div className="rounded border bg-white p-2">
+              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                Python Diff
+              </div>
+              <div className="text-lg font-semibold">
+                {lastSummary.pythonDiffCount ?? lastSummary.reorderCount}
+              </div>
+            </div>
+          </div>
+          {lastSummary.pythonPriorities && lastSummary.pythonPriorities.length > 0 && (
+            <div className="rounded border bg-white p-3">
+              <div className="text-xs font-semibold text-purple-900">Prioritäten</div>
+              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
+                {JSON.stringify(lastSummary.pythonPriorities.slice(0, 12), null, 2)}
+              </pre>
+            </div>
+          )}
+          {lastSummary.pythonBatches && lastSummary.pythonBatches.length > 0 && (
+            <div className="rounded border bg-white p-3">
+              <div className="text-xs font-semibold text-purple-900">Batches</div>
+              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
+                {JSON.stringify(lastSummary.pythonBatches.slice(0, 8), null, 2)}
+              </pre>
+            </div>
+          )}
+          {lastSummary.pythonEtaList && lastSummary.pythonEtaList.length > 0 && (
+            <div className="rounded border bg-white p-3">
+              <div className="text-xs font-semibold text-purple-900">ETA Vorschau</div>
+              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
+                {JSON.stringify(lastSummary.pythonEtaList.slice(0, 8), null, 2)}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {(scriptName || scriptPath) && (
+        <div className="space-y-1 rounded border bg-white p-3">
+          <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Python Skript
+          </div>
+          <div className="text-xs font-semibold text-purple-900">
+            {scriptName ?? 'Unbekanntes Skript'}
+          </div>
+          {scriptPath && (
+            <div className="break-all text-[10px] text-muted-foreground">{scriptPath}</div>
+          )}
+          {typeof scriptInfo?.status === 'string' && (
+            <div className="text-[10px] text-muted-foreground">
+              Status: <span className="font-medium text-foreground">{scriptInfo.status}</span>
+            </div>
+          )}
+          {scriptDuration !== null && scriptDuration >= 0 && (
+            <div className="text-[10px] text-muted-foreground">
+              Dauer: <span className="font-medium text-foreground">{scriptDuration} ms</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {sanitizedPythonDetails && (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold text-purple-900">Script KPIs</div>
+          {renderList(sanitizedPythonDetails)}
+        </div>
+      )}
+
+      {pythonDebug.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold text-purple-900">Debug / Heuristik</div>
+          <div className="grid gap-2">
+            {pythonDebug.slice(0, 6).map((entry, idx) => renderDebugEntry(entry, idx))}
+            {pythonDebug.length > 6 && (
+              <div className="text-[10px] text-muted-foreground">
+                … {pythonDebug.length - 6} weitere Debug-Einträge
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }

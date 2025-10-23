@@ -22,12 +22,12 @@ interface PythonPipoPayload {
 
 interface PythonPipoResult {
   paretoSet: Plan[]
-  selectedPlanId: string
+  selectedPlanId: string | null
   releasedOps: OperationBlock[]
   debug?: Array<Record<string, unknown>>
 }
 
-const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'pipo.py')
+const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'Ansatz_Becker_Feinterminierung.py')
 
 function buildPayload(pools: Pools, factory: FactoryEnv, config: SchedulingConfig): PythonPipoPayload {
   const orders = pools.getSnapshot('pipo').map((record) => ({
