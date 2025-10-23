@@ -20,11 +20,22 @@ export async function POST(request: Request) {
       },
     })
 
-    console.log(`[ClearSchedulingLogs] Deleted ${result.count} logs for factory ${factoryId}`)
+    // Reset dispatcher order fields for all orders in this factory
+    const updatedOrders = await prisma.auftrag.updateMany({
+      where: { factoryId },
+      data: {
+        dispatcherOrderPreAcceptance: null,
+        dispatcherOrderPreInspection: null,
+        dispatcherOrderPostInspection: null,
+      },
+    })
+
+    console.log(`[ClearSchedulingLogs] Deleted ${result.count} logs and reset ${updatedOrders.count} orders for factory ${factoryId}`)
 
     return NextResponse.json({
       success: true,
       deletedCount: result.count,
+      resetOrdersCount: updatedOrders.count,
     })
   } catch (error) {
     console.error('[ClearSchedulingLogs] Failed to clear logs:', error)

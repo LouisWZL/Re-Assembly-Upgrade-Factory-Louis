@@ -71,6 +71,8 @@ model Auftrag {
   dispatcherOrderPostInspection Int?
   plannedDeliverySimMinute      Float?
   finalCompletionSimMinute      Float?
+  deliveryAfterAcceptanceSimMinute  Float?
+  deliveryAfterInspectionSimMinute  Float?
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
   factory              ReassemblyFactory     @relation(fields: [factoryId], references: [id])
