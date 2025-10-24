@@ -4041,7 +4041,7 @@ export function RealDataFactorySimulation() {
                 {/* Time */}
                 <div className="flex items-center gap-1.5">
                   <Clock className="h-3 w-3 text-gray-600" />
-                  <span className="font-mono text-xs">
+                  <span className="font-mono text-[11px]">
                     {simulationTime.toLocaleString('de-DE')}
                   </span>
                 </div>
@@ -5387,7 +5387,7 @@ export function RealDataFactorySimulation() {
 
       {/* Terminierung Bundle Management Modal */}
       <Dialog open={terminierungModalOpen} onOpenChange={setTerminierungModalOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Terminierungs-Konfiguration</DialogTitle>
             <DialogDescription>
@@ -5403,7 +5403,7 @@ export function RealDataFactorySimulation() {
               return (
                 <div className="p-4 border rounded-lg bg-gray-50 space-y-4">
                   <div className="pb-3 border-b">
-                    <div className="font-semibold text-lg">{bundle.name}</div>
+                    <div className="font-semibold text-base">{bundle.name}</div>
                     {bundle.author && (
                       <div className="text-xs text-gray-500 mt-1">Autor: {bundle.author}</div>
                     )}
