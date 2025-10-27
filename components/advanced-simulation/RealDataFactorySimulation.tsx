@@ -5410,45 +5410,45 @@ export function RealDataFactorySimulation() {
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
-                      <div className="flex items-center gap-2 flex-1">
-                        <Database className="w-4 h-4 text-blue-500" />
-                        <span className="font-medium text-sm">PreAcceptanceQueue</span>
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Database className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                        <span className="font-medium text-sm whitespace-nowrap">PreAcceptanceQueue</span>
                       </div>
                       {bundle.papScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono">
+                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
                           {bundle.papScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
-                      <div className="flex items-center gap-2 flex-1">
-                        <Database className="w-4 h-4 text-orange-500" />
-                        <span className="font-medium text-sm">PreInspectionQueue</span>
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Database className="w-4 h-4 text-orange-500 flex-shrink-0" />
+                        <span className="font-medium text-sm whitespace-nowrap">PreInspectionQueue</span>
                       </div>
                       {bundle.pipScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono">
+                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
                           {bundle.pipScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-3 p-2 bg-white rounded border">
-                      <div className="flex items-center gap-2 flex-1">
-                        <Database className="w-4 h-4 text-green-500" />
-                        <span className="font-medium text-sm">PostInspectionQueue</span>
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Database className="w-4 h-4 text-green-500 flex-shrink-0" />
+                        <span className="font-medium text-sm whitespace-nowrap">PostInspectionQueue</span>
                       </div>
                       {bundle.pipoScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono">
+                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
                           {bundle.pipoScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
                       )}
                     </div>
                   </div>
