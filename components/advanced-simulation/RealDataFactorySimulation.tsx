@@ -5409,45 +5409,45 @@ export function RealDataFactorySimulation() {
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
-                      <div className="flex items-center gap-2 min-w-0">
+                    <div className="p-3 bg-white rounded border space-y-2">
+                      <div className="flex items-center gap-2">
                         <Database className="w-4 h-4 text-blue-500 flex-shrink-0" />
-                        <span className="font-medium text-sm whitespace-nowrap">PreAcceptanceQueue</span>
+                        <span className="font-medium text-sm">PreAcceptanceQueue</span>
                       </div>
                       {bundle.papScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
+                        <code className="text-xs text-gray-600 font-mono break-all pl-6">
                           {bundle.papScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic pl-6">nicht konfiguriert</span>
                       )}
                     </div>
 
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
-                      <div className="flex items-center gap-2 min-w-0">
+                    <div className="p-3 bg-white rounded border space-y-2">
+                      <div className="flex items-center gap-2">
                         <Database className="w-4 h-4 text-orange-500 flex-shrink-0" />
-                        <span className="font-medium text-sm whitespace-nowrap">PreInspectionQueue</span>
+                        <span className="font-medium text-sm">PreInspectionQueue</span>
                       </div>
                       {bundle.pipScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
+                        <code className="text-xs text-gray-600 font-mono break-all pl-6">
                           {bundle.pipScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic pl-6">nicht konfiguriert</span>
                       )}
                     </div>
 
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-white rounded border">
-                      <div className="flex items-center gap-2 min-w-0">
+                    <div className="p-3 bg-white rounded border space-y-2">
+                      <div className="flex items-center gap-2">
                         <Database className="w-4 h-4 text-green-500 flex-shrink-0" />
-                        <span className="font-medium text-sm whitespace-nowrap">PostInspectionQueue</span>
+                        <span className="font-medium text-sm">PostInspectionQueue</span>
                       </div>
                       {bundle.pipoScriptPath ? (
-                        <code className="text-xs text-gray-600 font-mono break-all sm:ml-auto">
+                        <code className="text-xs text-gray-600 font-mono break-all pl-6">
                           {bundle.pipoScriptPath.split('/').pop()}
                         </code>
                       ) : (
-                        <span className="text-xs text-gray-400 italic sm:ml-auto">nicht konfiguriert</span>
+                        <span className="text-xs text-gray-400 italic pl-6">nicht konfiguriert</span>
                       )}
                     </div>
                   </div>
