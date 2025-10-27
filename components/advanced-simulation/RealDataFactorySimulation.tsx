@@ -5166,8 +5166,7 @@ export function RealDataFactorySimulation() {
                   return (
                     <div className="space-y-3 text-sm text-muted-foreground">
                       <p>
-                        Es wurden noch keine finalen Liefertermine prognostiziert. Sobald PAP/PIPo Durchläufe
-                        abgeschlossen sind, erscheint hier die durchschnittliche Abweichung.
+                        Noch kein Auftrag abgeschlossen. Bitte aktualisieren.
                       </p>
                       {pending > 0 && (
                         <p className="text-xs">{pending} Aufträge haben bereits einen geplanten Liefertermin, warten aber noch auf eine Feinplanung.</p>
