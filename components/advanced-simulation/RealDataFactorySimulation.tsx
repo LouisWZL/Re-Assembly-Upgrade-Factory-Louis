@@ -326,6 +326,11 @@ export function RealDataFactorySimulation() {
   const [algorithmBundles, setAlgorithmBundles] = useState<any[]>([])
   const [loadingBundles, setLoadingBundles] = useState(false)
 
+  // Auto-generate orders feature
+  const [autoGenerateOrders, setAutoGenerateOrders] = useState(false)
+  const [autoGenerateIntervalMinutes, setAutoGenerateIntervalMinutes] = useState(10) // Sim-minutes
+  const lastAutoGenerateTimeRef = useRef<number>(0) // Track last generation time in sim-minutes
+
   // Phase slot state (approximation of rigid/flexible slots)
   type SlotState = { flex: boolean; specialization?: string | null; currentType?: string | null; idleSince?: number | null; busy?: boolean }
   const demSlotsRef = useRef<SlotState[]>([])
@@ -629,6 +634,23 @@ export function RealDataFactorySimulation() {
       bufferRef.current.stop();
     }
   }, [isRunning]);
+
+  // Auto-generate orders at regular intervals during simulation
+  useEffect(() => {
+    if (!isRunning || !autoGenerateOrders) return;
+
+    const intervalId = setInterval(() => {
+      const currentSimMinutes = getSimMinutes();
+
+      // Check if enough time has passed since last generation
+      if (currentSimMinutes - lastAutoGenerateTimeRef.current >= autoGenerateIntervalMinutes) {
+        addNewOrderToSimulation();
+        lastAutoGenerateTimeRef.current = currentSimMinutes;
+      }
+    }, 1000); // Check every second
+
+    return () => clearInterval(intervalId);
+  }, [isRunning, autoGenerateOrders, autoGenerateIntervalMinutes]);
 
   // Cleanup buffer on unmount
   useEffect(() => {
@@ -3139,6 +3161,79 @@ export function RealDataFactorySimulation() {
     }
   };
 
+  // Add new order to running simulation WITHOUT reset
+  const addNewOrderToSimulation = async () => {
+    if (!activeFactory || !factoryData) return;
+
+    try {
+      // Generate order via API
+      const response = await fetch('/api/auftrag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'generateOrders',
+          factoryId: activeFactory.id,
+          count: 1
+        })
+      });
+
+      const result = await response.json();
+
+      if (result.success && result.data?.orders && result.data.orders.length > 0) {
+        const newOrder = result.data.orders[0];
+
+        // Transform to simulation format (same as in loadSimulationData)
+        const processSequences = factoryData.processSequences || [];
+        const randomSeq = processSequences[Math.floor(Math.random() * processSequences.length)];
+
+        const simulationOrder = {
+          id: newOrder.id,
+          kundeId: newOrder.kundeId,
+          kundeName: newOrder.kunde?.firmenname || `${newOrder.kunde?.vorname} ${newOrder.kunde?.nachname}`,
+          produktvariante: newOrder.produktvariante?.name || 'Unbekannt',
+          currentStation: 'waiting',
+          progress: 0,
+          startTime: simulationTime,
+          processSequence: randomSeq?.sequence || [],
+          requiredBaugruppentypen: [],
+          requiredUpgrades: {},
+          stationDurations: {},
+          isWaiting: true,
+          processSequences: factoryData.processSequences,
+          selectedSequence: randomSeq,
+          currentSequenceStep: 0
+        };
+
+        // Add to simulationOrdersRef
+        simulationOrdersRef.current = [...simulationOrdersRef.current, simulationOrder];
+
+        // CRITICAL: Enqueue order into PreAcceptanceQueue (same as initial orders)
+        try {
+          const { enqueueOrder } = await import('@/app/actions/queue.actions');
+          await enqueueOrder(
+            'preAcceptance',
+            newOrder.id,
+            getSimMinutes(),
+            factoryData.processSequences,
+            calculateProcessTimesFromBaugruppen(newOrder, factoryData.factory)
+          );
+          console.log(`✅ Auto-generated order ${newOrder.id.slice(-4)} enqueued into PreAcceptanceQueue at t=${getSimMinutes().toFixed(1)}m`);
+
+          // Add Gantt event for queue waiting start
+          pushEvent('QUEUE_WAIT:PRE_ACCEPTANCE_START', newOrder.id, null);
+        } catch (error) {
+          console.error(`Failed to enqueue auto-generated order ${newOrder.id}:`, error);
+        }
+
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error('Error auto-generating order:', error);
+      return false;
+    }
+  };
+
   const handleClearAllOrders = async () => {
     if (!activeFactory) return;
     
@@ -3384,11 +3479,8 @@ export function RealDataFactorySimulation() {
                 totalWaitingTime: totalWaitingTimeMinutes,
                 totalLeadTime: totalLeadTimeMinutes
               }}
-            />
-          )
-        })()}
-
-        {/* Simple Gantt (beta): recent segments */}
+            >
+              {/* Gantt Charts rendered below as children */}
         {/* Gantt Tabelle (letzte Segmente) - AUSGEBLENDET */}
         {/* <Card>
           <CardHeader>
@@ -3463,7 +3555,7 @@ export function RealDataFactorySimulation() {
         {/* Gantt Plot */}
         <Card>
           <CardHeader>
-            <CardTitle>Gantt – Unter‑Operationen</CardTitle>
+            <CardTitle>Details Operationen: Gantt-Chart</CardTitle>
           </CardHeader>
           <CardContent key={`gplot-${ganttRefreshKey}`}>
             {(() => {
@@ -3909,6 +4001,10 @@ export function RealDataFactorySimulation() {
           </CardContent>
         </Card>
 
+            </AdvancedKPIDashboard>
+          )
+        })()}
+
       </div>
     );
   }
@@ -4031,7 +4127,7 @@ export function RealDataFactorySimulation() {
                     value={[speed]}
                     onValueChange={handleSpeedChange}
                     min={0.5}
-                    max={100}
+                    max={200}
                     step={0.5}
                     className="w-24"
                   />
@@ -4109,6 +4205,42 @@ export function RealDataFactorySimulation() {
                       </SelectItem>
                     </SelectContent>
                   </Select>
+                </div>
+
+                {/* Auto-Generate Orders */}
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="auto-generate"
+                      checked={autoGenerateOrders}
+                      onChange={(e) => {
+                        setAutoGenerateOrders(e.target.checked);
+                        if (e.target.checked) {
+                          lastAutoGenerateTimeRef.current = getSimMinutes();
+                          toast.success(`Auto-Generate aktiviert (alle ${autoGenerateIntervalMinutes} Min)`);
+                        } else {
+                          toast.info('Auto-Generate deaktiviert');
+                        }
+                      }}
+                      className="h-3 w-3"
+                    />
+                    <Label htmlFor="auto-generate" className="text-xs cursor-pointer">
+                      Auto-Generate Aufträge
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <Label className="text-[10px] text-gray-600">Alle</Label>
+                    <Input
+                      type="number"
+                      value={autoGenerateIntervalMinutes}
+                      onChange={(e) => setAutoGenerateIntervalMinutes(Math.max(1, parseInt(e.target.value) || 10))}
+                      min={1}
+                      max={60}
+                      className="h-6 w-12 text-xs px-1"
+                    />
+                    <Label className="text-[10px] text-gray-600">Min (Sim-Zeit)</Label>
+                  </div>
                 </div>
               </div>
             </div>

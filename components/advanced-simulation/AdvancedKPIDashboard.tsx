@@ -44,6 +44,7 @@ interface AdvancedKPIDashboardProps {
   stations: ProductionStation[];
   onClearData: () => void;
   calculatedKPIs?: CalculatedKPIs;
+  children?: React.ReactNode;
 }
 
 export function AdvancedKPIDashboard({
@@ -51,7 +52,8 @@ export function AdvancedKPIDashboard({
   completedOrders,
   stations,
   onClearData,
-  calculatedKPIs
+  calculatedKPIs,
+  children
 }: AdvancedKPIDashboardProps) {
   const { activeFactory } = useFactory();
 
@@ -123,9 +125,12 @@ export function AdvancedKPIDashboard({
         </div>
       </div>
 
-      {/* Detailed Order View from Simulation */}
+      {/* Gantt Charts inserted here from parent component */}
+      {children}
+
+      {/* Detailed Order View from Simulation - right after Gantt charts */}
       <OrderDetailsCardSection orders={orders} stations={stations} />
-      
+
       {/* Process Graph and Sequences from Simulation */}
       <OrderProcessGraphSection orders={orders} stations={stations} />
 
