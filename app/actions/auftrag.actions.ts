@@ -402,6 +402,59 @@ async function createSingleOrder(
 }
 
 /**
+ * Generate a single order with full relations for simulation
+ */
+export async function generateSingleOrderForSimulation(factoryId: string) {
+  try {
+    // Create the order
+    const result = await createSingleOrder(factoryId);
+
+    if (!result.success || !result.data) {
+      return result;
+    }
+
+    // Fetch the order with all required relations for simulation
+    const orderId = result.data.id;
+    const fullOrder = await prisma.auftrag.findUnique({
+      where: { id: orderId },
+      include: {
+        kunde: true,
+        produktvariante: {
+          include: {
+            produkt: {
+              include: {
+                baugruppentypen: true
+              }
+            }
+          }
+        },
+        baugruppenInstances: {
+          include: {
+            baugruppe: {
+              include: {
+                baugruppentyp: true,
+                prozesse: true
+              }
+            },
+            austauschBaugruppe: {
+              include: {
+                baugruppentyp: true,
+                prozesse: true
+              }
+            }
+          }
+        }
+      }
+    });
+
+    return { success: true, data: fullOrder };
+  } catch (error) {
+    console.error('Error generating single order for simulation:', error);
+    return { success: false, error: 'Fehler beim Generieren des Auftrags' };
+  }
+}
+
+/**
  * Generate multiple orders for a factory with batch average zustand of 65%
  */
 export async function generateOrders(factoryId: string, count: number = 10) {

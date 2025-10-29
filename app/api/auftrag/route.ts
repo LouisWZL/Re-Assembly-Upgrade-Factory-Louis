@@ -1,10 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { generateOrders, deleteAllOrdersForFactory } from '@/app/actions/auftrag.actions';
+import { generateOrders, generateSingleOrderForSimulation, deleteAllOrdersForFactory } from '@/app/actions/auftrag.actions';
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { action, factoryId, count } = body;
+
+    if (action === 'generateSingleForSimulation') {
+      if (!factoryId) {
+        return NextResponse.json(
+          { success: false, error: 'Factory ID is required' },
+          { status: 400 }
+        );
+      }
+
+      const result = await generateSingleOrderForSimulation(factoryId);
+      return NextResponse.json(result);
+    }
 
     if (action === 'generateOrders') {
       if (!factoryId) {
