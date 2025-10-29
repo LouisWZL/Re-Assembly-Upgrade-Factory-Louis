@@ -1950,12 +1950,35 @@ export function RealDataFactorySimulation() {
               console.log(`✅ Added order ${orderId.slice(-4)} to inspection queue`)
             }
           })
-          // Update order status from 'waiting-inspection' to 'inspection'
-          setActiveOrders(prev => prev.map(o =>
-            preInspectionResult.orderIds?.includes(o.id)
-              ? { ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }
-              : o
-          ))
+
+          // Add released orders to activeOrders if not already present (for auto-generated orders)
+          const ordersToActivate = simulationOrdersRef.current.filter(order =>
+            preInspectionResult.orderIds?.includes(order.id)
+          )
+
+          setActiveOrders(prev => {
+            // Add new orders that aren't in activeOrders yet
+            const newOrders = ordersToActivate.filter(order =>
+              !prev.some(p => p.id === order.id)
+            )
+            // Update existing orders + add new ones
+            const updated = prev.map(o =>
+              preInspectionResult.orderIds?.includes(o.id)
+                ? { ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }
+                : o
+            )
+            return [...updated, ...newOrders.map(o => ({ ...o, currentStation: 'inspection', isWaiting: true, progress: 0 }))]
+          })
+
+          // Also update activeOrdersRef
+          preInspectionResult.orderIds.forEach(orderId => {
+            if (!activeOrdersRef.current.some(o => o.id === orderId)) {
+              const order = simulationOrdersRef.current.find(o => o.id === orderId)
+              if (order) {
+                activeOrdersRef.current = [...activeOrdersRef.current, { ...order, currentStation: 'inspection', isWaiting: true, progress: 0 }]
+              }
+            }
+          })
         }
 
         // Check PostInspectionQueue
@@ -1985,12 +2008,35 @@ export function RealDataFactorySimulation() {
             demReadySetRef.current.add(orderId)
             console.log(`✅ Order ${orderId.slice(-4)} ready for demontage phase`)
           })
-          // Update order status from 'waiting-demontage' to 'demontage'
-          setActiveOrders(prev => prev.map(o =>
-            postInspectionResult.orderIds?.includes(o.id)
-              ? { ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }
-              : o
-          ))
+
+          // Add released orders to activeOrders if not already present (for auto-generated orders)
+          const ordersToActivateDem = simulationOrdersRef.current.filter(order =>
+            postInspectionResult.orderIds?.includes(order.id)
+          )
+
+          setActiveOrders(prev => {
+            // Add new orders that aren't in activeOrders yet
+            const newOrders = ordersToActivateDem.filter(order =>
+              !prev.some(p => p.id === order.id)
+            )
+            // Update existing orders + add new ones
+            const updated = prev.map(o =>
+              postInspectionResult.orderIds?.includes(o.id)
+                ? { ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }
+                : o
+            )
+            return [...updated, ...newOrders.map(o => ({ ...o, currentStation: 'demontage', isWaiting: true, progress: 0 }))]
+          })
+
+          // Also update activeOrdersRef
+          postInspectionResult.orderIds.forEach(orderId => {
+            if (!activeOrdersRef.current.some(o => o.id === orderId)) {
+              const order = simulationOrdersRef.current.find(o => o.id === orderId)
+              if (order) {
+                activeOrdersRef.current = [...activeOrdersRef.current, { ...order, currentStation: 'demontage', isWaiting: true, progress: 0 }]
+              }
+            }
+          })
         }
       } catch (error) {
         console.error('Error checking queues:', error)
@@ -3163,71 +3209,267 @@ export function RealDataFactorySimulation() {
 
   // Add new order to running simulation WITHOUT reset
   const addNewOrderToSimulation = async () => {
-    if (!activeFactory || !factoryData) return;
+    if (!activeFactory || !factoryData || localStations.length === 0) {
+      console.warn('Cannot add order: missing factory, factoryData, or stations');
+      return false;
+    }
 
     try {
-      // Generate order via API
+      // Generate order via new API endpoint that returns full order with all relations
       const response = await fetch('/api/auftrag', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'generateOrders',
-          factoryId: activeFactory.id,
-          count: 1
+          action: 'generateSingleForSimulation',
+          factoryId: activeFactory.id
         })
       });
 
       const result = await response.json();
 
-      if (result.success && result.data?.orders && result.data.orders.length > 0) {
-        const newOrder = result.data.orders[0];
+      if (!result.success || !result.data) {
+        console.error('Failed to generate order:', result.error);
+        return false;
+      }
 
-        // Transform to simulation format (same as in loadSimulationData)
-        const processSequences = factoryData.processSequences || [];
-        const randomSeq = processSequences[Math.floor(Math.random() * processSequences.length)];
+      const newOrder = result.data;
+      console.log(`🎯 [Auto-Gen] Generated order ${newOrder.id.slice(-4)} for ${newOrder.kunde.vorname} ${newOrder.kunde.nachname}`);
 
-        const simulationOrder = {
-          id: newOrder.id,
-          kundeId: newOrder.kundeId,
-          kundeName: newOrder.kunde?.firmenname || `${newOrder.kunde?.vorname} ${newOrder.kunde?.nachname}`,
-          produktvariante: newOrder.produktvariante?.name || 'Unbekannt',
-          currentStation: 'waiting',
-          progress: 0,
-          startTime: simulationTime,
-          processSequence: randomSeq?.sequence || [],
-          requiredBaugruppentypen: [],
-          requiredUpgrades: {},
-          stationDurations: {},
-          isWaiting: true,
-          processSequences: factoryData.processSequences,
-          selectedSequence: randomSeq,
-          currentSequenceStep: 0
-        };
+      // Use the SAME transformation logic as loadSimulationData
+      const { processSequence: processSeq, selectedSequence } = selectRandomSequenceAndConvert(newOrder, localStations);
 
-        // Add to simulationOrdersRef
-        simulationOrdersRef.current = [...simulationOrdersRef.current, simulationOrder];
+      // Calculate order-specific process times
+      const orderProcessTimes = calculateProcessTimesFromBaugruppen(newOrder, factoryData.factory);
+      console.log(`⏱️ [Auto-Gen] Process times: demontage=${orderProcessTimes.demontage}min, montage=${orderProcessTimes.montage}min`);
 
-        // CRITICAL: Enqueue order into PreAcceptanceQueue (same as initial orders)
-        try {
-          const { enqueueOrder } = await import('@/app/actions/queue.actions');
-          await enqueueOrder(
-            'preAcceptance',
-            newOrder.id,
-            getSimMinutes(),
-            factoryData.processSequences,
-            calculateProcessTimesFromBaugruppen(newOrder, factoryData.factory)
-          );
-          console.log(`✅ Auto-generated order ${newOrder.id.slice(-4)} enqueued into PreAcceptanceQueue at t=${getSimMinutes().toFixed(1)}m`);
+      // Pre-initialize stationDurations with order-specific times
+      const initialStationDurations: { [stationId: string]: { expected: number; actual?: number; startTime?: Date; completed?: boolean; waitingTime?: number } } = {};
 
-          // Add Gantt event for queue waiting start
-          pushEvent('QUEUE_WAIT:PRE_ACCEPTANCE_START', newOrder.id, null);
-        } catch (error) {
-          console.error(`Failed to enqueue auto-generated order ${newOrder.id}:`, error);
+      processSeq.forEach(stationId => {
+        const station = localStations.find(s => s.id === stationId);
+        let expectedTime = station?.processingTime || 30;
+
+        // Use order-specific times for demontage/montage stations
+        if (station?.type === 'SUB') {
+          if (station.phase === 'DEMONTAGE') {
+            expectedTime = orderProcessTimes.demontage;
+          } else if (station.phase === 'REASSEMBLY') {
+            expectedTime = orderProcessTimes.montage;
+          }
         }
 
-        return true;
+        initialStationDurations[stationId] = {
+          expected: expectedTime,
+          completed: false,
+          waitingTime: 0
+        };
+      });
+
+      // Create simulation order - they will enter acceptance queue but need currentStation set correctly
+      const simulationOrder: SimulationOrder = {
+        id: newOrder.id,
+        kundeId: newOrder.kundeId,
+        kundeName: `${newOrder.kunde.vorname} ${newOrder.kunde.nachname}`,
+        produktvariante: newOrder.produktvariante?.produkt?.bezeichnung || 'Unbekannt',
+        currentStation: 'order-acceptance', // Must be at station, not 'waiting'
+        progress: 0,
+        startTime: simulationTime,
+        processSequence: processSeq,
+        requiredBaugruppentypen: [],
+        requiredUpgrades: {},
+        stationDurations: initialStationDurations,
+        isWaiting: true, // TRUE = waiting in queue for station
+        processSequences: newOrder.processSequences,
+        selectedSequence: selectedSequence,
+        currentSequenceStep: 0
+      };
+
+      // Add to simulationOrdersRef (NOT to activeOrders yet - they wait in PreAcceptanceQueue)
+      simulationOrdersRef.current = [...simulationOrdersRef.current, simulationOrder];
+      console.log(`✅ [Auto-Gen] Added order ${newOrder.id.slice(-4)} to simulationOrdersRef (${simulationOrdersRef.current.length} total orders)`);
+
+      // Create DEM/MON bundles - CRITICAL for demontage/montage phases
+      // Build substations from factory data (SAME as loadSimulationData) to ensure consistent processing times
+
+      // Helper to get processing times for a Baugruppentyp from factory baugruppen
+      const getProcessingTimesForBaugruppentyp = (baugruppentypId: string) => {
+        const factoryBaugruppen = factoryData.factory?.baugruppen || [];
+        const baugruppenOfType = factoryBaugruppen.filter(
+          (bg: any) => bg.baugruppentypId === baugruppentypId
+        );
+
+        if (baugruppenOfType.length === 0) {
+          return {
+            demontage: factoryData.factory?.defaultDemontagezeit || 30,
+            montage: factoryData.factory?.defaultMontagezeit || 45
+          };
+        }
+
+        let totalDem = 0, totalMon = 0, countDem = 0, countMon = 0;
+        baugruppenOfType.forEach((bg: any) => {
+          if (bg.demontagezeit != null && bg.demontagezeit > 0) {
+            totalDem += bg.demontagezeit;
+            countDem++;
+          }
+          if (bg.montagezeit != null && bg.montagezeit > 0) {
+            totalMon += bg.montagezeit;
+            countMon++;
+          }
+        });
+
+        const avgDem = countDem > 0
+          ? Math.round(totalDem / countDem)
+          : (factoryData.factory?.defaultDemontagezeit || 30);
+        const avgMon = countMon > 0
+          ? Math.round(totalMon / countMon)
+          : (factoryData.factory?.defaultMontagezeit || 45);
+
+        return { demontage: avgDem, montage: avgMon };
+      };
+
+      // Get used Baugruppentypen from factory data (fallback to all demontageSubStations)
+      const usedBaugruppentypen = factoryData.stations?.demontageSubStations || [];
+
+      // Build substations with factory-derived processing times
+      const demontageSubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => {
+        const times = getProcessingTimesForBaugruppentyp(sub.baugruppentypId);
+        return {
+          id: `demontage-${sub.id}`,
+          name: sub.name,
+          type: 'SUB' as const,
+          parent: 'demontage',
+          baugruppentypId: sub.baugruppentypId,
+          processingTime: times.demontage,
+          stochasticVariation: 0.3,
+          currentOrder: null,
+          waitingQueue: [],
+          capacity: 1,
+          phase: 'DEMONTAGE' as const
+        };
+      });
+
+      const reassemblySubStations: SimulationStation[] = usedBaugruppentypen.map((sub: any) => {
+        const times = getProcessingTimesForBaugruppentyp(sub.baugruppentypId);
+        return {
+          id: `reassembly-${sub.id}`,
+          name: sub.name.replace('Demontage', 'Montage'),
+          type: 'SUB' as const,
+          parent: 'reassembly',
+          baugruppentypId: sub.baugruppentypId,
+          processingTime: times.montage,
+          stochasticVariation: 0.25,
+          currentOrder: null,
+          waitingQueue: [],
+          capacity: 1,
+          phase: 'REASSEMBLY' as const
+        };
+      });
+
+      console.log(`🏭 [Auto-Gen] Built ${demontageSubStations.length} DEM stations, ${reassemblySubStations.length} MON stations from factory data`);
+
+      // Extract steps from selectedSequence
+      let steps: string[] = [];
+      if (selectedSequence && Array.isArray(selectedSequence.steps)) {
+        steps = selectedSequence.steps.map((s: any) => String(s));
       }
-      return false;
+
+      if (steps.length > 0) {
+        // makeOps function to create operation bundles
+        const makeOps = (stepList: string[], which: 'DEM' | 'MON'): OpItem[] => {
+          const ops: OpItem[] = [];
+          const crossIdx = stepList.indexOf('×');
+          const slice = which === 'DEM'
+            ? (crossIdx >= 0 ? stepList.slice(0, crossIdx) : stepList)
+            : (crossIdx >= 0 ? stepList.slice(crossIdx + 1) : []);
+
+          const findStationForStep = (collection: SimulationStation[], step: string) => {
+            const normalizedStep = normalizeOperationKey(step);
+            return collection.find(station => {
+              const candidates = [
+                station.name,
+                station.name?.replace(/^Demontage\s+/i, '').replace(/^Montage\s+/i, ''),
+                station.baugruppentypId,
+                station.id
+              ].filter(Boolean) as string[];
+
+              return candidates.some(candidate => {
+                const normalizedCandidate = normalizeOperationKey(candidate);
+                return candidate === step || normalizedCandidate === normalizedStep;
+              });
+            });
+          };
+
+          slice.forEach(step => {
+            if (!step || step === 'I' || step === 'Q' || step === '×') return;
+
+            const station = which === 'DEM'
+              ? findStationForStep(demontageSubStations, step)
+              : findStationForStep(reassemblySubStations, step);
+
+            const durationFallback = which === 'DEM' ? 30 : 45;
+            const baseDuration = station?.processingTime ?? durationFallback;
+            const variation = station?.stochasticVariation ?? 0.3;
+            const randomFactor = (Math.random() - 0.5) * 2;
+            const variationAmount = baseDuration * variation * randomFactor;
+            const duration = Math.max(1, Math.round(baseDuration + variationAmount));
+
+            const rawTypeKey = station?.name || step;
+            const typeKey = normalizeOperationKey(rawTypeKey);
+            const displayLabel = station?.name || step;
+
+            ops.push({
+              label: displayLabel,
+              duration,
+              display: displayLabel,
+              typeKey
+            });
+          });
+
+          return ops;
+        };
+
+        const demOps = makeOps(steps, 'DEM');
+        const monOps = makeOps(steps, 'MON');
+
+        console.log(`📦 [Auto-Gen] Order ${newOrder.id.slice(-4)}: ${demOps.length} demOps, ${monOps.length} monOps`);
+
+        // Add bundles to refs - CRITICAL for FCFS dispatcher
+        if (demOps.length > 0) {
+          demQueueRef.current.push({ orderId: newOrder.id, ops: demOps });
+          console.log(`✅ [Auto-Gen] Added ${demOps.length} demOps to demQueueRef for order ${newOrder.id.slice(-4)}`);
+        }
+        if (monOps.length > 0) {
+          monBundlesMapRef.current[newOrder.id] = monOps;
+          console.log(`✅ [Auto-Gen] Added ${monOps.length} monOps to monBundlesMapRef for order ${newOrder.id.slice(-4)}`);
+        }
+      } else {
+        console.warn(`⚠️ [Auto-Gen] Order ${newOrder.id.slice(-4)} has no steps - cannot create DEM/MON bundles`);
+      }
+
+      // Enqueue into PreAcceptanceQueue - SAME as initial orders
+      try {
+        const { enqueueOrder } = await import('@/app/actions/queue.actions');
+        await enqueueOrder(
+          'preAcceptance',
+          newOrder.id,
+          getSimMinutes(), // Current sim time, not 0
+          newOrder.processSequences,
+          orderProcessTimes
+        );
+        console.log(`✅ [Auto-Gen] Order ${newOrder.id.slice(-4)} enqueued into PreAcceptanceQueue at t=${getSimMinutes().toFixed(1)}m`);
+
+        // Add Gantt event for queue waiting start
+        pushEvent('QUEUE_WAIT:PRE_ACCEPTANCE_START', newOrder.id, null);
+        console.log(`📊 [Auto-Gen] Added Gantt event: PRE_ACCEPTANCE_START for order ${newOrder.id.slice(-4)}`);
+
+        // Order will be released by checkAndReleaseBatch when PAP runs next
+        console.log(`⏳ [Auto-Gen] Order ${newOrder.id.slice(-4)} waiting in PreAcceptanceQueue for next PAP batch release`);
+      } catch (error) {
+        console.error(`Failed to enqueue auto-generated order ${newOrder.id}:`, error);
+        return false;
+      }
+
+      return true;
     } catch (error) {
       console.error('Error auto-generating order:', error);
       return false;
@@ -3463,9 +3705,12 @@ export function RealDataFactorySimulation() {
             return order
           })
 
+          // Include ALL orders (active + waiting in PreAcceptanceQueue) for visualization
+          const allSimulationOrders = simulationOrdersRef.current.filter(order => !order.completedAt);
+
           return (
             <AdvancedKPIDashboard
-              orders={activeOrders}
+              orders={allSimulationOrders}
               completedOrders={enrichedCompletedOrders as any}
               stations={stations}
               onClearData={handleClearAllOrders}
