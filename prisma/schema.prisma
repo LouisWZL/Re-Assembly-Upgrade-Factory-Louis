@@ -66,6 +66,7 @@ model Auftrag {
   processGraphDataBg   Json?
   processGraphDataBgt  Json?
   processSequences     Json?
+  processSequenceDurations Json?
   dispatcherOrderPreAcceptance  Int?
   dispatcherOrderPreInspection  Int?
   dispatcherOrderPostInspection Int?
@@ -288,10 +289,16 @@ model PreAcceptanceQueue {
   releaseAfterMinutes Int       @default(0) // Wait time before order can be released (simulation minutes)
   queuedAtSimMinute   Int       @default(0) // Simulation minute when queued
   releasedAtSimMinute Int?      // Simulation minute when released (null = not released yet)
+  // Hold mechanism - park orders without releasing them
+  holdUntilSimMinute  Float?    // Simulation minute until which order is on hold (null = not on hold)
+  holdReason          String?   // Reason for hold (e.g., "Capacity conflict", "Missing data")
+  holdSetAtSimMinute  Float?    // Simulation minute when hold was set
+  holdCount           Int       @default(0) // Number of times this order has been held
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
   @@index([processingOrder, queuedAtSimMinute])
+  @@index([holdUntilSimMinute])
 }
 
 model PreInspectionQueue {
@@ -304,10 +311,16 @@ model PreInspectionQueue {
   releaseAfterMinutes Int       @default(0)
   queuedAtSimMinute   Int       @default(0)
   releasedAtSimMinute Int?
+  // Hold mechanism - park orders without releasing them
+  holdUntilSimMinute  Float?    // Simulation minute until which order is on hold (null = not on hold)
+  holdReason          String?   // Reason for hold (e.g., "Capacity conflict", "Missing data")
+  holdSetAtSimMinute  Float?    // Simulation minute when hold was set
+  holdCount           Int       @default(0) // Number of times this order has been held
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
   @@index([processingOrder, queuedAtSimMinute])
+  @@index([holdUntilSimMinute])
 }
 
 model PostInspectionQueue {
@@ -320,10 +333,16 @@ model PostInspectionQueue {
   releaseAfterMinutes Int       @default(0)
   queuedAtSimMinute   Int       @default(0)
   releasedAtSimMinute Int?
+  // Hold mechanism - park orders without releasing them
+  holdUntilSimMinute  Float?    // Simulation minute until which order is on hold (null = not on hold)
+  holdReason          String?   // Reason for hold (e.g., "Capacity conflict", "Missing data")
+  holdSetAtSimMinute  Float?    // Simulation minute when hold was set
+  holdCount           Int       @default(0) // Number of times this order has been held
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
   @@index([processingOrder, queuedAtSimMinute])
+  @@index([holdUntilSimMinute])
 }
 
 // Algorithm Bundle - Configurable PAP/PIP/PIPO script combinations

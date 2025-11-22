@@ -241,6 +241,12 @@ const createInitialSchedulingHistory = (): SchedulingHistory => ({
   pipo: [],
 })
 
+const DIAG_SEVERITY_ICONS: Record<'error' | 'warn' | 'info', string> = {
+  error: '❌',
+  warn: '⚠️',
+  info: 'ℹ️',
+}
+
 export function RealDataFactorySimulation() {
   const { activeFactory } = useFactory();
   const { 
@@ -2844,6 +2850,174 @@ export function RealDataFactorySimulation() {
     updateFlowDiagram();
   };
 
+  const queueDiagnostics = useMemo(() => {
+    const simNow = getSimMinutes()
+    const simOrders = simulationOrdersRef.current
+    const activeIdSet = new Set(activeOrders.map(order => order.id))
+    let completedLocal = 0
+    let bufferedOnly = 0
+    simOrders.forEach(order => {
+      if (order.completedAt) {
+        completedLocal += 1
+      } else if (!activeIdSet.has(order.id)) {
+        bufferedOnly += 1
+      }
+    })
+
+    const queueInfo = queueDebugInfo
+    const preAccCount = queueInfo?.preAcceptanceCount ?? 0
+    const preAccReady = queueInfo?.preAcceptanceReady ?? 0
+    const preInspCount = queueInfo?.preInspectionCount ?? 0
+    const preInspReady = queueInfo?.preInspectionReady ?? 0
+    const postInspCount = queueInfo?.postInspectionCount ?? 0
+    const postInspReady = queueInfo?.postInspectionReady ?? 0
+    const dbQueueTotal = preAccCount + preInspCount + postInspCount
+    const releaseMinutes = queueInfo?.config?.preAcceptanceReleaseMinutes ?? 0
+    const lastPreAccRelease =
+      queueInfo?.lastRelease?.queue === 'PreAcceptance'
+        ? queueInfo.lastRelease.simTime
+        : null
+    const releaseLag =
+      typeof lastPreAccRelease === 'number' ? Math.max(0, simNow - lastPreAccRelease) : null
+
+    const papRuns = schedulingStats.pap.runs
+    const papLastRun =
+      typeof schedulingStats.pap.lastRun === 'number' ? schedulingStats.pap.lastRun : null
+    const papRunLag =
+      typeof papLastRun === 'number' ? Math.max(0, simNow - papLastRun) : null
+
+    const rawAutoLag = autoGenerateOrders
+      ? simNow - (lastAutoGenerateTimeRef.current ?? 0)
+      : null
+    const autoLag =
+      typeof rawAutoLag === 'number' ? Math.max(0, Math.round(rawAutoLag)) : null
+
+    const findings: Array<{ severity: 'error' | 'warn' | 'info'; title: string; detail: string }> = []
+
+    if (!queueInfo) {
+      findings.push({
+        severity: 'info',
+        title: 'Queue-Daten fehlen',
+        detail: 'getQueueStatus() wartet noch auf den ersten Tick – Queue Monitor zeigt daher nichts.',
+      })
+    } else {
+      if (bufferedOnly > 0 && dbQueueTotal === 0) {
+        findings.push({
+          severity: 'error',
+          title: 'Aufträge nicht in DB-Queue',
+          detail: `${bufferedOnly} neue Aufträge existieren nur lokal im Simulation-Puffer, PreAcceptanceQueue ist leer.`,
+        })
+      }
+
+      if (preAccCount > 0 && preAccReady === 0) {
+        findings.push({
+          severity: 'info',
+          title: 'Release-Zeitfenster aktiv',
+          detail: `PAP hält ${preAccCount} Auftrag(e) zurück, aber keiner gilt als ready (Release-Delay ${releaseMinutes} min).`,
+        })
+      }
+
+      if (preAccReady > 0 && (releaseLag ?? 0) > Math.max(10, releaseMinutes * 2)) {
+        findings.push({
+          severity: 'warn',
+          title: 'Ready-Aufträge ohne Freigabe',
+          detail: `${preAccReady} Auftrag(e) sind freigabebereit, letzter Release liegt ${releaseLag} min zurück.`,
+        })
+      }
+
+      if (preAccCount > 0 && papRuns === 0) {
+        findings.push({
+          severity: 'error',
+          title: 'PAP nie gestartet',
+          detail: 'checkAndReleaseBatch("preAcceptance") hat runPapStage noch nicht ausgelöst – SchedulingLog bleibt leer.',
+        })
+      } else if (
+        preAccCount > 0 &&
+        papRunLag !== null &&
+        papRunLag > Math.max(10, releaseMinutes * 2, autoGenerateIntervalMinutes * 2)
+      ) {
+        findings.push({
+          severity: 'warn',
+          title: 'PAP-Lauf zu alt',
+          detail: `Letzter PAP-Lauf ist ${papRunLag} min her, obwohl ${preAccCount} Auftrag(e) im PAP warten.`,
+        })
+      }
+
+      if (
+        autoGenerateOrders &&
+        autoLag !== null &&
+        autoLag > autoGenerateIntervalMinutes * 2
+      ) {
+        findings.push({
+          severity: 'warn',
+          title: 'Auto-Generate verzögert',
+          detail: `Letzter Auto-Auftrag vor ${autoLag} min (Intervall ${autoGenerateIntervalMinutes} min).`,
+        })
+      }
+    }
+
+    return {
+      simNow,
+      counts: {
+        totalSimOrders: simOrders.length,
+        bufferedOnly,
+        active: activeOrders.length,
+        completed: completedLocal,
+        preAccCount,
+        preAccReady,
+        preInspCount,
+        preInspReady,
+        postInspCount,
+        postInspReady,
+        dbQueueTotal,
+      },
+      auto: {
+        enabled: autoGenerateOrders,
+        interval: autoGenerateIntervalMinutes,
+        lagMinutes: autoLag,
+        lastGeneratedSim: autoGenerateOrders ? lastAutoGenerateTimeRef.current : null,
+      },
+      scheduling: {
+        papRuns,
+        papLastRun,
+        papRunLag,
+      },
+      release: {
+        delayMinutes: releaseMinutes,
+        lastPreAccReleaseSim: lastPreAccRelease,
+        lastPreAccReleaseLag: releaseLag,
+      },
+      findings,
+    }
+  }, [
+    queueDebugInfo,
+    schedulingStats,
+    autoGenerateOrders,
+    autoGenerateIntervalMinutes,
+    activeOrders,
+    debugRefreshKey,
+    getSimMinutes,
+  ])
+
+  const autoLagText = queueDiagnostics.auto.lagMinutes != null
+    ? `${queueDiagnostics.auto.lagMinutes} min seit letztem Auftrag`
+    : 'noch kein Auto-Order'
+  const autoStatusText = queueDiagnostics.auto.enabled
+    ? `AKTIV • Intervall ${queueDiagnostics.auto.interval} min • ${autoLagText}`
+    : 'Deaktiviert'
+  const autoStatusClass = queueDiagnostics.auto.enabled
+    ? queueDiagnostics.auto.lagMinutes != null &&
+      queueDiagnostics.auto.lagMinutes > queueDiagnostics.auto.interval * 2
+        ? 'text-orange-700 font-semibold'
+        : 'text-green-700 font-semibold'
+    : 'text-gray-500'
+  const papLastRunText = queueDiagnostics.scheduling.papLastRun != null
+    ? `t=${queueDiagnostics.scheduling.papLastRun} min (Δ ${queueDiagnostics.scheduling.papRunLag ?? 0} min)`
+    : 'Noch kein Lauf'
+  const releaseInfoText = queueDiagnostics.release.lastPreAccReleaseSim != null
+    ? `t=${queueDiagnostics.release.lastPreAccReleaseSim} min (Δ ${queueDiagnostics.release.lastPreAccReleaseLag ?? 0} min)`
+    : 'Noch kein Release aufgezeichnet'
+
   // Calculate enriched metrics from Gantt Chart
   const enrichedCompletedOrdersWithMetrics = useMemo(() => {
     const events = [...simEventsRef.current]
@@ -4672,6 +4846,51 @@ export function RealDataFactorySimulation() {
 
                 {showDebugInfo && (
                   <div className="space-y-3">
+                    {/* Queue Diagnostics */}
+                    <div className="mb-3 border-2 border-red-600 bg-red-50 p-3 rounded">
+                      <div className="text-sm font-bold text-red-900 mb-2">
+                        🧪 Queue Diagnostics (PAP-Pipeline)
+                      </div>
+                      <div className="text-xs text-red-900 space-y-2 bg-white p-2 rounded">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">Auto-Generate</span>
+                          <span className={autoStatusClass}>{autoStatusText}</span>
+                        </div>
+                        <div className="text-[11px]">
+                          <strong>Simulation:</strong> {queueDiagnostics.counts.totalSimOrders} gesamt • {queueDiagnostics.counts.bufferedOnly} nur im Sim-Puffer • {queueDiagnostics.counts.active} aktiv • {queueDiagnostics.counts.completed} abgeschlossen
+                        </div>
+                        <div className="text-[11px]">
+                          <strong>DB-Queues:</strong> PAP {queueDiagnostics.counts.preAccCount} ({queueDiagnostics.counts.preAccReady} ready) | PIP {queueDiagnostics.counts.preInspCount} ({queueDiagnostics.counts.preInspReady} ready) | PIPo {queueDiagnostics.counts.postInspCount} ({queueDiagnostics.counts.postInspReady} ready)
+                        </div>
+                        <div className="text-[11px]">
+                          <strong>PAP Runs:</strong> {queueDiagnostics.scheduling.papRuns} • {papLastRunText}
+                        </div>
+                        <div className="text-[11px]">
+                          <strong>Letzter PAP-Release:</strong> {releaseInfoText}
+                        </div>
+                      </div>
+                      <div className="mt-2">
+                        <div className="text-[10px] font-semibold text-red-900 uppercase tracking-wide mb-1">
+                          Findings
+                        </div>
+                        {queueDiagnostics.findings.length > 0 ? (
+                          <ul className="space-y-1 text-[11px] text-red-900">
+                            {queueDiagnostics.findings.map((finding, idx) => (
+                              <li key={`${finding.title}-${idx}`} className="flex gap-2">
+                                <span>{DIAG_SEVERITY_ICONS[finding.severity]}</span>
+                                <span>
+                                  <span className="font-semibold">{finding.title}:</span> {finding.detail}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <div className="text-[11px] text-green-700">
+                            ✅ Keine Auffälligkeiten – PAP, Queues und Monitor sind synchron.
+                          </div>
+                        )}
+                      </div>
+                    </div>
 
                 {/* Queue Status - GANZ OBEN */}
                 <div className="mb-3 border-2 border-green-600 bg-green-50 p-3 rounded">

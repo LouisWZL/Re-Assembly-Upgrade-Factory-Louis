@@ -1,5 +1,6 @@
 import path from 'path'
 import type {
+  FactoryCapacity,
   FactoryEnv,
   OperationBlock,
   Plan,
@@ -7,6 +8,7 @@ import type {
 } from '../types'
 import { runPythonOperator } from '../python-runner'
 import type { Pools } from '../pools'
+import type { ReassemblyFactory } from '@prisma/client'
 
 interface PythonPipoOrder {
   orderId: string
@@ -17,7 +19,9 @@ interface PythonPipoOrder {
 interface PythonPipoPayload {
   startTime: number
   orders: PythonPipoOrder[]
-  config: Record<string, unknown>
+  config: Record<string, unknown> & {
+    factoryCapacity?: FactoryCapacity
+  }
 }
 
 interface PythonPipoResult {
@@ -29,7 +33,7 @@ interface PythonPipoResult {
 
 const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'Ansatz_Becker_Feinterminierung.py')
 
-function buildPayload(pools: Pools, factory: FactoryEnv, config: SchedulingConfig): PythonPipoPayload {
+function buildPayload(pools: Pools, factoryEnv: FactoryEnv, config: SchedulingConfig, factory: ReassemblyFactory): PythonPipoPayload {
   const orders = pools.getSnapshot('pipo').map((record) => ({
     orderId: record.oid,
     dueDate: record.meta?.dueDate ? Number(record.meta.dueDate) : undefined,
@@ -43,7 +47,7 @@ function buildPayload(pools: Pools, factory: FactoryEnv, config: SchedulingConfi
   }))
 
   return {
-    startTime: factory.simTime,
+    startTime: factoryEnv.simTime,
     orders,
     config: {
       weights: config.meta?.pipoWeights ?? {
@@ -51,16 +55,26 @@ function buildPayload(pools: Pools, factory: FactoryEnv, config: SchedulingConfi
         tardiness: 0.4,
         setupPenalty: 0.2,
       },
+      factoryCapacity: {
+        montageStationen: factory.anzahlMontagestationen,
+        demontageStationen: 5, // Not yet stored in DB - using default
+        flexibel: false, // Not yet stored in DB - using default
+        defaultDemontagezeit: factory.defaultDemontagezeit,
+        defaultMontagezeit: factory.defaultMontagezeit,
+        schichtmodell: factory.schichtmodell,
+        kapazitaet: factory.kapazität,
+      },
     },
   }
 }
 
 export async function runPIPoFineTermMOAHS(
   pools: Pools,
-  factory: FactoryEnv,
-  config: SchedulingConfig
+  factoryEnv: FactoryEnv,
+  config: SchedulingConfig,
+  factory: ReassemblyFactory
 ): Promise<PythonPipoResult & { _scriptExecution?: { scriptPath: string; startTime: number; endTime: number; status: string } }> {
-  const payload = buildPayload(pools, factory, config)
+  const payload = buildPayload(pools, factoryEnv, config, factory)
 
   const scriptPath = config.meta?.pipoScriptPath
     ? String(config.meta.pipoScriptPath)

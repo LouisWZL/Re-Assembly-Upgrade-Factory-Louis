@@ -1,7 +1,8 @@
 import path from 'path'
 import type { Pools } from '../pools'
-import type { Batch, EtaPrediction, SchedulingConfig } from '../types'
+import type { Batch, EtaPrediction, SchedulingConfig, FactoryCapacity } from '../types'
 import { runPythonOperator } from '../python-runner'
+import type { ReassemblyFactory } from '@prisma/client'
 
 interface PythonPapOrder {
   orderId: string
@@ -10,12 +11,17 @@ interface PythonPapOrder {
   processTimeDem?: number
   processTimeMon?: number
   priorityHint?: number
+  baugruppen?: unknown  // Process sequences for components
+  baugruppentypen?: unknown  // Process sequences for component types
 }
 
 interface PythonPapPayload {
   now: number
   orders: PythonPapOrder[]
-  config: Record<string, unknown>
+  config: Record<string, unknown> & {
+    factoryCapacity?: FactoryCapacity
+  }
+  processSequences?: Record<string, unknown>
 }
 
 interface PythonPapResult {
@@ -26,16 +32,28 @@ interface PythonPapResult {
 
 const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'pap.py')
 
-function buildPayload(pools: Pools, now: number, config: SchedulingConfig): PythonPapPayload {
+function buildPayload(pools: Pools, now: number, config: SchedulingConfig, factory: ReassemblyFactory): PythonPapPayload {
   const records = pools.getSnapshot('pap')
-  const orders: PythonPapOrder[] = records.map((record) => ({
-    orderId: record.oid,
-    createdAt: record.meta?.createdAt ? Number(record.meta.createdAt) : undefined,
-    dueDate: record.meta?.dueDate ? Number(record.meta.dueDate) : undefined,
-    processTimeDem: record.demOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
-    processTimeMon: record.monOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
-    priorityHint: record.priorityScore,
-  }))
+  const processSequencesMap: Record<string, unknown> = {}
+  const orders: PythonPapOrder[] = records.map((record) => {
+    const processSeqs = record.processSequences as any
+    if (record.oid && processSeqs) {
+      processSequencesMap[record.oid] = processSeqs
+    }
+    const baugruppen = processSeqs?.baugruppen
+    const baugruppentypen = processSeqs?.baugruppentypen
+
+    return {
+      orderId: record.oid,
+      createdAt: record.meta?.createdAt ? Number(record.meta.createdAt) : undefined,
+      dueDate: record.meta?.dueDate ? Number(record.meta.dueDate) : undefined,
+      processTimeDem: record.demOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
+      processTimeMon: record.monOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
+      priorityHint: record.priorityScore,
+      baugruppen,
+      baugruppentypen,
+    }
+  })
 
   return {
     now,
@@ -45,16 +63,27 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig): Pyth
       qMax: config.batchPolicy?.qMax ?? 7,
       intervalMinutes: config.schedIntervalMinutes,
       lambda: config.meta?.poissonLambda ?? 4,
+      factoryCapacity: {
+        montageStationen: factory.anzahlMontagestationen,
+        demontageStationen: 5, // Not yet stored in DB - using default
+        flexibel: false, // Not yet stored in DB - using default
+        defaultDemontagezeit: factory.defaultDemontagezeit,
+        defaultMontagezeit: factory.defaultMontagezeit,
+        schichtmodell: factory.schichtmodell,
+        kapazitaet: factory.kapazität,
+      },
     },
+    processSequences: Object.keys(processSequencesMap).length ? processSequencesMap : undefined,
   }
 }
 
 export async function runPAPForecastAndBatch(
   pools: Pools,
   now: number,
-  config: SchedulingConfig
+  config: SchedulingConfig,
+  factory: ReassemblyFactory
 ): Promise<PythonPapResult & { _scriptExecution?: { scriptPath: string; startTime: number; endTime: number; status: string } }> {
-  const payload = buildPayload(pools, now, config)
+  const payload = buildPayload(pools, now, config, factory)
 
   const scriptPath = config.meta?.papScriptPath
     ? String(config.meta.papScriptPath)

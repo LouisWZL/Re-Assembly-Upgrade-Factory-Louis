@@ -18,6 +18,302 @@ type VariantenTyp = 'basic' | 'premium'
 import { initializeCustomers, getRandomKunde } from './kunde.actions'
 import { createOrderGraphFromProduct, getConstrainedZustand, findCompatibleReplacementBaugruppe, transformProcessGraphToOrderGraph, generateProcessSequences } from '@/lib/order-graph-utils'
 
+type SequenceDefinition = {
+  id: string
+  steps: string[]
+  totalSteps: number
+  demontageSteps: number
+  remontageSteps: number
+}
+
+type SequenceCollection = {
+  sequences: SequenceDefinition[]
+}
+
+type BaugruppeInstanceWithDurations = {
+  id: string
+  baugruppeId: string
+  austauschBaugruppeId?: string | null
+  baugruppe: {
+    id: string
+    bezeichnung: string
+    demontagezeit?: number | null
+    montagezeit?: number | null
+    baugruppentyp?: { bezeichnung: string } | null
+  }
+  austauschBaugruppe?: {
+    id: string
+    bezeichnung: string
+    demontagezeit?: number | null
+    montagezeit?: number | null
+    baugruppentyp?: { bezeichnung: string } | null
+  } | null
+}
+
+type DurationDefaults = {
+  demontage: number
+  montage: number
+}
+
+type SequenceTimingStep = {
+  label: string
+  duration: number
+  stage: 'demontage' | 'remontage'
+  baugruppeId?: string
+  baugruppenInstanceId?: string
+  baugruppentyp?: string | null
+  usesReplacement?: boolean
+  fallback: boolean
+}
+
+type SequenceTimingEntry = {
+  id: string
+  demontage: SequenceTimingStep[]
+  remontage: SequenceTimingStep[]
+  totals: {
+    demontage: number
+    remontage: number
+  }
+  meta: {
+    totalSteps: number
+    demontageSteps: number
+    remontageSteps: number
+  }
+}
+
+type ProcessSequenceDurationsPayload = {
+  baugruppen: { sequences: SequenceTimingEntry[] }
+  baugruppentypen: { sequences: SequenceTimingEntry[] }
+}
+
+type InstanceDurationProfile = {
+  keyLabel: string
+  typeLabel: string | null
+  baugruppeId: string
+  baugruppenInstanceId: string
+  demDuration: number
+  demUsedFallback: boolean
+  montageDurationOriginal: number
+  montageOriginalUsedFallback: boolean
+  montageDurationReplacement: number
+  montageReplacementUsedFallback: boolean
+  usesReplacement: boolean
+}
+
+const STEP_SEPARATOR = '×'
+const STEP_INSPECTION = 'I'
+const STEP_QUALITY = 'Q'
+
+function resolveDuration(value: number | null | undefined, fallback: number) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return { duration: value, usedFallback: false }
+  }
+  return { duration: fallback, usedFallback: true }
+}
+
+function buildInstanceProfiles(
+  instances: BaugruppeInstanceWithDurations[],
+  defaults: DurationDefaults
+): InstanceDurationProfile[] {
+  return instances.map((instance) => {
+    const label = (instance.baugruppe?.bezeichnung ?? '').trim() || instance.id
+    const typeLabel = instance.baugruppe?.baugruppentyp?.bezeichnung?.trim() || null
+    const dem = resolveDuration(instance.baugruppe?.demontagezeit, defaults.demontage)
+    const montageOriginal = resolveDuration(instance.baugruppe?.montagezeit, defaults.montage)
+    const replacementBase = instance.austauschBaugruppe?.montagezeit ?? instance.baugruppe?.montagezeit
+    const montageReplacement = resolveDuration(replacementBase, defaults.montage)
+
+    return {
+      keyLabel: label,
+      typeLabel,
+      baugruppeId: instance.baugruppe?.id ?? instance.baugruppeId,
+      baugruppenInstanceId: instance.id,
+      demDuration: dem.duration,
+      demUsedFallback: dem.usedFallback,
+      montageDurationOriginal: montageOriginal.duration,
+      montageOriginalUsedFallback: montageOriginal.usedFallback,
+      montageDurationReplacement: montageReplacement.duration,
+      montageReplacementUsedFallback: montageReplacement.usedFallback,
+      usesReplacement: Boolean(instance.austauschBaugruppeId),
+    }
+  })
+}
+
+function groupProfilesByKey(
+  profiles: InstanceDurationProfile[],
+  selector: (profile: InstanceDurationProfile) => string | null
+) {
+  const map = new Map<string, InstanceDurationProfile[]>()
+  profiles.forEach((profile) => {
+    const key = selector(profile)
+    if (!key) return
+    if (!map.has(key)) {
+      map.set(key, [])
+    }
+    map.get(key)!.push(profile)
+  })
+
+  map.forEach((list) => list.sort((a, b) => a.baugruppenInstanceId.localeCompare(b.baugruppenInstanceId)))
+  return map
+}
+
+function clonePool(base: Map<string, InstanceDurationProfile[]>) {
+  const pool = new Map<string, InstanceDurationProfile[]>()
+  base.forEach((list, key) => {
+    pool.set(key, [...list])
+  })
+  return pool
+}
+
+function takeProfileForStep(pool: Map<string, InstanceDurationProfile[]>, label: string) {
+  const bucket = pool.get(label)
+  if (bucket && bucket.length > 0) {
+    return bucket.shift() ?? null
+  }
+  return null
+}
+
+function pushAssignedProfile(
+  target: Map<string, InstanceDurationProfile[]>,
+  label: string,
+  profile: InstanceDurationProfile | null
+) {
+  if (!profile) return
+  if (!target.has(label)) {
+    target.set(label, [])
+  }
+  target.get(label)!.push(profile)
+}
+
+function popAssignedProfile(target: Map<string, InstanceDurationProfile[]>, label: string) {
+  const stack = target.get(label)
+  if (!stack || stack.length === 0) return null
+  return stack.pop() ?? null
+}
+
+function buildStepPayload(
+  label: string,
+  stage: 'demontage' | 'remontage',
+  profile: InstanceDurationProfile | null,
+  defaults: DurationDefaults
+): SequenceTimingStep {
+  if (!profile) {
+    return {
+      label,
+      duration: stage === 'demontage' ? defaults.demontage : defaults.montage,
+      stage,
+      fallback: true,
+    }
+  }
+
+  const usesReplacement = stage === 'remontage' && profile.usesReplacement
+  const duration =
+    stage === 'demontage'
+      ? profile.demDuration
+      : usesReplacement
+      ? profile.montageDurationReplacement
+      : profile.montageDurationOriginal
+  const fallback =
+    stage === 'demontage'
+      ? profile.demUsedFallback
+      : usesReplacement
+      ? profile.montageReplacementUsedFallback
+      : profile.montageOriginalUsedFallback
+
+  return {
+    label,
+    duration,
+    stage,
+    baugruppeId: profile.baugruppeId,
+    baugruppenInstanceId: profile.baugruppenInstanceId,
+    baugruppentyp: profile.typeLabel,
+    usesReplacement,
+    fallback,
+  }
+}
+
+function buildSequenceTimingEntries(
+  sequences: SequenceDefinition[],
+  baseMap: Map<string, InstanceDurationProfile[]>,
+  defaults: DurationDefaults
+): SequenceTimingEntry[] {
+  return sequences.map((sequence) => {
+    const pool = clonePool(baseMap)
+    const assigned = new Map<string, InstanceDurationProfile[]>()
+    const demontageSteps: SequenceTimingStep[] = []
+    const remontageSteps: SequenceTimingStep[] = []
+    let stage: 'demontage' | 'remontage' = 'demontage'
+
+    sequence.steps.forEach((rawStep) => {
+      const trimmed = rawStep?.trim()
+      if (!trimmed) {
+        return
+      }
+      if (trimmed === STEP_INSPECTION || trimmed === STEP_QUALITY) {
+        return
+      }
+      if (trimmed === STEP_SEPARATOR) {
+        stage = 'remontage'
+        return
+      }
+
+      if (stage === 'demontage') {
+        const profile = takeProfileForStep(pool, trimmed) ?? null
+        if (profile) {
+          pushAssignedProfile(assigned, trimmed, profile)
+        }
+        demontageSteps.push(buildStepPayload(trimmed, 'demontage', profile, defaults))
+      } else {
+        let profile = popAssignedProfile(assigned, trimmed)
+        if (!profile) {
+          profile = takeProfileForStep(pool, trimmed)
+        }
+        remontageSteps.push(buildStepPayload(trimmed, 'remontage', profile, defaults))
+      }
+    })
+
+    const demTotal = demontageSteps.reduce((sum, step) => sum + step.duration, 0)
+    const remTotal = remontageSteps.reduce((sum, step) => sum + step.duration, 0)
+
+    return {
+      id: sequence.id,
+      demontage: demontageSteps,
+      remontage: remontageSteps,
+      totals: {
+        demontage: demTotal,
+        remontage: remTotal,
+      },
+      meta: {
+        totalSteps: sequence.totalSteps,
+        demontageSteps: sequence.demontageSteps,
+        remontageSteps: sequence.remontageSteps,
+      },
+    }
+  })
+}
+
+function buildProcessSequenceDurationsPayload(
+  sequences: {
+    baugruppen?: SequenceCollection
+    baugruppentypen?: SequenceCollection
+  },
+  instances: BaugruppeInstanceWithDurations[],
+  defaults: DurationDefaults
+): ProcessSequenceDurationsPayload {
+  const profiles = buildInstanceProfiles(instances, defaults)
+  const labelMap = groupProfilesByKey(profiles, (profile) => profile.keyLabel)
+  const typeMap = groupProfilesByKey(profiles, (profile) => profile.typeLabel ?? profile.keyLabel)
+
+  return {
+    baugruppen: {
+      sequences: buildSequenceTimingEntries(sequences.baugruppen?.sequences ?? [], labelMap, defaults),
+    },
+    baugruppentypen: {
+      sequences: buildSequenceTimingEntries(sequences.baugruppentypen?.sequences ?? [], typeMap, defaults),
+    },
+  }
+}
+
 /**
  * Get all orders for a factory (optimized for sidebar display)
  */
@@ -351,13 +647,26 @@ async function createSingleOrder(
           baugruppentypen: baugruppentypSequences
         }
 
+        const processSequenceDurations = buildProcessSequenceDurationsPayload(
+          {
+            baugruppen: baugruppenSequences,
+            baugruppentypen: baugruppentypSequences
+          },
+          fullBaugruppenInstances as unknown as BaugruppeInstanceWithDurations[],
+          {
+            demontage: factory.defaultDemontagezeit || 30,
+            montage: factory.defaultMontagezeit || 45
+          }
+        )
+
         // Update the order with both process graphs and sequences
         await tx.auftrag.update({
           where: { id: newAuftrag.id },
           data: { 
             processGraphDataBg: processGraphDataBg as any,
             processGraphDataBgt: processGraphDataBgt as any,
-            processSequences: processSequences as any
+            processSequences: processSequences as any,
+            processSequenceDurations: processSequenceDurations as any
           }
         })
       }

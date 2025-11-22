@@ -51,6 +51,13 @@ export function SiteHeader({ onSimulationUpdate }: SiteHeaderProps) {
   const [hasStarted, setHasStarted] = useState(false)
   const [minThreshold, setMinThreshold] = useState(30) // Minimum-Schwelle für Auto-Aufträge
   const [batchSize, setBatchSize] = useState(20) // Batch-Größe für Auto-Aufträge
+  // Legacy algorithm selection UI (currently hidden) needs placeholder state to satisfy TypeScript
+  const [auftragsabwicklungIndex, setAuftragsabwicklungIndex] = useState(0)
+  const [terminierungIndex, setTerminierungIndex] = useState(0)
+  const [beschaffungIndex, setBeschaffungIndex] = useState(0)
+  const auftragsabwicklungAlgorithmen: Array<{ name: string }> = []
+  const terminierungAlgorithmen: Array<{ name: string }> = []
+  const beschaffungAlgorithmen: Array<{ name: string }> = []
   const { activeFactory } = useFactory()
   const pathname = usePathname()
   const isConfigurator = pathname.startsWith('/factory-configurator/')

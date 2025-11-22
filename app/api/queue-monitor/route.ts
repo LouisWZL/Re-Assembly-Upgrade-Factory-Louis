@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 
+export const dynamic = 'force-dynamic'
+
 type QueueStage = 'pap' | 'pip' | 'pipo'
 
 export async function GET(request: Request) {

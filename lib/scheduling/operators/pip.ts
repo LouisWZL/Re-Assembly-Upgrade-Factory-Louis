@@ -1,6 +1,7 @@
 import path from 'path'
 import type {
   Batch,
+  FactoryCapacity,
   FactoryEnv,
   PriorityEntry,
   RoutePlan,
@@ -8,6 +9,7 @@ import type {
 } from '../types'
 import { runPythonOperator } from '../python-runner'
 import type { Pools } from '../pools'
+import type { ReassemblyFactory } from '@prisma/client'
 
 interface PythonPipOrder {
   orderId: string
@@ -23,7 +25,9 @@ interface PythonPipOrder {
 interface PythonPipPayload {
   now: number
   orders: PythonPipOrder[]
-  config: Record<string, unknown>
+  config: Record<string, unknown> & {
+    factoryCapacity?: FactoryCapacity
+  }
 }
 
 interface PythonPipResult {
@@ -36,7 +40,7 @@ interface PythonPipResult {
 
 const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'pip.py')
 
-function buildPayload(pools: Pools, now: number, config: SchedulingConfig): PythonPipPayload {
+function buildPayload(pools: Pools, now: number, config: SchedulingConfig, factory: ReassemblyFactory): PythonPipPayload {
   const records = pools.getSnapshot('pip')
   const orders: PythonPipOrder[] = records.map((record) => ({
     orderId: record.oid,
@@ -58,16 +62,26 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig): Pyth
       horizonMinutes: config.batchPolicy?.horizonMinutes ?? 240,
       tardinessWeight: config.tardinessWeight ?? 1.0,
       varianceWeight: config.varianceWeight ?? 0.1,
+      factoryCapacity: {
+        montageStationen: factory.anzahlMontagestationen,
+        demontageStationen: 5, // Not yet stored in DB - using default
+        flexibel: false, // Not yet stored in DB - using default
+        defaultDemontagezeit: factory.defaultDemontagezeit,
+        defaultMontagezeit: factory.defaultMontagezeit,
+        schichtmodell: factory.schichtmodell,
+        kapazitaet: factory.kapazität,
+      },
     },
   }
 }
 
 export async function runPIPIntegrated(
   pools: Pools,
-  factory: FactoryEnv,
-  config: SchedulingConfig
+  factoryEnv: FactoryEnv,
+  config: SchedulingConfig,
+  factory: ReassemblyFactory
 ): Promise<PythonPipResult & { _scriptExecution?: { scriptPath: string; startTime: number; endTime: number; status: string } }> {
-  const payload = buildPayload(pools, factory.simTime, config)
+  const payload = buildPayload(pools, factoryEnv.simTime, config, factory)
 
   const scriptPath = config.meta?.pipScriptPath
     ? String(config.meta.pipScriptPath)

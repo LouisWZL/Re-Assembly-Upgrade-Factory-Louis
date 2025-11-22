@@ -122,7 +122,7 @@ export async function enqueueOrder(
     // Get or create queue config for this factory
     let queueConfig = order.factory.queueConfig
     if (!queueConfig) {
-      queueConfig = await prisma.queueConfig.create({
+      await prisma.queueConfig.create({
         data: {
           factoryId: order.factoryId,
           preAcceptanceReleaseMinutes: 0,
@@ -130,6 +130,17 @@ export async function enqueueOrder(
           postInspectionReleaseMinutes: 0
         }
       })
+      queueConfig = await prisma.queueConfig.findUnique({
+        where: { factoryId: order.factoryId },
+        include: { algorithmBundle: true },
+      })
+    }
+
+    if (!queueConfig) {
+      return {
+        success: false,
+        error: 'Queue configuration unavailable',
+      }
     }
 
     // Determine release time based on queue type
@@ -264,7 +275,7 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
     let scheduling: any = null
     try {
       if (queue === 'preAcceptance') {
-        scheduling = await runPapStage(factoryId)
+        scheduling = await runPapStage(factoryId, currentSimMinute)
       } else if (queue === 'preInspection') {
         scheduling = await runPipStage(factoryId)
       } else {
@@ -333,6 +344,9 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
       ? stageEntries.map((entry: any) => String(entry.orderId)).slice(0, 10)
       : [String(firstEntry.orderId)]
 
+    const reorderCount =
+      stageEntries.length && stageEntries[0]?.orderId !== firstEntry.orderId ? 1 : 0
+
     let pythonDiffCount = reorderCount
     if (pythonReleaseList && pythonReleaseList.length > 0 && orderSequence.length > 0) {
       const compareLength = Math.min(orderSequence.length, pythonReleaseList.length)
@@ -349,7 +363,7 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
       stage: queue,
       queueSize: stageEntries.length || 1,
       releasedCount: 1,
-      reorderCount: stageEntries.length ? (stageEntries[0]?.orderId !== firstEntry.orderId ? 1 : 0) : 0,
+      reorderCount,
       batchCount: scheduling?.result?.batches?.length ?? 0,
       releaseListCount: pythonReleaseList?.length ?? 0,
       orderSequence,
@@ -842,10 +856,10 @@ export async function checkAndReleaseBatch(
       }
     }
 
-    // BATCH RELEASE TIME! Get all unreleased orders
-    let entries: any[]
+    // BATCH RELEASE TIME! Get all unreleased orders (including those on hold)
+    let allEntries: any[]
     if (queue === 'preAcceptance') {
-      entries = await prisma.preAcceptanceQueue.findMany({
+      allEntries = await prisma.preAcceptanceQueue.findMany({
         where: { releasedAtSimMinute: null },
         orderBy: [
           { processingOrder: 'asc' },
@@ -854,7 +868,7 @@ export async function checkAndReleaseBatch(
         include: { order: true }
       })
     } else if (queue === 'preInspection') {
-      entries = await prisma.preInspectionQueue.findMany({
+      allEntries = await prisma.preInspectionQueue.findMany({
         where: { releasedAtSimMinute: null },
         orderBy: [
           { processingOrder: 'asc' },
@@ -863,7 +877,7 @@ export async function checkAndReleaseBatch(
         include: { order: true }
       })
     } else {
-      entries = await prisma.postInspectionQueue.findMany({
+      allEntries = await prisma.postInspectionQueue.findMany({
         where: { releasedAtSimMinute: null },
         orderBy: [
           { processingOrder: 'asc' },
@@ -871,6 +885,42 @@ export async function checkAndReleaseBatch(
         ],
         include: { order: true }
       })
+    }
+
+    // Filter out orders that are on hold (hold not expired yet)
+    // Also clear holds that have expired
+    const entries: any[] = []
+    const onHoldEntries: any[] = []
+    const expiredHoldEntries: any[] = []
+
+    for (const entry of allEntries) {
+      if (entry.holdUntilSimMinute !== null && entry.holdUntilSimMinute !== undefined) {
+        if (currentSimMinute < entry.holdUntilSimMinute) {
+          // Hold is still active - skip this order
+          onHoldEntries.push(entry)
+          continue
+        } else {
+          // Hold has expired - clear it and include order for release
+          expiredHoldEntries.push(entry)
+          await clearQueueHold(queue, entry.orderId)
+        }
+      }
+      // Order is not on hold (or hold just expired) - can be released
+      entries.push(entry)
+    }
+
+    if (expiredHoldEntries.length > 0) {
+      console.log(`🔓 [Hold] Cleared ${expiredHoldEntries.length} expired holds in ${queue} at t=${currentSimMinute}`)
+    }
+
+    if (onHoldEntries.length > 0) {
+      const holdPreview = onHoldEntries.slice(0, 3).map(e => ({
+        orderId: e.orderId,
+        holdUntil: e.holdUntilSimMinute,
+        reason: e.holdReason,
+        waitMinutes: e.holdUntilSimMinute - currentSimMinute
+      }))
+      console.log(`🔒 [Hold] ${onHoldEntries.length} orders on hold in ${queue}`, holdPreview)
     }
 
     if (entries.length === 0) {
@@ -898,7 +948,7 @@ export async function checkAndReleaseBatch(
 
     try {
       if (queue === 'preAcceptance') {
-        scheduling = await runPapStage(factoryId)
+        scheduling = await runPapStage(factoryId, currentSimMinute)
       } else if (queue === 'preInspection') {
         scheduling = await runPipStage(factoryId)
       } else {
@@ -1130,7 +1180,21 @@ export async function checkAndReleaseBatch(
       orderIds,
       orders: orderedEntries.map(e => e.order),
       count: orderIds.length,
-      optimized: !!scheduling
+      optimized: !!scheduling,
+      // Hold information
+      holdCount: onHoldEntries.length,
+      holdPreview: onHoldEntries.slice(0, 5).map(e => ({
+        orderId: e.orderId,
+        holdUntilSimMinute: e.holdUntilSimMinute,
+        holdReason: e.holdReason,
+        waitMinutes: e.holdUntilSimMinute - currentSimMinute,
+        timesHeld: e.holdCount ?? 0
+      })),
+      clearedHoldCount: expiredHoldEntries.length,
+      maxHoldCount: onHoldEntries.length > 0 ? Math.max(...onHoldEntries.map((e: any) => e.holdCount ?? 0)) : 0,
+      avgHoldCount: onHoldEntries.length > 0
+        ? (onHoldEntries.reduce((sum: number, e: any) => sum + (e.holdCount ?? 0), 0) / onHoldEntries.length).toFixed(1)
+        : 0
     }
   } catch (error) {
     console.error('Error releasing batch:', error)
@@ -1186,6 +1250,171 @@ export async function clearReleasedEntries(queue: QueueType) {
     return {
       success: false,
       error: 'Failed to clear released entries'
+    }
+  }
+}
+
+/**
+ * Set a hold on an order in a specific queue
+ * Prevents the order from being released until the hold expires
+ *
+ * @param queue - Queue type
+ * @param orderId - Order ID to hold
+ * @param holdUntilSimMinute - Simulation minute until which to hold the order
+ * @param holdReason - Reason for the hold
+ * @param currentSimMinute - Current simulation minute
+ */
+export async function setQueueHold(
+  queue: QueueType,
+  orderId: string,
+  holdUntilSimMinute: number,
+  holdReason: string,
+  currentSimMinute: number
+) {
+  try {
+    await ensureDatabaseInitialized()
+
+    const updateData = {
+      holdUntilSimMinute,
+      holdReason,
+      holdSetAtSimMinute: currentSimMinute,
+      holdCount: {
+        increment: 1
+      }
+    }
+
+    if (queue === 'preAcceptance') {
+      await prisma.preAcceptanceQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    } else if (queue === 'preInspection') {
+      await prisma.preInspectionQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    } else {
+      await prisma.postInspectionQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    }
+
+    console.log(`🔒 [Hold] Set hold on order ${orderId} in ${queue} until t=${holdUntilSimMinute}: ${holdReason}`)
+
+    return {
+      success: true,
+      orderId,
+      holdUntilSimMinute,
+      holdReason
+    }
+  } catch (error) {
+    console.error(`Error setting hold on order ${orderId}:`, error)
+    return {
+      success: false,
+      error: 'Failed to set hold on order'
+    }
+  }
+}
+
+/**
+ * Clear a hold on an order in a specific queue
+ * Allows the order to be released normally
+ *
+ * @param queue - Queue type
+ * @param orderId - Order ID to clear hold from
+ */
+export async function clearQueueHold(
+  queue: QueueType,
+  orderId: string
+) {
+  try {
+    await ensureDatabaseInitialized()
+
+    const updateData = {
+      holdUntilSimMinute: null,
+      holdReason: null,
+      holdSetAtSimMinute: null
+    }
+
+    if (queue === 'preAcceptance') {
+      await prisma.preAcceptanceQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    } else if (queue === 'preInspection') {
+      await prisma.preInspectionQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    } else {
+      await prisma.postInspectionQueue.update({
+        where: { orderId },
+        data: updateData
+      })
+    }
+
+    console.log(`🔓 [Hold] Cleared hold on order ${orderId} in ${queue}`)
+
+    return {
+      success: true,
+      orderId
+    }
+  } catch (error) {
+    console.error(`Error clearing hold on order ${orderId}:`, error)
+    return {
+      success: false,
+      error: 'Failed to clear hold on order'
+    }
+  }
+}
+
+/**
+ * Set multiple holds at once (bulk operation)
+ * Used by Python schedulers to set holds on multiple orders
+ *
+ * @param queue - Queue type
+ * @param holds - Array of hold decisions
+ * @param currentSimMinute - Current simulation minute
+ */
+export async function setMultipleQueueHolds(
+  queue: QueueType,
+  holds: Array<{
+    orderId: string
+    holdUntilSimMinute: number
+    holdReason: string
+  }>,
+  currentSimMinute: number
+) {
+  try {
+    await ensureDatabaseInitialized()
+
+    const results = await Promise.all(
+      holds.map(hold =>
+        setQueueHold(
+          queue,
+          hold.orderId,
+          hold.holdUntilSimMinute,
+          hold.holdReason,
+          currentSimMinute
+        )
+      )
+    )
+
+    const successCount = results.filter(r => r.success).length
+
+    console.log(`🔒 [Hold] Set ${successCount}/${holds.length} holds in ${queue}`)
+
+    return {
+      success: true,
+      totalHolds: holds.length,
+      successfulHolds: successCount
+    }
+  } catch (error) {
+    console.error(`Error setting multiple holds:`, error)
+    return {
+      success: false,
+      error: 'Failed to set multiple holds'
     }
   }
 }

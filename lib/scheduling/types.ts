@@ -128,3 +128,16 @@ export interface SchedulingLogEntryInput {
   mode: string
   details: Prisma.InputJsonValue
 }
+
+/**
+ * Factory capacity information passed to Python scheduling scripts
+ */
+export interface FactoryCapacity {
+  montageStationen: number       // Number of assembly stations
+  demontageStationen: number      // Number of disassembly stations (default: 5 if not stored)
+  flexibel: boolean               // Whether stations are flexible (default: false if not stored)
+  defaultDemontagezeit: number    // Default disassembly time in minutes
+  defaultMontagezeit: number      // Default assembly time in minutes
+  schichtmodell: string           // Shift model (e.g., "EINSCHICHT", "ZWEISCHICHT")
+  kapazitaet: number              // Overall factory capacity
+}
