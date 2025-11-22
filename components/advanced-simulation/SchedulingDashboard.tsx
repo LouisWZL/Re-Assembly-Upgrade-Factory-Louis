@@ -34,6 +34,40 @@ interface StageData {
   orders: OrderPosition[]
 }
 
+interface ComponentDetail {
+  original: string
+  originalType: string
+  replacement: string | null
+  replacementType: string | null
+  reassemblyType: string | null
+  condition: number
+}
+
+interface OrderDetail {
+  orderId: string
+  productVariant: string
+  productType: string
+  components: ComponentDetail[]
+}
+
+interface OrderSequence {
+  orderId: string
+  sequence: string[]
+}
+
+interface BatchDetail {
+  id: string
+  size: number
+  releaseAt?: number | null
+  jaccardSimilarity?: number | null
+  jaccardMatrix?: number[][]
+  jaccardLabels?: string[]
+  jaccardJustifications?: Array<{ orderId: string; sequence: string[] }>
+  orderSequences?: OrderSequence[]
+  sampleOrders?: string[]
+  orderDetails?: OrderDetail[]
+}
+
 interface StageSummaryInsight {
   createdAt: string
   queueSize: number
@@ -43,11 +77,21 @@ interface StageSummaryInsight {
   pythonReleaseList?: string[]
   pythonEtaList?: Array<{ orderId: string; eta: number }>
   pythonPriorities?: Array<{ orderId: string; priority: number }>
-  pythonBatches?: Array<{ id: string; size: number }>
+  pythonBatches?: BatchDetail[]
   pythonAssignments?: Array<{ orderId: string; eta: number | null; priorityScore: number | null }>
   pythonDebug?: Array<Record<string, unknown>>
   pythonDiffCount?: number
   simMinute: number | null
+  batchSizes?: number[]
+  etaWindow?: { min: number; max: number } | null
+}
+
+interface StageBatchHistoryEntry {
+  createdAt: string
+  simMinute: number | null
+  batchSizes: number[]
+  etaWindow?: { min: number; max: number } | null
+  topBatches?: BatchDetail[]
 }
 
 interface StagePythonInsight {
@@ -61,6 +105,26 @@ interface StageInsight {
   lastSummary?: StageSummaryInsight
 }
 
+interface StageStats {
+  runs: number
+  lastRun: number | null
+  lastReleased: number
+  totalReleased: number
+  lastReorder: number
+  totalReorder: number
+  lastQueueSize: number
+  lastBatches: number
+  lastPythonDiff: number
+  totalPythonDiff: number
+}
+
+interface SchedulingTimelineEvent {
+  stage: SchedulingStageKey
+  createdAt: string
+  simMinute: number | null
+  realTime: string
+}
+
 interface QueueMonitorData {
   pap: StageData
   pip: StageData
@@ -68,6 +132,10 @@ interface QueueMonitorData {
   lastUpdated: string
   insights?: Record<SchedulingStageKey, StageInsight>
   summaryUpdated?: string
+  stats?: Record<SchedulingStageKey, StageStats>
+  simulationStartTime?: string | null
+  schedulingTimeline?: SchedulingTimelineEvent[]
+  batchHistory?: Record<SchedulingStageKey, StageBatchHistoryEntry[]>
 }
 
 const stageLabels: Record<SchedulingStageKey, string> = {
@@ -95,9 +163,14 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
       setLoading(true)
       setError(null)
 
+      const timestamp = Date.now()
       const [queueRes, summaryRes] = await Promise.all([
-        fetch(`/api/queue-monitor?factoryId=${factoryId}`),
-        fetch(`/api/scheduling-summary?factoryId=${factoryId}`),
+        fetch(`/api/queue-monitor?factoryId=${factoryId}&t=${timestamp}`, {
+          cache: 'no-store',
+        }),
+        fetch(`/api/scheduling-summary?factoryId=${factoryId}&t=${timestamp}`, {
+          cache: 'no-store',
+        }),
       ])
 
       if (!queueRes.ok) {
@@ -112,18 +185,29 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
         const summary = await summaryRes.json()
         insights = summary?.insights ?? undefined
         summaryUpdated = summary?.lastUpdated ?? undefined
+        const stats = summary?.stats ?? undefined
+        const simulationStartTime = summary?.simulationStartTime ?? undefined
+        const schedulingTimeline = summary?.schedulingTimeline ?? undefined
+        const batchHistory = summary?.batchHistory ?? undefined
+
+        setData({
+          ...queueData,
+          insights,
+          summaryUpdated,
+          stats,
+          simulationStartTime,
+          schedulingTimeline,
+          batchHistory,
+        })
       } else {
         console.warn(
           '[SchedulingDashboard] scheduling-summary request failed:',
           summaryRes.status
         )
+        setData({
+          ...queueData,
+        })
       }
-
-      setData({
-        ...queueData,
-        insights,
-        summaryUpdated,
-      })
     } catch (err) {
       console.error('[SchedulingDashboard] Failed to fetch data:', err)
       setError('Fehler beim Laden der Queue-Daten')
@@ -340,6 +424,9 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
                             <StageDetailsDisplay
                               stageKey={stageKey}
                               insight={data?.insights?.[stageKey]}
+                              stats={data?.stats?.[stageKey]}
+                              simulationStartTime={data?.simulationStartTime}
+                              batchHistory={data?.batchHistory?.[stageKey]}
                             />
                           </CollapsibleContent>
                         </Collapsible>
@@ -349,6 +436,86 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
                 </Card>
               )
             })}
+
+            {/* Timeline: Terminierungen seit Sim-Start */}
+            {data.schedulingTimeline && data.schedulingTimeline.length > 0 && (
+              <Card className="border-l-4 border-l-blue-500">
+                <CardHeader>
+                  <CardTitle className="text-base">Terminierungs-Zeitstrahl</CardTitle>
+                  {data.simulationStartTime && (
+                    <p className="text-xs text-muted-foreground">
+                      Sim-Start: {new Date(data.simulationStartTime).toLocaleString('de-DE')}
+                    </p>
+                  )}
+                </CardHeader>
+                <CardContent>
+                  {/* Visueller Zeitstrahl */}
+                  <div className="relative mb-6">
+                    {/* Zeitleiste (horizontale Linie) */}
+                    <div className="absolute left-0 right-0 top-6 h-0.5 bg-gradient-to-r from-gray-300 via-blue-400 to-purple-400" />
+
+                    {/* Events als Punkte auf der Timeline */}
+                    <div className="relative flex justify-between" style={{ minHeight: '80px' }}>
+                      {data.schedulingTimeline.slice(0, 15).map((event, idx) => {
+                        const stageDotColors: Record<SchedulingStageKey, string> = {
+                          pap: 'bg-purple-500 border-purple-700',
+                          pip: 'bg-blue-500 border-blue-700',
+                          pipo: 'bg-green-500 border-green-700',
+                        }
+                        const realTime = new Date(event.realTime)
+                        const simMinuteDisplay = event.simMinute !== null ? `t=${event.simMinute}min` : 'n/a'
+
+                        // Position basierend auf Index (gleichmäßig verteilt)
+                        const leftPercent = (idx / Math.max(1, (data.schedulingTimeline?.slice(0, 15).length ?? 1) - 1)) * 100
+
+                        return (
+                          <div
+                            key={idx}
+                            className="absolute flex flex-col items-center"
+                            style={{ left: `${leftPercent}%`, transform: 'translateX(-50%)' }}
+                          >
+                            {/* Punkt auf Timeline */}
+                            <div
+                              className={`h-3 w-3 rounded-full border-2 ${stageDotColors[event.stage]} shadow-md z-10`}
+                              style={{ marginTop: '16px' }}
+                              title={`${stageLabels[event.stage]} - ${realTime.toLocaleString('de-DE')}`}
+                            />
+                            {/* Label unterhalb */}
+                            <div className="mt-4 flex flex-col items-center text-center">
+                              <span className="text-[9px] font-semibold text-foreground whitespace-nowrap">
+                                {stageLabels[event.stage].split(' ')[0]}
+                              </span>
+                              <span className="text-[8px] text-muted-foreground whitespace-nowrap">
+                                {realTime.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                              <span className="text-[7px] text-blue-600 font-mono">
+                                {simMinuteDisplay}
+                              </span>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Legende */}
+                  <div className="flex justify-center gap-4 text-[10px] mt-2">
+                    <div className="flex items-center gap-1">
+                      <div className="h-2 w-2 rounded-full bg-purple-500 border border-purple-700" />
+                      <span>PAP</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="h-2 w-2 rounded-full bg-blue-500 border border-blue-700" />
+                      <span>PIP</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <div className="h-2 w-2 rounded-full bg-green-500 border border-green-700" />
+                      <span>PIPO</span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
           </div>
         )}
       </CardContent>
@@ -359,11 +526,22 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
 function StageDetailsDisplay({
   stageKey,
   insight,
+  stats,
+  simulationStartTime,
+  batchHistory,
 }: {
   stageKey: SchedulingStageKey
   insight: StageInsight | undefined
+  stats: StageStats | undefined
+  simulationStartTime?: string | null
+  batchHistory?: StageBatchHistoryEntry[]
 }) {
-  if (!insight?.python && !insight?.lastSummary) {
+  const [historyIndex, setHistoryIndex] = useState(0)
+  useEffect(() => {
+    setHistoryIndex(0)
+  }, [batchHistory?.length])
+
+  if (!insight?.python && !insight?.lastSummary && (!batchHistory || batchHistory.length === 0)) {
     return (
       <div className="rounded-md border bg-muted/50 p-4">
         <p className="text-sm text-muted-foreground">
@@ -377,201 +555,480 @@ function StageDetailsDisplay({
   }
 
   const pythonDetails = insight.python?.details ?? null
-  const pythonDebug = insight.python?.debug ?? []
   const lastSummary = insight.lastSummary
-
   const scriptInfo = pythonDetails?._scriptExecution ?? null
-  const scriptPath =
-    typeof scriptInfo?.scriptPath === 'string' ? scriptInfo.scriptPath : undefined
+
+  const scriptPath = typeof scriptInfo?.scriptPath === 'string' ? scriptInfo.scriptPath : undefined
   const scriptName = scriptPath ? scriptPath.split(/[\\/]/).pop() : undefined
   const scriptDuration =
     typeof scriptInfo?.startTime === 'number' && typeof scriptInfo?.endTime === 'number'
       ? scriptInfo.endTime - scriptInfo.startTime
       : null
 
-  const sanitizedPythonDetails =
-    pythonDetails && typeof pythonDetails === 'object'
-      ? Object.fromEntries(
-          Object.entries(pythonDetails).filter(([key]) => key !== '_scriptExecution')
-        )
+  // Extract data for widgets (prefer persisted history entries)
+  const historyEntries = batchHistory ?? []
+  const selectedHistoryEntry =
+    historyEntries.length > 0
+      ? historyEntries[Math.min(historyIndex, historyEntries.length - 1)]
       : null
+  const aggregatedBatchSizes = historyEntries.flatMap((entry) => entry.batchSizes ?? [])
+  const aggregatedTopBatches = historyEntries.flatMap((entry, idx) =>
+    (entry.topBatches ?? []).map((batch) => ({
+      ...batch,
+      _historyCreatedAt: entry.createdAt,
+      _historyIndex: idx,
+    }))
+  )
+  const aggregatedEtaWindow = (() => {
+    const mins = historyEntries
+      .map((entry) => entry.etaWindow?.min)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    const maxs = historyEntries
+      .map((entry) => entry.etaWindow?.max)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+    if (mins.length === 0 || maxs.length === 0) {
+      return null
+    }
+    return {
+      min: Math.min(...mins),
+      max: Math.max(...maxs),
+    }
+  })()
 
-  const renderList = (obj: Record<string, any>) => {
-    return (
-      <div className="grid gap-2 text-xs sm:grid-cols-2">
-        {Object.entries(obj).map(([key, value]) => {
-          if (key.startsWith('_')) return null
-          if (value === null || value === undefined) return null
-          if (Array.isArray(value) && value.length === 0) return null
-          const label = key
-            .replace(/([A-Z])/g, ' $1')
-            .replace(/_/g, ' ')
-            .trim()
-          let display: ReactNode = value as ReactNode
-          if (Array.isArray(value)) {
-            if (typeof value[0] === 'object') {
-              display = (
-                <pre className="mt-1 rounded bg-muted p-2 text-[10px] text-muted-foreground">
-                  {JSON.stringify(value.slice(0, 8), null, 2)}
-                </pre>
-              )
-            } else {
-              display = value.join(', ')
-            }
-          } else if (typeof value === 'object') {
-            display = (
-              <pre className="mt-1 rounded bg-muted p-2 text-[10px] text-muted-foreground">
-                {JSON.stringify(value, null, 2)}
-              </pre>
-            )
-          }
-          return (
-            <div key={key}>
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                {label}
-              </div>
-              <div className="text-xs text-foreground">{display}</div>
-            </div>
-          )
-        })}
-      </div>
-    )
-  }
+  const baseBatchSizes =
+    selectedHistoryEntry?.batchSizes ??
+    pythonDetails?.batchSizes ??
+    lastSummary?.batchSizes ??
+    []
+  const baseTopBatches =
+    selectedHistoryEntry?.topBatches ??
+    pythonDetails?.topBatches ??
+    lastSummary?.pythonBatches ??
+    []
+  const baseEtaWindow =
+    selectedHistoryEntry?.etaWindow ??
+    lastSummary?.etaWindow ??
+    pythonDetails?.etaWindow ??
+    null
 
-  const renderDebugEntry = (entry: Record<string, any>, index: number) => {
-    const stage = typeof entry.stage === 'string' ? entry.stage : `Debug-${index + 1}`
-    const media = entry.media
-    const mediaData =
-      media && typeof media === 'object' && typeof media.data === 'string'
-        ? media.data
-        : null
+  const batchSizes = aggregatedBatchSizes.length > 0 ? aggregatedBatchSizes : baseBatchSizes
+  const topBatches = aggregatedTopBatches.length > 0 ? aggregatedTopBatches : baseTopBatches
+  const etaWindow = aggregatedEtaWindow ?? baseEtaWindow
+  const totalBatchRuns = stats?.totalReleased ?? 0
+  const timelineBatches = topBatches
+    .map((batch: any, idx: number) => {
+      const startEarliest =
+        typeof batch?.windowStart?.earliest === 'number'
+          ? batch.windowStart.earliest
+          : typeof batch?.releaseAt === 'number'
+          ? batch.releaseAt
+          : null
+      const startLatest =
+        typeof batch?.windowStart?.latest === 'number'
+          ? batch.windowStart.latest
+          : startEarliest
+      const endLatest =
+        typeof batch?.windowEnd?.latest === 'number'
+          ? batch.windowEnd.latest
+          : typeof batch?.windowEnd?.earliest === 'number'
+          ? batch.windowEnd.earliest
+          : startLatest
+      return {
+        ...batch,
+        startEarliest,
+        startLatest,
+        endLatest,
+        index: idx,
+      }
+    })
+    .filter((batch: any) => batch.startEarliest !== null)
+  const timelineMinCandidates = [
+    ...timelineBatches.map((batch: any) => Number(batch.startEarliest ?? 0)),
+    etaWindow?.min ?? null,
+  ].filter((value) => typeof value === 'number') as number[]
+  const timelineMaxCandidates = [
+    ...timelineBatches.map((batch: any) => Number(batch.endLatest ?? batch.startLatest ?? 0)),
+    etaWindow?.max ?? null,
+  ].filter((value) => typeof value === 'number') as number[]
+  const timelineMin = timelineMinCandidates.length ? Math.min(...timelineMinCandidates) : 0
+  const timelineMax = timelineMaxCandidates.length ? Math.max(...timelineMaxCandidates) : timelineMin + 1
+  const timelineRange = Math.max(timelineMax - timelineMin, 1)
 
-    return (
-      <div key={`${stage}-${index}`} className="rounded-md border p-3 text-xs">
-        <div className="font-semibold text-purple-900">{stage}</div>
-        <div className="mt-1 space-y-2">
-          {mediaData ? (
-            <div className="rounded bg-white p-2">
-              <img
-                src={`data:${media.type ?? 'image/png'};base64,${mediaData}`}
-                alt={stage}
-                className="mx-auto max-h-64"
-              />
-            </div>
-          ) : null}
-            <pre className="rounded bg-muted p-2 text-[10px] text-muted-foreground">
-              {JSON.stringify(
-                Object.fromEntries(
-                  Object.entries(entry).filter(
-                    ([key]) => key !== 'media' && key !== 'stage'
-                  )
-                ),
-                null,
-                2
-              )}
-            </pre>
-        </div>
-      </div>
-    )
+  const formatSimTime = (minuteValue: number | null | undefined) => {
+    if (minuteValue === null || minuteValue === undefined) {
+      return ''
+    }
+    if (simulationStartTime) {
+      const base = new Date(simulationStartTime)
+      const atTime = new Date(base.getTime() + minuteValue * 60000)
+      return atTime.toLocaleString('de-DE', {
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+      })
+    }
+    return `t=${Math.round(minuteValue)}min`
   }
 
   return (
     <div className="space-y-4 rounded-md border bg-muted/30 p-4">
-      {lastSummary && (
-        <div className="space-y-2">
-          <div className="text-sm font-semibold text-purple-900">
-            Letzte Freigabe {lastSummary.simMinute !== null ? `@ t=${lastSummary.simMinute}min` : ''}
+      {historyEntries.length > 0 && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-purple-900">
+            Batch-Historie ({historyEntries.length})
           </div>
-          <div className="grid gap-2 text-xs sm:grid-cols-3">
-            <div className="rounded border bg-white p-2">
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Freigegeben
-              </div>
-              <div className="text-base font-semibold">{lastSummary.releasedCount}</div>
-            </div>
-            <div className="rounded border bg-white p-2">
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Änderungen
-              </div>
-              <div className="text-base font-semibold">{lastSummary.reorderCount}</div>
-            </div>
-            <div className="rounded border bg-white p-2">
-              <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                Python Diff
-              </div>
-              <div className="text-base font-semibold">
-                {lastSummary.pythonDiffCount ?? lastSummary.reorderCount}
-              </div>
-            </div>
+          <div className="flex flex-wrap gap-2">
+            {historyEntries.map((entry, idx) => {
+              const dateLabel = new Date(entry.createdAt).toLocaleTimeString('de-DE', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+              return (
+                <Button
+                  key={`${entry.createdAt}-${idx}`}
+                  size="xs"
+                  variant={idx === historyIndex ? 'default' : 'outline'}
+                  className="text-[10px]"
+                  onClick={() => setHistoryIndex(idx)}
+                >
+                  {dateLabel} · t={entry.simMinute ?? '–'}
+                </Button>
+              )
+            })}
           </div>
-          {lastSummary.pythonPriorities && lastSummary.pythonPriorities.length > 0 && (
-            <div className="rounded border bg-white p-3">
-              <div className="text-xs font-semibold text-purple-900">Prioritäten</div>
-              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
-                {JSON.stringify(lastSummary.pythonPriorities.slice(0, 12), null, 2)}
-              </pre>
-            </div>
-          )}
-          {lastSummary.pythonBatches && lastSummary.pythonBatches.length > 0 && (
-            <div className="rounded border bg-white p-3">
-              <div className="text-xs font-semibold text-purple-900">Batches</div>
-              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
-                {JSON.stringify(lastSummary.pythonBatches.slice(0, 8), null, 2)}
-              </pre>
-            </div>
-          )}
-          {lastSummary.pythonEtaList && lastSummary.pythonEtaList.length > 0 && (
-            <div className="rounded border bg-white p-3">
-              <div className="text-xs font-semibold text-purple-900">ETA Vorschau</div>
-              <pre className="mt-1 max-h-40 overflow-y-auto rounded bg-muted p-2 text-[10px] text-muted-foreground">
-                {JSON.stringify(lastSummary.pythonEtaList.slice(0, 8), null, 2)}
-              </pre>
-            </div>
-          )}
+          <div className="mt-1 text-[10px] text-muted-foreground space-y-1">
+            <div>Diagramme zeigen kumulierte Daten aller Läufe.</div>
+            <div>Auswahl #{historyIndex + 1} (neueste zuerst) dient zur Detailprüfung.</div>
+          </div>
         </div>
       )}
 
-      {(scriptName || scriptPath) && (
-        <div className="space-y-1 rounded border bg-white p-3">
+      {/* Widget 1: Batch Run Count */}
+      {totalBatchRuns > 0 && (
+        <div className="rounded border bg-white p-3">
           <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+            Batch Runs seit Sim-Start
+          </div>
+          <div className="text-2xl font-bold text-purple-900">{totalBatchRuns}</div>
+        </div>
+      )}
+
+      {/* Widget 2: Batch Sizes Bar Chart */}
+      {batchSizes.length > 0 && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-purple-900">
+            Letzte Batch-Größen
+          </div>
+          {(() => {
+            const sizes = batchSizes.slice(0, 12)
+            const maxSize = Math.max(...sizes, 1)
+            return (
+              <div className="flex items-end gap-2">
+                {sizes.map((size: number, idx: number) => {
+                  const rawPercent = (size / maxSize) * 100
+                  const heightPercent = size === 0 ? 4 : Math.max(rawPercent, 12)
+
+                  return (
+                    <div key={idx} className="flex flex-col items-center" style={{ width: '20px' }}>
+                      <div
+                        className="relative w-full rounded bg-muted/40"
+                        style={{ height: '70px' }}
+                        title={`Batch ${idx + 1}: ${size} Aufträge`}
+                      >
+                        <div
+                          className="absolute inset-x-0 bottom-0 rounded-t bg-purple-500 transition-all hover:bg-purple-600"
+                          style={{ height: `${Math.min(heightPercent, 100)}%` }}
+                        />
+                      </div>
+                      <div className="mt-1 text-[9px] text-muted-foreground">{size}</div>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })()}
+        </div>
+      )}
+
+      {/* Widget 3: Script Metadata (Compact) */}
+      {scriptInfo && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
             Python Skript
           </div>
-          <div className="text-xs font-semibold text-purple-900">
-            {scriptName ?? 'Unbekanntes Skript'}
+          <div className="space-y-1">
+            <div className="text-xs font-semibold text-purple-900">
+              {scriptName ?? 'Unbekanntes Skript'}
+            </div>
+            <div className="flex gap-4 text-[10px] text-muted-foreground">
+              {typeof scriptInfo.status === 'string' && (
+                <div>
+                  Status: <span className="font-medium text-foreground">{scriptInfo.status}</span>
+                </div>
+              )}
+              {scriptDuration !== null && scriptDuration >= 0 && (
+                <div>
+                  Dauer: <span className="font-medium text-foreground">{scriptDuration}ms</span>
+                </div>
+              )}
+            </div>
           </div>
-          {scriptPath && (
-            <div className="break-all text-[10px] text-muted-foreground">{scriptPath}</div>
-          )}
-          {typeof scriptInfo?.status === 'string' && (
-            <div className="text-[10px] text-muted-foreground">
-              Status: <span className="font-medium text-foreground">{scriptInfo.status}</span>
-            </div>
-          )}
-          {scriptDuration !== null && scriptDuration >= 0 && (
-            <div className="text-[10px] text-muted-foreground">
-              Dauer: <span className="font-medium text-foreground">{scriptDuration} ms</span>
-            </div>
-          )}
         </div>
       )}
 
-      {sanitizedPythonDetails && (
-        <div className="space-y-2">
-          <div className="text-sm font-semibold text-purple-900">Script KPIs</div>
-          {renderList(sanitizedPythonDetails)}
-        </div>
-      )}
+      {/* Widget 4: Timeline Diagram (Batch Windows + ETAs) */}
+      {(topBatches.length > 0 || etaWindow) && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-purple-900">
+            Zeitdiagramm: Batch-Fenster & Liefertermine
+          </div>
+          <div className="space-y-3">
+            {timelineBatches.length > 0 ? (
+              timelineBatches.slice(0, 5).map((batch: any, idx: number) => {
+                const startEarliest = Number(batch.startEarliest ?? timelineMin)
+                const startLatest = Number(batch.startLatest ?? startEarliest)
+                const endLatest = Number(batch.endLatest ?? startLatest)
+                const startWidth = Math.max(((startLatest - startEarliest) / timelineRange) * 100, 1)
+                const windowLeft = ((startEarliest - timelineMin) / timelineRange) * 100
+                const deliveryLeft = ((endLatest - timelineMin) / timelineRange) * 100
 
-      {pythonDebug.length > 0 && (
-        <div className="space-y-2">
-          <div className="text-sm font-semibold text-purple-900">Debug / Heuristik</div>
-          <div className="grid gap-2">
-            {pythonDebug.slice(0, 6).map((entry, idx) => renderDebugEntry(entry, idx))}
-            {pythonDebug.length > 6 && (
+                return (
+                  <div key={`${stageKey}-${batch.id ?? idx}`} className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span>
+                        Batch {idx + 1}: {batch.size ?? '–'} Aufträge
+                      </span>
+                      {typeof batch.jaccardSimilarity === 'number' && (
+                        <span className="text-muted-foreground">
+                          Ø Ähnlichkeit {(batch.jaccardSimilarity * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative h-10 rounded bg-muted/30">
+                      <div
+                        className="absolute inset-y-0 rounded bg-purple-200/70"
+                        style={{
+                          left: `${windowLeft}%`,
+                          width: `${Math.min(startWidth, 100 - windowLeft)}%`,
+                        }}
+                        title={`Startfenster: ${formatSimTime(startEarliest)} – ${formatSimTime(startLatest)}`}
+                      />
+                      <div
+                        className="absolute top-0 bottom-0 w-0.5 bg-purple-600"
+                        style={{ left: `${windowLeft + startWidth / 2}%` }}
+                        title={`Geplanter Start: ${formatSimTime(batch.releaseAt ?? startEarliest)}`}
+                      />
+                      <div
+                        className="absolute top-0 bottom-0 w-0.5 bg-green-500"
+                        style={{ left: `${Math.min(deliveryLeft, 100)}%` }}
+                        title={`Liefertermin: ${formatSimTime(endLatest)}`}
+                      />
+                    </div>
+                    <div className="mt-1 text-[8px] text-muted-foreground">
+                      Startfenster {formatSimTime(startEarliest)} – {formatSimTime(startLatest)} · Start {formatSimTime(batch.releaseAt ?? startEarliest)} · Lieferung {formatSimTime(endLatest)}
+                    </div>
+                  </div>
+                )
+              })
+            ) : (
               <div className="text-[10px] text-muted-foreground">
-                … {pythonDebug.length - 6} weitere Debug-Einträge
+                Keine Batch-Fenster vorhanden.
               </div>
             )}
+            {etaWindow && (
+              <div className="mt-2 text-[10px] text-muted-foreground">
+                Liefertermin-Fenster:{' '}
+                {formatSimTime(etaWindow.min)} – {formatSimTime(etaWindow.max)} (Δ {Math.round(etaWindow.max - etaWindow.min)}min)
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Widget 5: Hold Statistics */}
+      {pythonDetails && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-purple-900">
+            Hold-Statistik
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-[10px]">
+            {typeof pythonDetails.maxHoldCount === 'number' && pythonDetails.maxHoldCount > 0 && (
+              <div>
+                <div className="text-muted-foreground">Max. Zurückhaltungen:</div>
+                <div className="font-semibold">{pythonDetails.maxHoldCount}x</div>
+              </div>
+            )}
+            {typeof pythonDetails.avgHoldCount !== 'undefined' && parseFloat(String(pythonDetails.avgHoldCount)) > 0 && (
+              <div>
+                <div className="text-muted-foreground">Ø Zurückhaltungen:</div>
+                <div className="font-semibold">{pythonDetails.avgHoldCount}x</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Widget 6: Batch Details with Process Sequences & Jaccard Matrix */}
+      {topBatches.length > 0 && topBatches.some((b: any) => (b.orderSequences && b.orderSequences.length > 0) || (b.orderDetails && b.orderDetails.length > 0) || (b.jaccardMatrix && b.jaccardMatrix.length > 0)) && (
+        <div className="rounded border bg-white p-3">
+          <div className="mb-2 text-xs font-semibold text-purple-900">
+            Batch-Inhalte & Ähnlichkeiten
+          </div>
+          <div className="space-y-4">
+            {topBatches.map((batch: any, batchIdx: number) => {
+              const hasSequences = batch.orderSequences && batch.orderSequences.length > 0
+              const hasComponents = batch.orderDetails && batch.orderDetails.length > 0
+              const hasMatrix = batch.jaccardMatrix && Array.isArray(batch.jaccardMatrix)
+              const matrixLabels: string[] = hasMatrix
+                ? (batch.orderSequences?.map((seq: OrderSequence) => seq.orderId) ??
+                    batch.sampleOrders ??
+                    batch.orderIds ??
+                    [])
+                : []
+
+              if (!hasSequences && !hasComponents) return null
+
+              return (
+                <div key={batchIdx} className="space-y-2">
+                  <Collapsible className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <CollapsibleTrigger asChild>
+                        <Button variant="ghost" size="sm" className="h-auto p-1">
+                          <ChevronDown className="h-3 w-3" />
+                        </Button>
+                      </CollapsibleTrigger>
+                      <div className="text-[10px] font-semibold">
+                        Batch {batchIdx + 1}: {batch.size} Aufträge
+                        {typeof batch.jaccardSimilarity === 'number' && (
+                          <span className="ml-2 text-muted-foreground">
+                            (Ø Jaccard: {(batch.jaccardSimilarity * 100).toFixed(0)}%)
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <CollapsibleContent className="ml-6 space-y-3">
+                      {/* Prozess-Sequenzen (falls vorhanden) */}
+                      {hasSequences && (
+                        <div className="rounded border border-blue-200 bg-blue-50/30 p-2">
+                          <div className="mb-2 text-[9px] font-semibold text-blue-900">
+                            Ausgewählte Prozess-Sequenzen
+                          </div>
+                          <div className="space-y-1">
+                            {batch.orderSequences.slice(0, 8).map((orderSeq: OrderSequence, idx: number) => (
+                              <div key={idx} className="text-[8px]">
+                                <span className="font-mono text-blue-700">{orderSeq.orderId.slice(0, 12)}...</span>
+                                <span className="mx-1 text-muted-foreground">→</span>
+                                <span className="text-foreground">
+                                  {orderSeq.sequence.slice(0, 5).join(' → ')}
+                                  {orderSeq.sequence.length > 5 && ' ...'}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Jaccard-Matrix Heatmap */}
+                      {hasMatrix && batch.jaccardMatrix.length > 0 && (
+                        <div className="rounded border border-purple-200 bg-purple-50/30 p-2">
+                          <div className="mb-2 text-[9px] font-semibold text-purple-900">
+                            Jaccard-Ähnlichkeitsmatrix: Prozesssequenzbezogen
+                          </div>
+                          <div className="overflow-x-auto">
+                            <div className="inline-flex flex-col text-[8px]">
+                              <div className="ml-10 flex gap-1 text-muted-foreground">
+                                {batch.jaccardMatrix.map((_: number[], idx: number) => (
+                                  <div
+                                    key={`col-${idx}`}
+                                    className="w-8 truncate text-center"
+                                    title={batch.jaccardLabels?.[idx] ?? matrixLabels[idx] ?? `Auftrag ${idx + 1}`}
+                                  >
+                                    {(batch.jaccardLabels?.[idx] ?? matrixLabels[idx] ?? `#${idx + 1}`).slice(-6)}
+                                  </div>
+                                ))}
+                              </div>
+                              {batch.jaccardMatrix.map((row: number[], i: number) => (
+                                <div key={`row-${i}`} className="flex items-center gap-1">
+                                  <div
+                                    className="w-10 truncate text-muted-foreground"
+                                    title={batch.jaccardLabels?.[i] ?? matrixLabels[i] ?? `Auftrag ${i + 1}`}
+                                  >
+                                    {(batch.jaccardLabels?.[i] ?? matrixLabels[i] ?? `#${i + 1}`).slice(-6)}
+                                  </div>
+                                  {row.map((value: number, j: number) => {
+                                    const hue = value * 120
+                                    const saturation = 70
+                                    const lightness = 85 - value * 30
+                                    const bgColor = `hsl(${hue}, ${saturation}%, ${lightness}%)`
+
+                                    return (
+                                      <div
+                                        key={`${i}-${j}`}
+                                        className="flex h-8 w-8 items-center justify-center text-[7px] font-mono border border-white"
+                                        style={{ backgroundColor: bgColor }}
+                                        title={`${batch.jaccardLabels?.[i] ?? matrixLabels[i] ?? `Auftrag ${i + 1}`} ↔ ${batch.jaccardLabels?.[j] ?? matrixLabels[j] ?? `Auftrag ${j + 1}`}: ${(value * 100).toFixed(0)}%`}
+                                      >
+                                        {(value * 100).toFixed(0)}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          <div className="mt-2 flex items-center justify-between text-[7px] text-muted-foreground">
+                            <span>0% (unähnlich)</span>
+                            <span>100% (identisch)</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {batch.jaccardJustifications && batch.jaccardJustifications.length > 0 && (
+                        <div className="rounded border border-purple-200 bg-purple-50/30 p-2">
+                          <div className="mb-2 text-[9px] font-semibold text-purple-900">
+                            Prozesssequenzen je Auftrag (Batch-Begründung)
+                          </div>
+                          <div className="space-y-1 text-[8px] font-mono text-muted-foreground max-h-32 overflow-y-auto">
+                            {batch.jaccardJustifications.slice(0, 12).map((entry: { orderId: string; sequence: string[] }, idx: number) => (
+                              <div key={`${entry.orderId}-${idx}`} className="truncate">
+                                <span className="font-semibold text-purple-900 mr-1">
+                                  {(batch.jaccardLabels?.[idx] ?? entry.orderId).slice(-8)}
+                                </span>
+                                {entry.sequence && entry.sequence.length > 0
+                                  ? entry.sequence.join(' → ')
+                                  : 'Keine Sequenzdaten'}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Baugruppen (Fallback, wenn keine Sequenzen) */}
+                      {!hasSequences && hasComponents && (
+                        <div className="rounded border border-muted bg-muted/20 p-2">
+                          <div className="mb-1 text-[9px] font-semibold text-muted-foreground">
+                            Stücklisten (Fallback)
+                          </div>
+                          <div className="space-y-1">
+                            {batch.orderDetails.slice(0, 3).map((order: OrderDetail, orderIdx: number) => (
+                              <div key={orderIdx} className="text-[8px]">
+                                <div className="font-semibold text-foreground">
+                                  {order.productVariant}
+                                </div>
+                                <div className="text-muted-foreground">
+                                  {order.components.length} Baugruppen
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </CollapsibleContent>
+                  </Collapsible>
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
