@@ -55,6 +55,7 @@ export interface SchedulingConfig {
   }
   tardinessWeight?: number
   varianceWeight?: number
+  setupWeight?: number
   cvarAlpha?: number
   storageKey?: string
   meta?: SchedulingConfigMeta

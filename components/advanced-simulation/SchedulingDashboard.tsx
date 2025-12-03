@@ -136,6 +136,11 @@ interface QueueMonitorData {
   simulationStartTime?: string | null
   schedulingTimeline?: SchedulingTimelineEvent[]
   batchHistory?: Record<SchedulingStageKey, StageBatchHistoryEntry[]>
+  recentSummaries?: Array<{
+    stage: SchedulingStageKey
+    createdAt: string
+    pythonDebug?: Array<Record<string, unknown>>
+  }>
 }
 
 const stageLabels: Record<SchedulingStageKey, string> = {
@@ -189,6 +194,7 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
         const simulationStartTime = summary?.simulationStartTime ?? undefined
         const schedulingTimeline = summary?.schedulingTimeline ?? undefined
         const batchHistory = summary?.batchHistory ?? undefined
+        const recentSummaries = summary?.recentSummaries ?? undefined
 
         setData({
           ...queueData,
@@ -198,6 +204,7 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
           simulationStartTime,
           schedulingTimeline,
           batchHistory,
+          recentSummaries,
         })
       } else {
         console.warn(
@@ -427,6 +434,7 @@ export function SchedulingDashboard({ factoryId }: { factoryId: string }) {
                               stats={data?.stats?.[stageKey]}
                               simulationStartTime={data?.simulationStartTime}
                               batchHistory={data?.batchHistory?.[stageKey]}
+                              recentSummaries={data?.recentSummaries?.filter(s => s.stage === stageKey)}
                             />
                           </CollapsibleContent>
                         </Collapsible>
@@ -529,19 +537,26 @@ function StageDetailsDisplay({
   stats,
   simulationStartTime,
   batchHistory,
+  recentSummaries,
 }: {
   stageKey: SchedulingStageKey
   insight: StageInsight | undefined
   stats: StageStats | undefined
   simulationStartTime?: string | null
   batchHistory?: StageBatchHistoryEntry[]
+  recentSummaries?: Array<{
+    stage: SchedulingStageKey
+    createdAt: string
+    pythonDebug?: Array<Record<string, unknown>>
+  }>
 }) {
   const [historyIndex, setHistoryIndex] = useState(0)
   useEffect(() => {
     setHistoryIndex(0)
   }, [batchHistory?.length])
 
-  if (!insight?.python && !insight?.lastSummary && (!batchHistory || batchHistory.length === 0)) {
+  // Allow PIPO to show even without batchHistory, since it relies on pythonDebug
+  if (!insight?.python && !insight?.lastSummary && (stageKey !== 'pipo' && (!batchHistory || batchHistory.length === 0))) {
     return (
       <div className="rounded-md border bg-muted/50 p-4">
         <p className="text-sm text-muted-foreground">
@@ -554,8 +569,9 @@ function StageDetailsDisplay({
     )
   }
 
-  const pythonDetails = insight.python?.details ?? null
-  const lastSummary = insight.lastSummary
+  const pythonDetails = insight?.python?.details ?? null
+  const pythonDebug = insight?.python?.debug ?? null
+  const lastSummary = insight?.lastSummary
   const scriptInfo = pythonDetails?._scriptExecution ?? null
 
   const scriptPath = typeof scriptInfo?.scriptPath === 'string' ? scriptInfo.scriptPath : undefined
@@ -571,7 +587,12 @@ function StageDetailsDisplay({
     historyEntries.length > 0
       ? historyEntries[Math.min(historyIndex, historyEntries.length - 1)]
       : null
-  const aggregatedBatchSizes = historyEntries.flatMap((entry) => entry.batchSizes ?? [])
+  const aggregatedBatchSizes = historyEntries.flatMap((entry, entryIdx) =>
+    (entry.batchSizes ?? []).map((size: number) => ({
+      size,
+      historyIndex: entryIdx,
+    }))
+  )
   const aggregatedTopBatches = historyEntries.flatMap((entry, idx) =>
     (entry.topBatches ?? []).map((batch) => ({
       ...batch,
@@ -595,11 +616,12 @@ function StageDetailsDisplay({
     }
   })()
 
-  const baseBatchSizes =
+  const baseBatchSizes = (
     selectedHistoryEntry?.batchSizes ??
     pythonDetails?.batchSizes ??
     lastSummary?.batchSizes ??
     []
+  ).map((size: number) => ({ size, historyIndex: historyIndex }))
   const baseTopBatches =
     selectedHistoryEntry?.topBatches ??
     pythonDetails?.topBatches ??
@@ -614,7 +636,7 @@ function StageDetailsDisplay({
   const batchSizes = aggregatedBatchSizes.length > 0 ? aggregatedBatchSizes : baseBatchSizes
   const topBatches = aggregatedTopBatches.length > 0 ? aggregatedTopBatches : baseTopBatches
   const etaWindow = aggregatedEtaWindow ?? baseEtaWindow
-  const totalBatchRuns = stats?.totalReleased ?? 0
+  const totalBatchRuns = historyEntries.length
   const timelineBatches = topBatches
     .map((batch: any, idx: number) => {
       const startEarliest =
@@ -721,27 +743,52 @@ function StageDetailsDisplay({
             Letzte Batch-Größen
           </div>
           {(() => {
-            const sizes = batchSizes.slice(0, 12)
-            const maxSize = Math.max(...sizes, 1)
+            const batches = batchSizes.slice(0, 12)
+            const maxSize = Math.max(...batches.map((b: any) => b.size || 0), 1)
+
+            // Color palette for different runs
+            const colors = [
+              { base: 'rgb(147, 51, 234)', hover: 'rgb(126, 34, 206)', selected: 'rgb(107, 33, 168)' },  // purple
+              { base: 'rgb(59, 130, 246)', hover: 'rgb(37, 99, 235)', selected: 'rgb(29, 78, 216)' },    // blue
+              { base: 'rgb(34, 197, 94)', hover: 'rgb(22, 163, 74)', selected: 'rgb(21, 128, 61)' },     // green
+              { base: 'rgb(234, 88, 12)', hover: 'rgb(194, 65, 12)', selected: 'rgb(154, 52, 18)' },     // orange
+              { base: 'rgb(236, 72, 153)', hover: 'rgb(219, 39, 119)', selected: 'rgb(190, 24, 93)' },   // pink
+              { base: 'rgb(245, 158, 11)', hover: 'rgb(217, 119, 6)', selected: 'rgb(180, 83, 9)' },     // amber
+            ]
+
             return (
               <div className="flex items-end gap-2">
-                {sizes.map((size: number, idx: number) => {
+                {batches.map((batch: any, idx: number) => {
+                  const size = batch.size || 0
+                  const batchHistoryIdx = batch.historyIndex ?? 0
                   const rawPercent = (size / maxSize) * 100
                   const heightPercent = size === 0 ? 4 : Math.max(rawPercent, 12)
+                  const isSelected = batchHistoryIdx === historyIndex
+
+                  const colorSet = colors[batchHistoryIdx % colors.length]
+                  const bgColor = isSelected ? colorSet.selected : colorSet.base
+                  const hoverColor = isSelected ? colorSet.selected : colorSet.hover
 
                   return (
                     <div key={idx} className="flex flex-col items-center" style={{ width: '20px' }}>
                       <div
-                        className="relative w-full rounded bg-muted/40"
-                        style={{ height: '70px' }}
-                        title={`Batch ${idx + 1}: ${size} Aufträge`}
+                        className={`relative w-full rounded ${isSelected ? 'ring-2 ring-purple-900 ring-offset-1' : 'bg-muted/40'}`}
+                        style={{ height: '70px', backgroundColor: isSelected ? 'transparent' : undefined }}
+                        title={`Batch ${idx + 1}: ${size} Aufträge (Durchlauf #${batchHistoryIdx + 1})${isSelected ? ' (ausgewählt)' : ''}`}
                       >
                         <div
-                          className="absolute inset-x-0 bottom-0 rounded-t bg-purple-500 transition-all hover:bg-purple-600"
-                          style={{ height: `${Math.min(heightPercent, 100)}%` }}
+                          className="absolute inset-x-0 bottom-0 rounded-t transition-all"
+                          style={{
+                            height: `${Math.min(heightPercent, 100)}%`,
+                            backgroundColor: bgColor,
+                          }}
+                          onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = hoverColor)}
+                          onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = bgColor)}
                         />
                       </div>
-                      <div className="mt-1 text-[9px] text-muted-foreground">{size}</div>
+                      <div className={`mt-1 text-[9px] ${isSelected ? 'font-bold text-purple-900' : 'text-muted-foreground'}`}>
+                        {size}
+                      </div>
                     </div>
                   )
                 })}
@@ -794,7 +841,7 @@ function StageDetailsDisplay({
                 const deliveryLeft = ((endLatest - timelineMin) / timelineRange) * 100
 
                 return (
-                  <div key={`${stageKey}-${batch.id ?? idx}`} className="space-y-1">
+                  <div key={`${stageKey}-timeline-batch-${idx}`} className="space-y-1">
                     <div className="flex items-center justify-between text-[10px]">
                       <span>
                         Batch {idx + 1}: {batch.size ?? '–'} Aufträge
@@ -890,7 +937,7 @@ function StageDetailsDisplay({
               if (!hasSequences && !hasComponents) return null
 
               return (
-                <div key={batchIdx} className="space-y-2">
+                <div key={`${stageKey}-batch-details-${batchIdx}`} className="space-y-2">
                   <Collapsible className="space-y-2">
                     <div className="flex items-center gap-2">
                       <CollapsibleTrigger asChild>
@@ -1032,6 +1079,651 @@ function StageDetailsDisplay({
           </div>
         </div>
       )}
+
+      {/* PIP-specific visualizations (GA Plots) - Based on selected history */}
+      {stageKey === 'pip' && (() => {
+        const stageLabels: Record<string, string> = {
+          'PIP_GA_PLOT_OBJECTIVE': 'GA Konvergenz: Zielfunktion',
+          'PIP_GA_PLOT_GANTT': 'Gantt-Chart: Optimierte Sequenz',
+          'PIP_GA_PLOT_COMPARISON': 'Vergleich: Baseline vs. Optimiert'
+        }
+
+        // Get the selected history entry
+        const selectedEntry = historyEntries[historyIndex]
+        if (!selectedEntry) return null
+
+        // Find matching pythonDebug from recentSummaries based on createdAt
+        let debugData: Array<Record<string, unknown>> | null = null
+
+        if (recentSummaries && Array.isArray(recentSummaries)) {
+          const matchingSummary = recentSummaries.find(
+            s => s.createdAt === selectedEntry.createdAt
+          )
+          debugData = matchingSummary?.pythonDebug ?? null
+        }
+
+        // Fallback to current pythonDebug if no match found and it's the newest entry
+        if (!debugData && historyIndex === 0 && pythonDebug) {
+          debugData = pythonDebug
+        }
+
+        if (!debugData || !Array.isArray(debugData)) return null
+
+        // Extract plot entries
+        const plots = debugData
+          .filter((d: any) =>
+            d.media &&
+            d.media.type === 'image/png' &&
+            d.media.encoding === 'base64' &&
+            d.media.data &&
+            (d.stage === 'PIP_GA_PLOT_OBJECTIVE' ||
+             d.stage === 'PIP_GA_PLOT_GANTT' ||
+             d.stage === 'PIP_GA_PLOT_COMPARISON')
+          )
+          .map((entry: any) => ({
+            stage: entry.stage as string,
+            label: stageLabels[entry.stage] || entry.stage,
+            imageData: entry.media.data as string,
+          }))
+
+        if (plots.length === 0) return null
+
+        return (
+          <div className="rounded border bg-white p-3 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold text-purple-900">
+                Genetischer Algorithmus (GA) - Visualisierungen
+              </div>
+              <div className="text-[9px] text-muted-foreground">
+                {new Date(selectedEntry.createdAt).toLocaleString('de-DE', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                })}
+              </div>
+            </div>
+            <div className="text-[10px] text-muted-foreground mb-2">
+              Mittelfristige Terminierung nach Becker (2025) - Monte-Carlo-Optimierung
+            </div>
+            {plots.map((plot, idx) => (
+              <div key={`${plot.stage}-${idx}`} className="space-y-2">
+                <div className="text-[10px] font-medium text-purple-700">
+                  {plot.label}
+                </div>
+                <div className="rounded border border-purple-200 bg-purple-50/30 p-2">
+                  <img
+                    src={`data:image/png;base64,${plot.imageData}`}
+                    alt={plot.label}
+                    className="w-full h-auto rounded"
+                    style={{ maxWidth: '100%', height: 'auto' }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
+      {/* PIP Operations Timeline (Gantt Chart) */}
+      {stageKey === 'pip' && (() => {
+        // Get the selected history entry
+        const selectedEntry = historyEntries[historyIndex]
+        if (!selectedEntry) return null
+
+        // Find matching pythonDebug from recentSummaries
+        let debugData: Array<Record<string, unknown>> | null = null
+
+        if (recentSummaries && Array.isArray(recentSummaries)) {
+          const matchingSummary = recentSummaries.find(
+            s => s.createdAt === selectedEntry.createdAt
+          )
+          debugData = matchingSummary?.pythonDebug ?? null
+        }
+
+        // Fallback to current pythonDebug
+        if (!debugData && historyIndex === 0 && pythonDebug) {
+          debugData = pythonDebug
+        }
+
+        if (!debugData || !Array.isArray(debugData)) return null
+
+        // Find PIP_OPS_TIMELINE entry
+        const timelineEntry = debugData.find((d: any) => d.stage === 'PIP_OPS_TIMELINE')
+        if (!timelineEntry || !timelineEntry.timeline) return null
+
+        const timeline = timelineEntry.timeline as Array<{
+          orderId: string
+          station: string
+          stationType: string
+          machineType: string  // fixed, flex
+          bgType: string       // Baugruppentyp
+          step: string | null
+          start: number
+          end: number
+          duration: number
+          setupApplied: boolean
+        }>
+
+        const demMachines = (timelineEntry.demMachines as number) || 5
+        const monMachines = (timelineEntry.monMachines as number) || 10
+
+        // Group operations by station
+        const allStations = Array.from(new Set(timeline.map(op => op.station))).sort()
+
+        // Determine which stations are fixed vs flex (based on first op's machineType)
+        const stationTypes = new Map<string, 'fixed' | 'flex'>()
+        allStations.forEach(station => {
+          const firstOp = timeline.find(op => op.station === station)
+          stationTypes.set(station, firstOp?.machineType === 'flex' ? 'flex' : 'fixed')
+        })
+
+        // Count fixed/flex per type
+        const demStations = allStations.filter(s => s.startsWith('DEM'))
+        const monStations = allStations.filter(s => s.startsWith('MON'))
+        const demFixed = demStations.filter(s => stationTypes.get(s) === 'fixed').length
+        const demFlex = demStations.filter(s => stationTypes.get(s) === 'flex').length
+        const monFixed = monStations.filter(s => stationTypes.get(s) === 'fixed').length
+        const monFlex = monStations.filter(s => stationTypes.get(s) === 'flex').length
+
+        // Calculate time range
+        const allTimes = timeline.flatMap(op => [op.start, op.end])
+        const minTime = Math.min(...allTimes, 0)
+        const maxTime = Math.max(...allTimes, minTime + 1)
+        const timeRange = maxTime - minTime || 1
+
+        // Assign lighter colors to orders for better text readability
+        const colors = [
+          'rgb(196, 181, 253)', // light purple
+          'rgb(147, 197, 253)', // light blue
+          'rgb(134, 239, 172)', // light green
+          'rgb(253, 186, 116)', // light orange
+          'rgb(251, 207, 232)', // light pink
+          'rgb(253, 224, 71)',  // light yellow
+          'rgb(216, 180, 254)', // light violet
+          'rgb(103, 232, 249)', // light cyan
+        ]
+        const orderColors = new Map<string, string>()
+        timeline.forEach(op => {
+          if (!orderColors.has(op.orderId)) {
+            orderColors.set(op.orderId, colors[orderColors.size % colors.length])
+          }
+        })
+
+        // Abbreviate BGType for display (e.g., "BGT-PS-Antrieb" -> "Antr")
+        const abbreviateBgType = (bgType: string): string => {
+          if (!bgType || bgType === 'unknown') return '?'
+          // Remove "BGT-PS-" prefix and take first 4 chars
+          const cleaned = bgType.replace(/^BGT-PS-/i, '').replace(/^BGT-/i, '')
+          return cleaned.slice(0, 4)
+        }
+
+        return (
+          <div className="rounded border bg-white p-3">
+            <div className="mb-2 text-xs font-semibold text-purple-900">
+              Operations Timeline (Gantt-Chart)
+            </div>
+            {/* Station type summary */}
+            <div className="mb-3 text-[10px] flex flex-wrap gap-3">
+              <div className="flex items-center gap-1">
+                <span className="font-medium">Demontage:</span>
+                <span className="text-blue-600">{demFixed} fix</span>
+                {demFlex > 0 && <span className="text-green-600">+ {demFlex} flex</span>}
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="font-medium">Montage:</span>
+                <span className="text-blue-600">{monFixed} fix</span>
+                {monFlex > 0 && <span className="text-green-600">+ {monFlex} flex</span>}
+              </div>
+            </div>
+            <div className="space-y-1 max-h-[400px] overflow-y-auto">
+              {allStations.map((station, stationIdx) => {
+                const stationOps = timeline.filter(op => op.station === station)
+                const isFixed = stationTypes.get(station) === 'fixed'
+                return (
+                  <div key={station} className="space-y-0.5">
+                    <div className="text-[9px] font-medium text-muted-foreground flex items-center gap-1">
+                      <span>{station}</span>
+                      <span className={`text-[8px] px-1 rounded ${isFixed ? 'bg-blue-100 text-blue-700' : 'bg-green-100 text-green-700'}`}>
+                        {isFixed ? 'fix' : 'flex'}
+                      </span>
+                    </div>
+                    <div className="relative h-6 border rounded bg-muted/10">
+                      {stationOps.map((op, opIdx) => {
+                        const left = ((op.start - minTime) / timeRange) * 100
+                        const width = ((op.end - op.start) / timeRange) * 100
+                        const color = orderColors.get(op.orderId) || 'rgb(200, 200, 200)'
+                        const setupIndicator = op.setupApplied ? '⚙' : ''
+                        const bgAbbr = abbreviateBgType(op.bgType)
+                        // Show abbreviated label: "A1:Antr" (order + bgType)
+                        const shortLabel = `${op.orderId.slice(-2)}:${bgAbbr}`
+                        return (
+                          <div
+                            key={opIdx}
+                            className="absolute top-0.5 bottom-0.5 rounded text-[7px] text-gray-900 font-medium flex items-center justify-center overflow-hidden"
+                            style={{
+                              left: `${left}%`,
+                              width: `${width}%`,
+                              backgroundColor: color,
+                              border: op.setupApplied ? '2px solid orange' : '1px solid rgba(0,0,0,0.1)',
+                            }}
+                            title={`${setupIndicator}${op.orderId}: ${op.start.toFixed(0)}-${op.end.toFixed(0)} (${op.duration.toFixed(0)}min) | BGT: ${op.bgType} | ${op.machineType}`}
+                          >
+                            <span className="truncate px-0.5">{shortLabel}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )
+              })}
+              <div className="mt-2 text-[9px] text-muted-foreground">
+                Zeitbereich: {minTime.toFixed(0)} - {maxTime.toFixed(0)} min (Sim-Zeit)
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* PIP Order Comparison (Vorher/Nachher Debug) */}
+      {stageKey === 'pip' && (() => {
+        // Get the selected history entry
+        const selectedEntry = historyEntries[historyIndex]
+        if (!selectedEntry) return null
+
+        // Find matching pythonDebug from recentSummaries
+        let debugDataComparison: Array<Record<string, unknown>> | null = null
+
+        if (recentSummaries && Array.isArray(recentSummaries)) {
+          const matchingSummary = recentSummaries.find(
+            s => s.createdAt === selectedEntry.createdAt
+          )
+          debugDataComparison = matchingSummary?.pythonDebug ?? null
+        }
+
+        // Fallback to current pythonDebug
+        if (!debugDataComparison && historyIndex === 0 && pythonDebug) {
+          debugDataComparison = pythonDebug
+        }
+
+        if (!debugDataComparison || !Array.isArray(debugDataComparison)) return null
+
+        const comparisonEntry = debugDataComparison.find((d: any) => d.stage === 'PIP_ORDER_COMPARISON')
+        if (!comparisonEntry) return null
+
+        const orderChanges = comparisonEntry.orderChanges as Array<{
+          orderId: string
+          inputPos: number
+          baselinePos: number
+          optimizedPos: number
+          delta: number
+          changed: boolean
+          variantChosen: number
+          variantCount: number
+        }> || []
+
+        return (
+          <div className="rounded border bg-white p-3 mt-3">
+            <div className="mb-2 text-xs font-semibold text-blue-900">
+              GA Optimierung: Auftragsreihenfolge Vorher/Nachher
+            </div>
+            <div className="mb-2 text-[10px] text-muted-foreground">
+              Mutation-Rate: {(comparisonEntry.mutationRate * 100).toFixed(0)}% |
+              Generationen: {comparisonEntry.generations} |
+              Population: {comparisonEntry.population} |
+              <span className={comparisonEntry.totalChanged > 0 ? "text-green-600 font-semibold" : "text-orange-600"}>
+                {' '}{comparisonEntry.totalChanged}/{comparisonEntry.totalOrders} Aufträge umpositioniert
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="text-[10px] w-full">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-1 px-2">Auftrag</th>
+                    <th className="text-center py-1 px-2">Input (FIFO)</th>
+                    <th className="text-center py-1 px-2">Baseline (EDD)</th>
+                    <th className="text-center py-1 px-2">Optimiert (GA)</th>
+                    <th className="text-center py-1 px-2">Delta</th>
+                    <th className="text-center py-1 px-2">Sequenz-Variante</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {orderChanges.map((change, idx) => (
+                    <tr key={change.orderId} className={change.changed ? "bg-green-50" : ""}>
+                      <td className="py-1 px-2 font-mono">{change.orderId.slice(-4)}</td>
+                      <td className="text-center py-1 px-2">{change.inputPos}</td>
+                      <td className="text-center py-1 px-2">{change.baselinePos}</td>
+                      <td className="text-center py-1 px-2 font-semibold">{change.optimizedPos}</td>
+                      <td className={`text-center py-1 px-2 ${change.delta && change.delta !== 0 ? (change.delta < 0 ? 'text-green-600' : 'text-red-600') : ''}`}>
+                        {change.delta !== 0 ? (change.delta > 0 ? `+${change.delta}` : change.delta) : '-'}
+                      </td>
+                      <td className="text-center py-1 px-2">
+                        {change.variantCount > 1 ? (
+                          <span className="bg-purple-100 px-1 rounded">
+                            V{change.variantChosen + 1}/{change.variantCount}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">-</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 text-[9px] text-muted-foreground">
+              <strong>Legende:</strong> Input=Ankunftsreihenfolge | Baseline=EDD-Sortiert | Optimiert=GA-Ergebnis |
+              Delta negativ (grün) = Auftrag wurde nach vorne verschoben
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* PIPO-specific visualizations with history */}
+      {stageKey === 'pipo' && (() => {
+        const stageLabels: Record<string, string> = {
+          'PIPO_MOAHS_PLOT_ITERATIONS': 'MOAHS Konvergenz über Iterationen',
+          'PIPO_MOAHS_PLOT_GANTT': 'Gantt-Chart: Optimierter Plan'
+        }
+
+        // Get PIPO runs from recentSummaries
+        const pipoRuns = (recentSummaries ?? [])
+          .filter(s => s.stage === 'pipo' && s.pythonDebug)
+          .sort((a, b) => (a.createdAt > b.createdAt ? -1 : 1)) // Newest first
+          .slice(0, 10) // Last 10 runs
+
+        if (pipoRuns.length === 0) return null
+
+        // Use historyIndex to select which run to show (bounded)
+        const selectedRunIdx = Math.min(historyIndex, pipoRuns.length - 1)
+        const selectedRun = pipoRuns[selectedRunIdx]
+
+        if (!selectedRun?.pythonDebug || !Array.isArray(selectedRun.pythonDebug)) return null
+
+        // Extract plot entries
+        const plots = selectedRun.pythonDebug
+          .filter((d: any) =>
+            d.media &&
+            d.media.type === 'image/png' &&
+            d.media.encoding === 'base64' &&
+            d.media.data &&
+            (d.stage === 'PIPO_MOAHS_PLOT_ITERATIONS' ||
+             d.stage === 'PIPO_MOAHS_PLOT_GANTT')
+          )
+          .map((entry: any) => ({
+            stage: entry.stage as string,
+            label: stageLabels[entry.stage] || entry.stage,
+            imageData: entry.media.data as string,
+          }))
+
+        if (plots.length === 0) return null
+
+        return (
+          <div className="space-y-3">
+            {/* History navigation for PIPO runs */}
+            {pipoRuns.length > 1 && (
+              <div className="flex items-center gap-2 overflow-x-auto pb-2">
+                {pipoRuns.map((run, idx) => (
+                  <button
+                    key={`pipo-run-${idx}`}
+                    onClick={() => setHistoryIndex(idx)}
+                    className={`shrink-0 rounded px-2 py-1 text-[10px] font-medium transition-colors ${
+                      idx === selectedRunIdx
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                    }`}
+                  >
+                    Run #{pipoRuns.length - idx}
+                    <div className="text-[8px] opacity-75">
+                      {new Date(run.createdAt).toLocaleTimeString('de-DE', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="rounded border bg-white p-3 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold text-purple-900">
+                  MOAHS-Algorithmus - Visualisierungen
+                </div>
+                <div className="text-[9px] text-muted-foreground">
+                  {new Date(selectedRun.createdAt).toLocaleString('de-DE', {
+                    day: '2-digit',
+                    month: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                  })}
+                </div>
+              </div>
+              <div className="text-[10px] text-muted-foreground mb-2">
+                Kurzfristige Feinterminierung nach Becker (2025) - MOAHS Multi-Objective Optimization
+                {pipoRuns.length > 1 && ` • Run ${pipoRuns.length - selectedRunIdx} von ${pipoRuns.length}`}
+              </div>
+              {plots.map((plot, idx) => (
+                <div key={`${plot.stage}-${idx}`} className="space-y-2">
+                  <div className="text-[10px] font-medium text-purple-700">
+                    {plot.label}
+                  </div>
+                  <div className="rounded border border-purple-200 bg-purple-50/30 p-2">
+                    <img
+                      src={`data:image/png;base64,${plot.imageData}`}
+                      alt={plot.label}
+                      className="w-full h-auto rounded"
+                      style={{ maxWidth: '100%', height: 'auto' }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* OLD PIPO SVG rendering - keeping for reference, will remove later */}
+      {false && stageKey === 'pipo' && (() => {
+        const debug = Array.isArray(pythonDebug) ? pythonDebug : []
+        const iterationData = debug.find((d: any) => d.stage === 'PIPO_ITERATION_SERIES')
+        const ganttData = debug.find((d: any) => d.stage === 'PIPO_GANTT')
+
+        return (
+          <>
+            {/* Iteration Charts */}
+            {iterationData && (
+              <div className="rounded border bg-white p-3 space-y-3">
+                <div className="text-xs font-semibold text-purple-900">
+                  MOAHS-Konvergenz über Iterationen
+                </div>
+
+                {/* Makespan Chart */}
+                {iterationData.makespan && iterationData.makespan.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-medium text-muted-foreground">
+                      Durchlaufzeit (Makespan)
+                    </div>
+                    <div className="relative h-20 border rounded bg-muted/10 p-2">
+                      <svg className="w-full h-full">
+                        {(() => {
+                          const data = iterationData.makespan as [number, number][]
+                          const maxY = Math.max(...data.map(d => d[1]), 1)
+                          const minY = Math.min(...data.map(d => d[1]), 0)
+                          const range = maxY - minY || 1
+                          const points = data.map(([x, y], i) => {
+                            const xPos = (i / (data.length - 1 || 1)) * 100
+                            const yPos = 100 - ((y - minY) / range) * 100
+                            return `${xPos},${yPos}`
+                          }).join(' ')
+                          return (
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke="rgb(147, 51, 234)"
+                              strokeWidth="2"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          )
+                        })()}
+                      </svg>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tardiness Chart */}
+                {iterationData.tardiness && iterationData.tardiness.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-medium text-muted-foreground">
+                      Lieferterminverzug (Tardiness)
+                    </div>
+                    <div className="relative h-20 border rounded bg-muted/10 p-2">
+                      <svg className="w-full h-full">
+                        {(() => {
+                          const data = iterationData.tardiness as [number, number][]
+                          const maxY = Math.max(...data.map(d => d[1]), 1)
+                          const minY = Math.min(...data.map(d => d[1]), 0)
+                          const range = maxY - minY || 1
+                          const points = data.map(([x, y], i) => {
+                            const xPos = (i / (data.length - 1 || 1)) * 100
+                            const yPos = 100 - ((y - minY) / range) * 100
+                            return `${xPos},${yPos}`
+                          }).join(' ')
+                          return (
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke="rgb(234, 88, 12)"
+                              strokeWidth="2"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          )
+                        })()}
+                      </svg>
+                    </div>
+                  </div>
+                )}
+
+                {/* Idle Time Chart */}
+                {iterationData.idleTime && iterationData.idleTime.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-medium text-muted-foreground">
+                      Leerlaufzeit (Idle Time)
+                    </div>
+                    <div className="relative h-20 border rounded bg-muted/10 p-2">
+                      <svg className="w-full h-full">
+                        {(() => {
+                          const data = iterationData.idleTime as [number, number][]
+                          const maxY = Math.max(...data.map(d => d[1]), 1)
+                          const minY = Math.min(...data.map(d => d[1]), 0)
+                          const range = maxY - minY || 1
+                          const points = data.map(([x, y], i) => {
+                            const xPos = (i / (data.length - 1 || 1)) * 100
+                            const yPos = 100 - ((y - minY) / range) * 100
+                            return `${xPos},${yPos}`
+                          }).join(' ')
+                          return (
+                            <polyline
+                              points={points}
+                              fill="none"
+                              stroke="rgb(34, 197, 94)"
+                              strokeWidth="2"
+                              vectorEffect="non-scaling-stroke"
+                            />
+                          )
+                        })()}
+                      </svg>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Gantt Chart */}
+            {ganttData && ganttData.operations && ganttData.stations && (
+              <div className="rounded border bg-white p-3">
+                <div className="mb-2 text-xs font-semibold text-purple-900">
+                  Gantt-Chart (Ausgewählter Plan)
+                </div>
+                {(() => {
+                  const ops = ganttData.operations as Array<{
+                    stationId: string
+                    orderId: string
+                    start: number
+                    end: number
+                    expectedDuration: number
+                    resources: string[]
+                  }>
+                  const stations = ganttData.stations as string[]
+                  const startTime = ganttData.startTime as number
+
+                  const allTimes = ops.flatMap(op => [op.start, op.end])
+                  const minTime = Math.min(...allTimes, startTime)
+                  const maxTime = Math.max(...allTimes, startTime)
+                  const timeRange = maxTime - minTime || 1
+
+                  const colors = [
+                    'rgb(147, 51, 234)',
+                    'rgb(59, 130, 246)',
+                    'rgb(34, 197, 94)',
+                    'rgb(234, 88, 12)',
+                    'rgb(236, 72, 153)',
+                    'rgb(245, 158, 11)',
+                  ]
+
+                  const orderColors = new Map<string, string>()
+                  ops.forEach(op => {
+                    if (!orderColors.has(op.orderId)) {
+                      orderColors.set(op.orderId, colors[orderColors.size % colors.length])
+                    }
+                  })
+
+                  return (
+                    <div className="space-y-1">
+                      {stations.map((station, stationIdx) => {
+                        const stationOps = ops.filter(op => op.stationId === station)
+                        return (
+                          <div key={station} className="space-y-0.5">
+                            <div className="text-[9px] font-medium text-muted-foreground">
+                              {station}
+                            </div>
+                            <div className="relative h-6 border rounded bg-muted/10">
+                              {stationOps.map((op, opIdx) => {
+                                const left = ((op.start - minTime) / timeRange) * 100
+                                const width = ((op.end - op.start) / timeRange) * 100
+                                const color = orderColors.get(op.orderId) || 'rgb(100, 100, 100)'
+                                return (
+                                  <div
+                                    key={opIdx}
+                                    className="absolute top-0.5 bottom-0.5 rounded text-[7px] text-white flex items-center justify-center overflow-hidden"
+                                    style={{
+                                      left: `${left}%`,
+                                      width: `${width}%`,
+                                      backgroundColor: color,
+                                    }}
+                                    title={`${op.orderId}: ${op.start.toFixed(0)} - ${op.end.toFixed(0)} (${op.expectedDuration.toFixed(0)}min)`}
+                                  >
+                                    <span className="truncate px-1">{op.orderId}</span>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )
+                      })}
+                      <div className="mt-2 text-[9px] text-muted-foreground">
+                        Zeitbereich: {minTime.toFixed(0)} - {maxTime.toFixed(0)} min
+                      </div>
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+          </>
+        )
+      })()}
     </div>
   )
 }

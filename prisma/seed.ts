@@ -739,58 +739,6 @@ async function main() {
     }
   })
 
-  // Audi Aufträge
-  await prisma.auftrag.create({
-    data: {
-      kunde: { connect: { id: createdKunden[2].id } },
-      produktvariante: { connect: { id: audiVarianteBasic.id } },
-      phase: "REASSEMBLY_START",
-      factory: { connect: { id: createdAudiFactory.id } },
-      liefertermine: {
-        create: {
-          typ: "FEINTERMIN",
-          datum: new Date("2024-04-25"),
-          istAktuell: true,
-          bemerkung: "In Bearbeitung"
-        }
-      }
-    }
-  })
-
-  // VW Aufträge
-  await prisma.auftrag.create({
-    data: {
-      kunde: { connect: { id: createdKunden[0].id } },
-      produktvariante: { connect: { id: vwVarianteBasic.id } },
-      phase: "INSPEKTION",
-      factory: { connect: { id: createdVWFactory.id } },
-      liefertermine: {
-        create: {
-          typ: "GROB_ZEITSCHIENE",
-          datum: new Date("2024-07-01"),
-          istAktuell: true
-        }
-      }
-    }
-  })
-
-  await prisma.auftrag.create({
-    data: {
-      kunde: { connect: { id: createdKunden[1].id } },
-      produktvariante: { connect: { id: vwVariantePremium.id } },
-      phase: "INSPEKTION",
-      factory: { connect: { id: createdVWFactory.id } },
-      liefertermine: {
-        create: {
-          typ: "GROBTERMIN",
-          datum: new Date("2024-06-15"),
-          istAktuell: true,
-          bemerkung: "Wartet auf Inspektion"
-        }
-      }
-    }
-  })
-
   console.log('✅ Seeding completed successfully!')
 }
 

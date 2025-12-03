@@ -50,11 +50,6 @@ type BaugruppeInstanceWithDurations = {
   } | null
 }
 
-type DurationDefaults = {
-  demontage: number
-  montage: number
-}
-
 type SequenceTimingStep = {
   label: string
   duration: number
@@ -104,24 +99,32 @@ const STEP_SEPARATOR = '×'
 const STEP_INSPECTION = 'I'
 const STEP_QUALITY = 'Q'
 
-function resolveDuration(value: number | null | undefined, fallback: number) {
+function resolveDuration(value: number | null | undefined, context: string) {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return { duration: value, usedFallback: false }
   }
-  return { duration: fallback, usedFallback: true }
+  throw new Error(`[processSequenceDurations] Missing or invalid duration for ${context}`)
 }
 
 function buildInstanceProfiles(
-  instances: BaugruppeInstanceWithDurations[],
-  defaults: DurationDefaults
+  instances: BaugruppeInstanceWithDurations[]
 ): InstanceDurationProfile[] {
   return instances.map((instance) => {
     const label = (instance.baugruppe?.bezeichnung ?? '').trim() || instance.id
     const typeLabel = instance.baugruppe?.baugruppentyp?.bezeichnung?.trim() || null
-    const dem = resolveDuration(instance.baugruppe?.demontagezeit, defaults.demontage)
-    const montageOriginal = resolveDuration(instance.baugruppe?.montagezeit, defaults.montage)
+    const dem = resolveDuration(
+      instance.baugruppe?.demontagezeit,
+      `demontagezeit (${label})`
+    )
+    const montageOriginal = resolveDuration(
+      instance.baugruppe?.montagezeit,
+      `montagezeit (${label})`
+    )
     const replacementBase = instance.austauschBaugruppe?.montagezeit ?? instance.baugruppe?.montagezeit
-    const montageReplacement = resolveDuration(replacementBase, defaults.montage)
+    const montageReplacement = resolveDuration(
+      replacementBase,
+      `montagezeit replacement (${label})`
+    )
 
     return {
       keyLabel: label,
@@ -194,16 +197,10 @@ function popAssignedProfile(target: Map<string, InstanceDurationProfile[]>, labe
 function buildStepPayload(
   label: string,
   stage: 'demontage' | 'remontage',
-  profile: InstanceDurationProfile | null,
-  defaults: DurationDefaults
+  profile: InstanceDurationProfile | null
 ): SequenceTimingStep {
   if (!profile) {
-    return {
-      label,
-      duration: stage === 'demontage' ? defaults.demontage : defaults.montage,
-      stage,
-      fallback: true,
-    }
+    throw new Error(`[processSequenceDurations] Missing duration profile for step "${label}" in stage "${stage}"`)
   }
 
   const usesReplacement = stage === 'remontage' && profile.usesReplacement
@@ -234,8 +231,7 @@ function buildStepPayload(
 
 function buildSequenceTimingEntries(
   sequences: SequenceDefinition[],
-  baseMap: Map<string, InstanceDurationProfile[]>,
-  defaults: DurationDefaults
+  baseMap: Map<string, InstanceDurationProfile[]>
 ): SequenceTimingEntry[] {
   return sequences.map((sequence) => {
     const pool = clonePool(baseMap)
@@ -262,13 +258,13 @@ function buildSequenceTimingEntries(
         if (profile) {
           pushAssignedProfile(assigned, trimmed, profile)
         }
-        demontageSteps.push(buildStepPayload(trimmed, 'demontage', profile, defaults))
+        demontageSteps.push(buildStepPayload(trimmed, 'demontage', profile))
       } else {
         let profile = popAssignedProfile(assigned, trimmed)
         if (!profile) {
           profile = takeProfileForStep(pool, trimmed)
         }
-        remontageSteps.push(buildStepPayload(trimmed, 'remontage', profile, defaults))
+        remontageSteps.push(buildStepPayload(trimmed, 'remontage', profile))
       }
     })
 
@@ -297,19 +293,18 @@ function buildProcessSequenceDurationsPayload(
     baugruppen?: SequenceCollection
     baugruppentypen?: SequenceCollection
   },
-  instances: BaugruppeInstanceWithDurations[],
-  defaults: DurationDefaults
+  instances: BaugruppeInstanceWithDurations[]
 ): ProcessSequenceDurationsPayload {
-  const profiles = buildInstanceProfiles(instances, defaults)
+  const profiles = buildInstanceProfiles(instances)
   const labelMap = groupProfilesByKey(profiles, (profile) => profile.keyLabel)
   const typeMap = groupProfilesByKey(profiles, (profile) => profile.typeLabel ?? profile.keyLabel)
 
   return {
     baugruppen: {
-      sequences: buildSequenceTimingEntries(sequences.baugruppen?.sequences ?? [], labelMap, defaults),
+      sequences: buildSequenceTimingEntries(sequences.baugruppen?.sequences ?? [], labelMap),
     },
     baugruppentypen: {
-      sequences: buildSequenceTimingEntries(sequences.baugruppentypen?.sequences ?? [], typeMap, defaults),
+      sequences: buildSequenceTimingEntries(sequences.baugruppentypen?.sequences ?? [], typeMap),
     },
   }
 }
@@ -652,11 +647,7 @@ async function createSingleOrder(
             baugruppen: baugruppenSequences,
             baugruppentypen: baugruppentypSequences
           },
-          fullBaugruppenInstances as unknown as BaugruppeInstanceWithDurations[],
-          {
-            demontage: factory.defaultDemontagezeit || 30,
-            montage: factory.defaultMontagezeit || 45
-          }
+          fullBaugruppenInstances as unknown as BaugruppeInstanceWithDurations[]
         )
 
         // Update the order with both process graphs and sequences

@@ -172,11 +172,31 @@ export function QueueViewer({
                   <div className="mt-2 pt-2 border-t border-gray-200">
                     <div className="text-xs text-muted-foreground mb-1">Process Times:</div>
                     <div className="flex gap-2 flex-wrap">
-                      {Object.entries(entry.processTimes as Record<string, number>).map(([key, value]) => (
-                        <Badge key={key} variant="outline" className="text-xs">
-                          {key}: {value}m
-                        </Badge>
-                      ))}
+                      {(() => {
+                        const pt = entry.processTimes as any;
+                        // New structure with totals
+                        if (pt.totals && typeof pt.totals === 'object') {
+                          return Object.entries(pt.totals as Record<string, number>).map(([key, value]) => (
+                            <Badge key={key} variant="outline" className="text-xs">
+                              {key}: {value}m
+                              {pt[key === 'demontage' ? 'demontage' : 'remontage']?.length > 0 &&
+                                ` (${pt[key === 'demontage' ? 'demontage' : 'remontage'].length} ops)`
+                              }
+                            </Badge>
+                          ));
+                        }
+                        // Old structure with direct key-value pairs
+                        return Object.entries(pt as Record<string, number>).map(([key, value]) => {
+                          if (typeof value === 'number') {
+                            return (
+                              <Badge key={key} variant="outline" className="text-xs">
+                                {key}: {value}m
+                              </Badge>
+                            );
+                          }
+                          return null;
+                        }).filter(Boolean);
+                      })()}
                     </div>
                   </div>
                 )}

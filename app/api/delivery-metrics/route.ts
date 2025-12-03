@@ -6,6 +6,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url)
     const factoryId = url.searchParams.get('factoryId')
     const sinceParam = url.searchParams.get('since')
+    const simStartParam = url.searchParams.get('simulationStartTime')
 
     if (!factoryId) {
       return NextResponse.json(
@@ -30,7 +31,15 @@ export async function GET(request: Request) {
       }
     }
 
-    const result = await getDeliveryDeviationMetrics(factoryId, sinceDate)
+    let simulationStartTime: number | null = null
+    if (simStartParam) {
+      const numeric = Number(simStartParam)
+      if (!Number.isNaN(numeric) && Number.isFinite(numeric)) {
+        simulationStartTime = numeric
+      }
+    }
+
+    const result = await getDeliveryDeviationMetrics(factoryId, sinceDate, simulationStartTime)
     const status = result.success ? 200 : 500
     return NextResponse.json(result, { status })
   } catch (error) {

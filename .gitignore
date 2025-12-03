@@ -52,3 +52,9 @@ CLAUDE.md
 /apps
 .mcp.json
 .puppeteerrc.json/.env.local
+
+# database files - prevent nested duplicates
+prisma/**/dev.db
+prisma/**/dev.db-shm
+prisma/**/dev.db-wal
+*.db.bak

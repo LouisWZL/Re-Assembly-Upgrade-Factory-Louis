@@ -84,23 +84,45 @@ function extractDueDate(order: QueueEntryWithOrder['order']): number | undefined
 }
 
 function buildOperations(processTimes: any, prefix: 'dem' | 'mon'): PoolRecord['demOps'] {
-  if (!processTimes || typeof processTimes !== 'object') {
-    return []
+  const opsKey = prefix === 'dem' ? 'demontage' : 'montage'
+  const remontageKey = 'remontage'  // DB uses 'remontage' not 'montage'
+  const legacyKey = prefix === 'dem' ? 'dem' : 'mon'
+  const rawOps = processTimes?.[opsKey] ?? processTimes?.[remontageKey] ?? processTimes?.[legacyKey]
+
+  if (!Array.isArray(rawOps)) {
+    throw new Error(`[buildOperations] Missing or invalid operation array for ${opsKey} (also tried remontage and ${legacyKey})`)
   }
-  const value =
-    processTimes[prefix === 'dem' ? 'demontage' : 'montage'] ??
-    processTimes[prefix === 'dem' ? 'dem' : 'mon']
-  if (!value) {
-    return []
+  if (rawOps.length === 0) {
+    throw new Error(`[buildOperations] No operations provided for ${opsKey}`)
   }
-  const duration = Number(value) || 60
-  return [
-    {
-      id: `${prefix}-op`,
-      stationId: prefix === 'dem' ? 'demontage' : 'reassembly',
+
+  const stationId = prefix === 'dem' ? 'demontage' : 'reassembly'
+
+  return rawOps.map((op: any, index: number) => {
+    const duration = Number(op?.duration)
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error(`[buildOperations] Invalid duration for ${opsKey}[${index}] (value="${op?.duration}")`)
+    }
+
+    const label = typeof op?.label === 'string' && op.label.trim()
+      ? op.label.trim()
+      : `step-${index + 1}`
+
+    return {
+      id: op?.id ? String(op.id) : `${stationId}-${label}-${index}`,
+      stationId,
       expectedDuration: duration,
-    },
-  ]
+      label,
+      baugruppenInstanceId: op?.baugruppenInstanceId,
+      baugruppeId: op?.baugruppeId,
+      // Preserve semantic step information for downstream fixed-machine logic
+      meta: {
+        step: op?.baugruppentyp || label,
+        fallback: Boolean(op?.fallback),
+        usesReplacement: Boolean(op?.usesReplacement),
+      },
+    }
+  })
 }
 
 function normalizeProcessSequences(value: unknown): unknown {
@@ -231,6 +253,18 @@ async function buildConfig(factoryId: string, mode: SchedulingConfig['mode'], ov
 
 async function logStage(factoryId: string, stage: 'PAP' | 'PIP' | 'PIPO', mode: string, details: unknown) {
   try {
+    // Debug: Log what we're about to save
+    const debugArray = Array.isArray((details as any)?.debug) ? (details as any).debug : []
+    console.log(`[logStage][${stage}] 🔍 About to save debug.length: ${debugArray.length}`)
+    if (debugArray.length > 0) {
+      console.log(`[logStage][${stage}] 🔍 Debug stages: ${debugArray.map((d: any) => d.stage).join(', ')}`)
+      const lastDebug = debugArray[debugArray.length - 1]
+      console.log(`[logStage][${stage}] 🔍 Last debug stage: ${lastDebug?.stage}`)
+      if (lastDebug?.logs) {
+        console.log(`[logStage][${stage}] 🔍 Last debug has logs: ${typeof lastDebug.logs === 'string' ? lastDebug.logs.substring(0, 100) : 'not a string'}`)
+      }
+    }
+
     await prisma.schedulingLog.create({
       data: {
         factoryId,
@@ -239,6 +273,8 @@ async function logStage(factoryId: string, stage: 'PAP' | 'PIP' | 'PIPO', mode: 
         details: details as any,
       },
     })
+
+    console.log(`[logStage][${stage}] ✅ Successfully saved to database`)
   } catch (error) {
     console.warn(`[SchedulingLog] Failed to persist ${stage} entry:`, error)
   }
@@ -311,7 +347,31 @@ export async function runPapStage(factoryId: string, simMinute?: number) {
   const pools = new Pools(config)
   entries.forEach((entry) => pools.upsertPAP(toPoolRecord(entry)))
 
-  const result = await runPAPForecastAndBatch(pools, nowMinutes, config, factory)
+  const jsDebugBase = [
+    { stage: 'PAP_JS_START', queueSize: entries.length, simMinute: nowMinutes },
+  ]
+
+  let result
+  try {
+    result = await runPAPForecastAndBatch(pools, nowMinutes, config, factory)
+  } catch (error: any) {
+    result = {
+      batches: [],
+      etaList: [],
+      debug: [
+        ...jsDebugBase,
+        {
+          stage: 'PAP_JS_ERROR',
+          message: error?.message || 'Unknown PAP error',
+        },
+      ],
+    }
+  }
+  if (result) {
+    const dbg = Array.isArray((result as any).debug) ? (result as any).debug : []
+    dbg.unshift(...jsDebugBase)
+    ;(result as any).debug = dbg
+  }
 
   const batchInsights = buildPapBatchInsights(
     result?.batches,
@@ -423,7 +483,39 @@ export async function runPipStage(factoryId: string) {
     pools,
   }
 
-  const result = await runPIPIntegrated(pools, factoryEnv, config, factory)
+  const jsDebugBase = [
+    { stage: 'PIP_JS_START', queueSize: entries.length, simMinute: nowMinutes },
+  ]
+
+  let result
+  try {
+    result = await runPIPIntegrated(pools, factoryEnv, config, factory)
+    console.log(`[daemon][pip] 🔍 Received result with debug.length: ${Array.isArray((result as any)?.debug) ? (result as any).debug.length : 'N/A'}`)
+    if (Array.isArray((result as any)?.debug)) {
+      const lastDebug = (result as any).debug[(result as any).debug.length - 1]
+      console.log(`[daemon][pip] 🔍 Last debug stage from operator: ${lastDebug?.stage}`)
+    }
+  } catch (error: any) {
+    result = {
+      priorities: [],
+      routes: [],
+      batches: [],
+      releaseList: [],
+      debug: [
+        ...jsDebugBase,
+        {
+          stage: 'PIP_JS_ERROR',
+          message: error?.message || 'Unknown PIP error',
+        },
+      ],
+    }
+  }
+  if (result) {
+    const dbg = Array.isArray((result as any).debug) ? (result as any).debug : []
+    dbg.unshift(...jsDebugBase)
+    ;(result as any).debug = dbg
+    console.log(`[daemon][pip] 🔍 Final debug.length before logStage: ${dbg.length}`)
+  }
   await logStage(factoryId, 'PIP', config.mode, {
     ...result,
     queueSize: entries.length,
@@ -505,7 +597,38 @@ export async function runPipoStage(factoryId: string) {
     pools,
   }
 
-  const result = await runPIPoFineTermMOAHS(pools, factoryEnv, config, factory)
+  const jsDebugBase = [
+    { stage: 'PIPO_JS_START', queueSize: entries.length, simMinute: nowMinutes },
+  ]
+
+  let result
+  try {
+    result = await runPIPoFineTermMOAHS(pools, factoryEnv, config, factory)
+    console.log(`[daemon][pipo] 🔍 Received result with debug.length: ${Array.isArray((result as any)?.debug) ? (result as any).debug.length : 'N/A'}`)
+    if (Array.isArray((result as any)?.debug)) {
+      const lastDebug = (result as any).debug[(result as any).debug.length - 1]
+      console.log(`[daemon][pipo] 🔍 Last debug stage from operator: ${lastDebug?.stage}`)
+    }
+  } catch (error: any) {
+    result = {
+      paretoSet: [],
+      selectedPlanId: null,
+      releasedOps: [],
+      debug: [
+        ...jsDebugBase,
+        {
+          stage: 'PIPO_JS_ERROR',
+          message: error?.message || 'Unknown PIPO error',
+        },
+      ],
+    }
+  }
+  if (result) {
+    const dbg = Array.isArray((result as any).debug) ? (result as any).debug : []
+    dbg.unshift(...jsDebugBase)
+    ;(result as any).debug = dbg
+    console.log(`[daemon][pipo] 🔍 Final debug.length before logStage: ${dbg.length}`)
+  }
   await logStage(factoryId, 'PIPO', config.mode, {
     ...result,
     queueSize: entries.length,

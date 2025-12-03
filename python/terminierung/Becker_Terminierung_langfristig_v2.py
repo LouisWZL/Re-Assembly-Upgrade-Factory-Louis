@@ -796,77 +796,93 @@ def print_release_chart(batches: List[Dict[str, Any]], cfg: Dict[str, Any]) -> N
 # MAIN
 # -----------------------------
 def main():
-    payload = load_payload()
-    now = float(payload.get("now", 0.0))
-    cfg = apply_config_defaults(payload.get("config", {}))
-    orders = payload.get("orders", [])
-    new_orders = payload.get("newOrders", [])
-    global_sequences = payload.get("processSequences", {})
-    forecast = payload.get("forecast") or DEFAULT_FORECAST  # interne Defaults
+    progress: List[Dict[str, Any]] = [{"stage": "PAP_V2_STAGE", "step": "payload_loaded"}]
+    try:
+        payload = load_payload()
+        now = float(payload.get("now", 0.0))
+        cfg = apply_config_defaults(payload.get("config", {}))
+        orders = payload.get("orders", [])
+        new_orders = payload.get("newOrders", [])
+        global_sequences = payload.get("processSequences", {})
+        forecast = payload.get("forecast") or DEFAULT_FORECAST  # interne Defaults
 
-    debug: List[Dict[str, Any]] = []
-    debug.append({"stage": "INPUT", "now": now, "order_count": len(orders), "config_core": {
-        "T": cfg["intervalMinutes"],
-        "machines": cfg["machines"],
-        "targetUtilBase": cfg["targetUtil"],
-        "jaccardThreshold": cfg.get("jaccardThreshold", 0.3)
-    }})
+        debug: List[Dict[str, Any]] = []
+        debug.append({"stage": "INPUT", "now": now, "order_count": len(orders), "config_core": {
+            "T": cfg["intervalMinutes"],
+            "machines": cfg["machines"],
+            "targetUtilBase": cfg["targetUtil"],
+            "jaccardThreshold": cfg.get("jaccardThreshold", 0.3)
+        }})
+        progress.append({"stage": "PAP_V2_STAGE", "step": "input_parsed"})
 
-    # 1) Enrichment
-    enriched = enrich_orders(orders, cfg, now, global_sequences)
-    orders_map = {o["orderId"]: o for o in enriched if "orderId" in o}
-    seq_present = sum(1 for o in enriched if o.get("seqSet"))
+        # 1) Enrichment
+        enriched = enrich_orders(orders, cfg, now, global_sequences)
+        orders_map = {o["orderId"]: o for o in enriched if "orderId" in o}
+        seq_present = sum(1 for o in enriched if o.get("seqSet"))
+        progress.append({"stage": "PAP_V2_STAGE", "step": "enrichment_done", "orders": len(enriched)})
 
-    # Debug: Show sample sequences
-    print("\n=== SEQUENCE EXTRACTION DEBUG ===", file=sys.stderr)
-    for i, o in enumerate(enriched[:3]):  # Show first 3 orders
-        oid = o.get("orderId", "unknown")[:12]
-        seqset = o.get("seqSet", set())
-        raw_seq = orders[i].get("sequences") if i < len(orders) else None
-        print(f"Order {oid}:", file=sys.stderr)
-        print(f"  Raw sequences field: {raw_seq}", file=sys.stderr)
-        print(f"  Extracted seqSet: {sorted(list(seqset))[:10]}", file=sys.stderr)
-        print(f"  seqSet size: {len(seqset)}", file=sys.stderr)
-    print(f"\nTotal: {seq_present}/{len(enriched)} orders have non-empty sequences\n", file=sys.stderr)
+        # Debug: Show sample sequences
+        print("\n=== SEQUENCE EXTRACTION DEBUG ===", file=sys.stderr)
+        for i, o in enumerate(enriched[:3]):  # Show first 3 orders
+            oid = o.get("orderId", "unknown")[:12]
+            seqset = o.get("seqSet", set())
+            raw_seq = orders[i].get("sequences") if i < len(orders) else None
+            print(f"Order {oid}:", file=sys.stderr)
+            print(f"  Raw sequences field: {raw_seq}", file=sys.stderr)
+            print(f"  Extracted seqSet: {sorted(list(seqset))[:10]}", file=sys.stderr)
+            print(f"  seqSet size: {len(seqset)}", file=sys.stderr)
+        print(f"\nTotal: {seq_present}/{len(enriched)} orders have non-empty sequences\n", file=sys.stderr)
 
-    debug.append({"stage": "SEQUENCES",
-                  "orders_with_seq": seq_present,
-                  "orders_missing_seq": len(enriched) - seq_present})
+        debug.append({"stage": "SEQUENCES",
+                      "orders_with_seq": seq_present,
+                      "orders_missing_seq": len(enriched) - seq_present})
 
-    # 2) Batching (mit Prognose-Hooks)
-    batches, deferred_list = build_batches(enriched, cfg, now, forecast)
+        # 2) Batching (mit Prognose-Hooks)
+        batches, deferred_list = build_batches(enriched, cfg, now, forecast)
+        progress.append({"stage": "PAP_V2_STAGE", "step": "batching_done", "batches": len(batches)})
 
-    # 3) ETA je Auftrag
-    eta_list = build_eta_list(batches, orders_map, cfg)
+        # 3) ETA je Auftrag
+        eta_list = build_eta_list(batches, orders_map, cfg)
+        progress.append({"stage": "PAP_V2_STAGE", "step": "eta_done", "etaCount": len(eta_list)})
 
-    # 4) Bucket-Auslastung
-    util_fc = utilization_forecast(batches, orders_map, cfg)
+        # 4) Bucket-Auslastung
+        util_fc = utilization_forecast(batches, orders_map, cfg)
 
-    # 5) CTP (optional)
-    ctp_preview = []
-    if isinstance(new_orders, list) and new_orders:
-        ctp_preview = ctp_promise_orders(new_orders, batches, orders_map, cfg, now)
+        # 5) CTP (optional)
+        ctp_preview = []
+        if isinstance(new_orders, list) and new_orders:
+            ctp_preview = ctp_promise_orders(new_orders, batches, orders_map, cfg, now)
 
-    debug.append({
-        "stage": "SUMMARY",
-        "batches": len(batches),
-        "eta": len(eta_list),
-        "utilBuckets": len(util_fc),
-        "ctp": len(ctp_preview),
-        "deferred": len(deferred_list),
-        "forecast_present": isinstance(forecast, dict),
-        "targetUtil_eff": dynamic_target_util(cfg, forecast),
-        "bufferPct_eff": adjusted_buffer_pct(cfg, forecast)
-    })
+        debug.append({
+            "stage": "SUMMARY",
+            "batches": len(batches),
+            "eta": len(eta_list),
+            "utilBuckets": len(util_fc),
+            "ctp": len(ctp_preview),
+            "deferred": len(deferred_list),
+            "forecast_present": isinstance(forecast, dict),
+            "targetUtil_eff": dynamic_target_util(cfg, forecast),
+            "bufferPct_eff": adjusted_buffer_pct(cfg, forecast)
+        })
 
-    result = {
-        "batches": batches,
-        "etaList": eta_list,
-        "utilizationForecast": util_fc,
-        "ctpPreview": ctp_preview,
-        "deferredOrders": deferred_list,
-        "debug": debug
-    }
+        result = {
+            "batches": batches,
+            "etaList": eta_list,
+            "utilizationForecast": util_fc,
+            "ctpPreview": ctp_preview,
+            "deferredOrders": deferred_list,
+            "debug": progress + debug
+        }
+    except Exception as exc:  # pragma: no cover
+        result = {
+            "batches": [],
+            "etaList": [],
+            "utilizationForecast": [],
+            "ctpPreview": [],
+            "deferredOrders": [],
+            "debug": progress + [{"stage": "PAP_V2_ERROR", "message": str(exc)}],
+        }
+
     print(json.dumps(result))
 
 if __name__ == "__main__":

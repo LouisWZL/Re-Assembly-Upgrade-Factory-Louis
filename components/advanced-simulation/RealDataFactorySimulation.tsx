@@ -107,16 +107,32 @@ interface SchedulingStrategy {
 import { AdvancedKPIDashboard } from './AdvancedKPIDashboard';
 
 // Helper function to calculate process times from baugruppen
-function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
+function calculateProcessTimesFromBaugruppen(order: any, factory: any): {
+  demontage: number
+  montage: number
+  debug: {
+    orderId: string
+    baugruppenCount: number
+    baugruppen: Array<{name: string, demZeit: number | null, monZeit: number | null}>
+    finalDem: number
+    finalMon: number
+    usedDefaults: boolean
+  }
+} {
+  // DEBUG: Log what we receive
+  console.log('🔍 [calcProcessTimes] Called for order:', order.id?.slice(-4))
+  console.log('🔍 [calcProcessTimes] Keys in order object:', Object.keys(order))
+  console.log('🔍 [calcProcessTimes] baugruppenInstances present?:', !!order.baugruppenInstances)
+  console.log('🔍 [calcProcessTimes] baugruppenInstances length:', order.baugruppenInstances?.length)
+  if (order.baugruppenInstances && order.baugruppenInstances.length > 0) {
+    console.log('🔍 [calcProcessTimes] First baugruppe:', order.baugruppenInstances[0])
+  }
+
   const baugruppen = order.baugruppenInstances || []
-  console.log(`🔍 [calculateProcessTimesFromBaugruppen] Order ${order.id?.slice(-4)}: ${baugruppen.length} Baugruppen-Instanzen`)
+  const debugBaugruppen: Array<{name: string, demZeit: number | null, monZeit: number | null}> = []
 
   if (baugruppen.length === 0) {
-    console.log(`⚠️ [calculateProcessTimesFromBaugruppen] No Baugruppen, using factory defaults: dem=${factory.defaultDemontagezeit}, mon=${factory.defaultMontagezeit}`)
-    return {
-      demontage: factory.defaultDemontagezeit || 30,
-      montage: factory.defaultMontagezeit || 45
-    }
+    throw new Error(`[calcProcessTimes] Order ${order.id?.slice(-4)} has NO Baugruppen instances - cannot calculate process times. FIX DATA!`)
   }
 
   let totalDemontage = 0
@@ -124,12 +140,16 @@ function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
   let countDem = 0
   let countMon = 0
 
-  baugruppen.forEach((bg: any, idx: number) => {
+  baugruppen.forEach((bg: any) => {
     const demZeit = bg.baugruppe?.demontagezeit
     const monZeit = bg.baugruppe?.montagezeit
     const bgName = bg.baugruppe?.bezeichnung || 'Unknown'
 
-    console.log(`  [${idx}] ${bgName}: demontagezeit=${demZeit}, montagezeit=${monZeit}`)
+    debugBaugruppen.push({
+      name: bgName,
+      demZeit: demZeit ?? null,
+      monZeit: monZeit ?? null
+    })
 
     if (demZeit != null && demZeit > 0) {
       totalDemontage += demZeit
@@ -141,14 +161,27 @@ function calculateProcessTimesFromBaugruppen(order: any, factory: any) {
     }
   })
 
-  const finalDem = countDem > 0 ? Math.round(totalDemontage / countDem) : (factory.defaultDemontagezeit || 30)
-  const finalMon = countMon > 0 ? Math.round(totalMontage / countMon) : (factory.defaultMontagezeit || 45)
+  if (countDem === 0) {
+    throw new Error(`[calcProcessTimes] Order ${order.id?.slice(-4)} has ${baugruppen.length} Baugruppen but NO valid demontage times (all null/0). FIX DATA!`)
+  }
+  if (countMon === 0) {
+    throw new Error(`[calcProcessTimes] Order ${order.id?.slice(-4)} has ${baugruppen.length} Baugruppen but NO valid montage times (all null/0). FIX DATA!`)
+  }
 
-  console.log(`✅ [calculateProcessTimesFromBaugruppen] Final: dem=${finalDem} (${countDem} values, fallback=${factory.defaultDemontagezeit}), mon=${finalMon} (${countMon} values, fallback=${factory.defaultMontagezeit})`)
+  const finalDem = Math.round(totalDemontage / countDem)
+  const finalMon = Math.round(totalMontage / countMon)
 
   return {
     demontage: finalDem,
-    montage: finalMon
+    montage: finalMon,
+    debug: {
+      orderId: order.id?.slice(-4) || 'unknown',
+      baugruppenCount: baugruppen.length,
+      baugruppen: debugBaugruppen,
+      finalDem,
+      finalMon,
+      usedDefaults: countDem === 0 && countMon === 0
+    }
   }
 }
 
@@ -296,6 +329,8 @@ export function RealDataFactorySimulation() {
   // Local simulation data
   const [localStations, setLocalStations] = useState<SimulationStation[]>([]);
   const [factoryData, setFactoryData] = useState<any>(null);
+  const [orderProcessSequencesMap, setOrderProcessSequencesMap] = useState<Record<string, any>>({});
+  const orderProcessSequencesRef = useRef<Record<string, any>>({});
 
   // Simulation buffer for batched DB writes
   const bufferRef = useRef(getSimulationBuffer());
@@ -325,6 +360,17 @@ export function RealDataFactorySimulation() {
   // Collapsible sections state
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
   const [showDebugPanel, setShowDebugPanel] = useState(false)
+  const [showSetupTimeDetails, setShowSetupTimeDetails] = useState(false)
+  const [showDeliveryDetails, setShowDeliveryDetails] = useState(false)
+  const [processTimesDebug, setProcessTimesDebug] = useState<Array<{
+    orderId: string
+    baugruppenCount: number
+    baugruppen: Array<{name: string, demZeit: number | null, monZeit: number | null}>
+    finalDem: number
+    finalMon: number
+    usedDefaults: boolean
+  }>>([])
+  const [enqueueDiagnostics, setEnqueueDiagnostics] = useState<any[]>([])
 
   // Terminierung modal state
   const [terminierungModalOpen, setTerminierungModalOpen] = useState(false)
@@ -572,6 +618,16 @@ export function RealDataFactorySimulation() {
     simEventsRef.current.push({ t: getSimMinutes(), order_id: orderId, activity, slot: (slot ?? null) })
   }, [getSimMinutes])
 
+  // Wrapper for calculateProcessTimesFromBaugruppen that collects debug data
+  const calcProcessTimes = useCallback((order: any, factory: any) => {
+    const result = calculateProcessTimesFromBaugruppen(order, factory)
+    // Add to debug state (keep last 20)
+    setProcessTimesDebug(prev => [...prev, result.debug].slice(-20))
+    // Return only demontage/montage (not debug)
+    return { demontage: result.demontage, montage: result.montage }
+  }, [])
+  const enqueueDiagnosticsRef = useRef<any[]>([])
+
   // Main phase active trackers to enforce capacity=1
   const mainActiveRef = useRef<{ [stationId: string]: { orderId: string; remaining: number; total: number } | null }>({})
 
@@ -606,6 +662,19 @@ export function RealDataFactorySimulation() {
   useEffect(() => {
     setQueueDebugInfo(prev => (prev ? { ...prev, schedulingHistory } : prev))
   }, [schedulingHistory])
+  // Poll server-side enqueue diagnostics (best-effort, globalThis store)
+  useEffect(() => {
+    const diagInterval = setInterval(() => {
+      try {
+        // @ts-ignore
+        const globalLog = (globalThis as any).__queueDiagnosticsLog as any[] | undefined
+        if (globalLog && Array.isArray(globalLog)) {
+          enqueueDiagnosticsRef.current = globalLog.slice(-30)
+        }
+      } catch {}
+    }, 5000)
+    return () => clearInterval(diagInterval)
+  }, [])
   useEffect(() => {
     const min = getSimMinutes()
     const bucket = Math.floor(min / 10)
@@ -613,12 +682,12 @@ export function RealDataFactorySimulation() {
       lastGanttBucketRef.current = bucket
       setGanttRefreshKey(k => k + 1)
     }
-    // Refresh debug panel every second (in real time)
+    // Refresh debug panel every 5 seconds (in real time) to reduce RAM usage
     const debugInterval = setInterval(() => {
       if (isRunning) {
         setDebugRefreshKey(k => k + 1)
       }
-    }, 1000)
+    }, 5000)
     return () => clearInterval(debugInterval)
   }, [simulationTime, getSimMinutes, isRunning])
 
@@ -684,6 +753,75 @@ export function RealDataFactorySimulation() {
     }
   }, [activeFactory]);
 
+  // Track whether capacity settings have been initialized from DB
+  const capacityInitializedRef = useRef(false)
+
+  // Initialize capacity settings from Factory DB
+  useEffect(() => {
+    if (!activeFactory) return
+
+    // Validate that factory has capacity settings
+    const missingSettings: string[] = []
+    if (!activeFactory.anzahlDemontagestationen) missingSettings.push('anzahlDemontagestationen')
+    if (!activeFactory.anzahlMontagestationen) missingSettings.push('anzahlMontagestationen')
+
+    if (missingSettings.length > 0) {
+      console.error(`❌ [Capacity] Factory ${activeFactory.id} missing settings in DB:`)
+      console.error(`   Missing: ${missingSettings.join(', ')}`)
+      console.error(`   This will cause errors during PIP scheduling!`)
+    }
+
+    // Initialize state from DB values (with validation)
+    if (activeFactory.anzahlDemontagestationen !== undefined) {
+      setDemSlots(activeFactory.anzahlDemontagestationen)
+    }
+    if (activeFactory.anzahlMontagestationen !== undefined) {
+      setMonSlots(activeFactory.anzahlMontagestationen)
+    }
+    if (activeFactory.demFlexSharePct !== undefined) {
+      setDemFlexSharePct(activeFactory.demFlexSharePct)
+    }
+    if (activeFactory.monFlexSharePct !== undefined) {
+      setMonFlexSharePct(activeFactory.monFlexSharePct)
+    }
+    if (activeFactory.setupTimeMinutes !== undefined) {
+      setSetupTimeHours(activeFactory.setupTimeMinutes / 60)
+    }
+
+    console.log(`📊 [Capacity] Initialized from DB: dem=${activeFactory.anzahlDemontagestationen}, mon=${activeFactory.anzahlMontagestationen}, demFlex=${activeFactory.demFlexSharePct}%, monFlex=${activeFactory.monFlexSharePct}%, setup=${activeFactory.setupTimeMinutes}min`)
+
+    // Mark as initialized to enable sync
+    capacityInitializedRef.current = true
+  }, [activeFactory?.id]) // Only run when factory changes
+
+  // Sync capacity settings to Factory DB when changed (but not on initial load)
+  useEffect(() => {
+    if (!activeFactory?.id || !capacityInitializedRef.current) return
+
+    const updateCapacity = async () => {
+      try {
+        await fetch('/api/factories', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: activeFactory.id,
+            anzahlDemontagestationen: demSlots,
+            anzahlMontagestationen: monSlots,
+            demFlexSharePct: demFlexSharePct,
+            monFlexSharePct: monFlexSharePct,
+            setupTimeMinutes: Math.round(setupTimeHours * 60),
+          }),
+        })
+        console.log(`✅ [Capacity] Synced to DB: dem=${demSlots}, mon=${monSlots}, demFlex=${demFlexSharePct}%, monFlex=${monFlexSharePct}%, setup=${setupTimeHours}h`)
+      } catch (error) {
+        console.error('❌ [Capacity] Failed to sync to DB:', error)
+      }
+    }
+
+    const timer = setTimeout(updateCapacity, 500) // Debounce 500ms
+    return () => clearTimeout(timer)
+  }, [demSlots, monSlots, demFlexSharePct, monFlexSharePct, setupTimeHours, activeFactory?.id])
+
   // Load algorithm bundles
   const loadAlgorithmBundles = async () => {
     if (!activeFactory) return;
@@ -719,6 +857,9 @@ export function RealDataFactorySimulation() {
       const result = await getAdvancedSimulationData(activeFactory.id);
       
       if (result.success && result.data) {
+        const seqMap = result.data.orderProcessSequences || {};
+        setOrderProcessSequencesMap(seqMap);
+        orderProcessSequencesRef.current = seqMap;
         setFactoryData(result.data);
         await refreshDeliveryMetrics();
         
@@ -779,8 +920,6 @@ export function RealDataFactorySimulation() {
         
         const usedBaugruppentypen = getUsedBaugruppentypen();
         console.log('🏭 Factory Settings:');
-        console.log('  - Default Demontagezeit:', result.data.factory?.defaultDemontagezeit, 'min');
-        console.log('  - Default Montagezeit:', result.data.factory?.defaultMontagezeit, 'min');
         console.log('  - Total Baugruppen in Factory:', result.data.factory?.baugruppen?.length || 0);
         console.log('📋 Used Baugruppentypen:', usedBaugruppentypen.map(b => b.name));
 
@@ -794,11 +933,7 @@ export function RealDataFactorySimulation() {
           );
 
           if (baugruppenOfType.length === 0) {
-            console.warn(`⚠️ No Baugruppen found for Baugruppentyp ${baugruppentypId}, using factory defaults`);
-            return {
-              demontage: result.data.factory?.defaultDemontagezeit || 30,
-              montage: result.data.factory?.defaultMontagezeit || 45
-            };
+            throw new Error(`[getProcessingTimesForBaugruppentyp] NO Baugruppen found for type ${baugruppentypId}. FIX DATA!`);
           }
 
           // Calculate average demontage and montage times
@@ -815,12 +950,15 @@ export function RealDataFactorySimulation() {
             }
           });
 
-          const avgDem = countDem > 0
-            ? Math.round(totalDem / countDem)
-            : (result.data.factory?.defaultDemontagezeit || 30);
-          const avgMon = countMon > 0
-            ? Math.round(totalMon / countMon)
-            : (result.data.factory?.defaultMontagezeit || 45);
+          if (countDem === 0) {
+            throw new Error(`[getProcessingTimesForBaugruppentyp] Type ${baugruppentypId} has ${baugruppenOfType.length} Baugruppen but NO valid demontage times. FIX DATA!`);
+          }
+          if (countMon === 0) {
+            throw new Error(`[getProcessingTimesForBaugruppentyp] Type ${baugruppentypId} has ${baugruppenOfType.length} Baugruppen but NO valid montage times. FIX DATA!`);
+          }
+
+          const avgDem = Math.round(totalDem / countDem);
+          const avgMon = Math.round(totalMon / countMon);
 
           console.log(`📊 Baugruppentyp ${baugruppentypId}: ${baugruppenOfType.length} Baugruppen, avgDem=${avgDem}min (${countDem} values), avgMon=${avgMon}min (${countMon} values)`);
 
@@ -868,10 +1006,17 @@ export function RealDataFactorySimulation() {
         setContextStations(allStations);
         
         // Convert existing active orders to simulation format and assign to Auftragsannahme
-        const activeOrders = result.data.orders.filter((order: any) => 
+        const activeOrders = result.data.orders.filter((order: any) =>
           order.phase !== 'AUFTRAGSABSCHLUSS'
         );
-        
+
+        // DEBUG: Check if baugruppenInstances are loaded
+        console.log('🔍 [DATA CHECK] First order baugruppenInstances:', activeOrders[0]?.baugruppenInstances?.length || 0);
+        if (activeOrders[0]?.baugruppenInstances?.length > 0) {
+          console.log('🔍 [DATA CHECK] First baugruppe:', activeOrders[0].baugruppenInstances[0]);
+        }
+
+        const processSequencesFromApi = result.data.orderProcessSequences || {};
         const simulationOrders: SimulationOrder[] = activeOrders.map((order: any) => {
           const requiredBgt = extractRequiredBaugruppentypen(order);
           const requiredUpgrades = extractRequiredUpgrades(order);
@@ -882,9 +1027,15 @@ export function RealDataFactorySimulation() {
             [...mainStations, ...demontageSubStations, ...reassemblySubStations]
           );
 
-          // Calculate individual process times for this order based on its Baugruppen
-          const orderProcessTimes = calculateProcessTimesFromBaugruppen(order, result.data.factory);
-          console.log(`⏱️ [Order Init] ${order.kunde.vorname} ${order.kunde.nachname}: demontage=${orderProcessTimes.demontage}min, montage=${orderProcessTimes.montage}min`);
+          // Use PRE-CALCULATED process sequences from the server (NO FALLBACK!)
+          const orderProcessSequence = processSequencesFromApi[order.id];
+          if (!orderProcessSequence) {
+            throw new Error(`❌ CRITICAL: No process sequences found for order ${order.id.slice(-4)} in orderProcessSequences map! Available keys: ${Object.keys(processSequencesFromApi).length}`);
+          }
+
+          // Extract totals for initialization
+          const totals = orderProcessSequence.totals || { demontage: 0, montage: 0 };
+          console.log(`⏱️ [Order Init] ${order.kunde.vorname} ${order.kunde.nachname}: demontage=${totals.demontage}min (${orderProcessSequence.demontage?.length || 0} ops), montage=${totals.montage}min (${orderProcessSequence.remontage?.length || 0} ops)`);
 
           // Pre-initialize stationDurations with order-specific times
           const initialStationDurations: { [stationId: string]: { expected: number; actual?: number; startTime?: Date; completed?: boolean; waitingTime?: number } } = {};
@@ -892,14 +1043,17 @@ export function RealDataFactorySimulation() {
           // Set expected times for all stations in the process sequence
           processSeq.forEach(stationId => {
             const station = [...mainStations, ...demontageSubStations, ...reassemblySubStations].find(s => s.id === stationId);
-            let expectedTime = station?.processingTime || 30; // fallback
+            if (!station) {
+              throw new Error(`[loadSimulationData] Station ${stationId} not found in station list`)
+            }
+            let expectedTime = station.processingTime || 0;
 
             // Use order-specific times for demontage/montage stations
             if (station?.type === 'SUB') {
               if (station.phase === 'DEMONTAGE') {
-                expectedTime = orderProcessTimes.demontage;
+                expectedTime = totals.demontage;
               } else if (station.phase === 'REASSEMBLY') {
-                expectedTime = orderProcessTimes.montage;
+                expectedTime = totals.montage;
               }
             }
 
@@ -1115,12 +1269,16 @@ export function RealDataFactorySimulation() {
           console.log(`📦 Enqueueing ${simulationOrders.length} orders into PreAcceptanceQueue...`)
           for (const order of simulationOrders) {
             try {
+              const processSeq = orderProcessSequencesRef.current[order.id];
+              if (!processSeq) {
+                throw new Error(`❌ CRITICAL: No process sequences in ref for order ${order.id.slice(-4)} at initial enqueue! Available keys: ${Object.keys(orderProcessSequencesRef.current).length}`);
+              }
               await enqueueOrder(
                 'preAcceptance',
                 order.id,
                 0, // currentSimMinute = 0 at start
                 order.processSequences,
-                calculateProcessTimesFromBaugruppen(order, result.data.factory)
+                processSeq  // Pass the full sequence data including operations arrays
               )
               console.log(`✅ Enqueued order ${order.id.slice(-4)} into PreAcceptanceQueue`)
 
@@ -1679,6 +1837,10 @@ export function RealDataFactorySimulation() {
       if (!forceAll && deliveryMetricsSinceRef.current) {
         params.append('since', deliveryMetricsSinceRef.current.toString())
       }
+      // Pass simulation start time for correct date calculation
+      if (simulationStartTimeRef.current) {
+        params.append('simulationStartTime', simulationStartTimeRef.current.getTime().toString())
+      }
       const response = await fetch(`/api/delivery-metrics?${params.toString()}`, {
         cache: 'no-store',
       })
@@ -1732,7 +1894,9 @@ export function RealDataFactorySimulation() {
 
   const formatSimMinuteDateTime = (simMinute?: number | null) => {
     if (typeof simMinute !== 'number' || Number.isNaN(simMinute)) return '–'
-    const date = new Date(simMinute * 60000)
+    // Calculate date relative to simulation start time
+    const startTime = simulationStartTimeRef.current?.getTime() ?? 0
+    const date = new Date(startTime + simMinute * 60000)
     if (Number.isNaN(date.getTime())) return '–'
     const pad = (value: number) => String(Math.floor(Math.abs(value))).padStart(2, '0')
     const day = pad(date.getDate())
@@ -2142,23 +2306,31 @@ export function RealDataFactorySimulation() {
                   if (!order) return
 
                   if (stationId === 'order-acceptance') {
+                    const processSeq = orderProcessSequencesRef.current[finishedOrderId];
+                    if (!processSeq) {
+                      throw new Error(`❌ CRITICAL: No process sequences in ref for order ${finishedOrderId.slice(-4)} at acceptance!`);
+                    }
                     await enqueueOrder(
                       'preInspection',
                       finishedOrderId,
                       getSimMinutes(),
                       order.processSequences,
-                      calculateProcessTimesFromBaugruppen(order, factoryData?.factory)
+                      processSeq
                     )
                     console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished acceptance → PreInspectionQueue`)
                     // Add Gantt event for queue waiting start
                     pushEvent('QUEUE_WAIT:PRE_INSPECTION_START', finishedOrderId, null)
                   } else if (stationId === 'inspection') {
+                    const processSeq = orderProcessSequencesRef.current[finishedOrderId];
+                    if (!processSeq) {
+                      throw new Error(`❌ CRITICAL: No process sequences in ref for order ${finishedOrderId.slice(-4)} at inspection!`);
+                    }
                     await enqueueOrder(
                       'postInspection',
                       finishedOrderId,
                       getSimMinutes(),
                       order.processSequences,
-                      calculateProcessTimesFromBaugruppen(order, factoryData?.factory)
+                      processSeq
                     )
                     console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished inspection → PostInspectionQueue`)
                     // Add Gantt event for queue waiting start
@@ -2169,13 +2341,9 @@ export function RealDataFactorySimulation() {
                 }
               })()
 
+              // Get current simulation minute (relative to simulation start)
+              // Both plannedDeliverySimMinute and finalCompletionSimMinute should be stored as relative sim minutes
               const completionSimMinute = getSimMinutes()
-
-              // Convert relative sim minute to absolute timestamp (minutes since Unix epoch)
-              // plannedDeliverySimMinute is stored as absolute, so finalCompletionSimMinute should match
-              const absoluteCompletionMinutes = simulationStartTimeRef.current
-                ? simulationStartTimeRef.current.getTime() / 60000 + completionSimMinute
-                : completionSimMinute
 
               const completedOrderSnapshot =
                 stationId === 'quality-shipping'
@@ -2212,14 +2380,14 @@ export function RealDataFactorySimulation() {
                 if (completedOrderSnapshot && !completedOrderSnapshot.finalCompletionSimMinute) {
                   simulationOrdersRef.current = simulationOrdersRef.current.map((order) =>
                     order.id === finishedOrderId
-                      ? { ...order, finalCompletionSimMinute: absoluteCompletionMinutes }
+                      ? { ...order, finalCompletionSimMinute: completionSimMinute }
                       : order
                   )
                   const done = {
                     ...completedOrderSnapshot,
                     completedAt: new Date(),
                     schedulingAlgorithm: currentSchedulingAlgorithm,
-                    finalCompletionSimMinute: absoluteCompletionMinutes,
+                    finalCompletionSimMinute: completionSimMinute,
                   }
                   newCompletedOrders.push(done as any)
                   addCompletedOrder(done as any)
@@ -2229,7 +2397,7 @@ export function RealDataFactorySimulation() {
                       const { setOrderCompletionSimMinute } = await import(
                         '@/app/actions/advanced-simulation.actions'
                       )
-                      await setOrderCompletionSimMinute(finishedOrderId, absoluteCompletionMinutes)
+                      await setOrderCompletionSimMinute(finishedOrderId, completionSimMinute)
                     } catch (error) {
                       console.error('Failed to persist final completion sim minute:', error)
                     }
@@ -3412,23 +3580,51 @@ export function RealDataFactorySimulation() {
       // Use the SAME transformation logic as loadSimulationData
       const { processSequence: processSeq, selectedSequence } = selectRandomSequenceAndConvert(newOrder, localStations);
 
-      // Calculate order-specific process times
-      const orderProcessTimes = calculateProcessTimesFromBaugruppen(newOrder, factoryData.factory);
-      console.log(`⏱️ [Auto-Gen] Process times: demontage=${orderProcessTimes.demontage}min, montage=${orderProcessTimes.montage}min`);
+      // Use pre-calculated process sequences if available, otherwise fall back to times
+      let processSeqData;
+      if (newOrder.processSequenceDurations?.baugruppen?.sequences?.[0]) {
+        const seq = newOrder.processSequenceDurations.baugruppen.sequences[0];
+        processSeqData = {
+          demontage: seq.demontage || [],
+          remontage: seq.remontage || [],
+          totals: seq.totals || { demontage: 0, montage: 0 }
+        };
+      } else {
+        // Fallback: calculate times (for auto-generated orders)
+        const orderProcessTimes = newOrder.calculatedProcessTimes || calcProcessTimes(newOrder, factoryData.factory);
+        processSeqData = {
+          demontage: [],
+          remontage: [],
+          totals: { demontage: orderProcessTimes.demontage, montage: orderProcessTimes.montage }
+        };
+      }
+
+      console.log(`⏱️ [Auto-Gen] Process seq: demontage=${processSeqData.totals.demontage}min (${processSeqData.demontage.length} ops), montage=${processSeqData.totals.montage}min (${processSeqData.remontage.length} ops)`);
+      setOrderProcessSequencesMap(prev => ({
+        ...prev,
+        [newOrder.id]: processSeqData
+      }))
+      orderProcessSequencesRef.current = {
+        ...orderProcessSequencesRef.current,
+        [newOrder.id]: processSeqData
+      }
 
       // Pre-initialize stationDurations with order-specific times
       const initialStationDurations: { [stationId: string]: { expected: number; actual?: number; startTime?: Date; completed?: boolean; waitingTime?: number } } = {};
 
       processSeq.forEach(stationId => {
         const station = localStations.find(s => s.id === stationId);
-        let expectedTime = station?.processingTime || 30;
+        if (!station) {
+          throw new Error(`[addNewOrderToSimulation] Station ${stationId} not found in local stations`)
+        }
+        let expectedTime = station.processingTime || 0;
 
         // Use order-specific times for demontage/montage stations
         if (station?.type === 'SUB') {
           if (station.phase === 'DEMONTAGE') {
-            expectedTime = orderProcessTimes.demontage;
+            expectedTime = processSeqData.totals.demontage;
           } else if (station.phase === 'REASSEMBLY') {
-            expectedTime = orderProcessTimes.montage;
+            expectedTime = processSeqData.totals.montage;
           }
         }
 
@@ -3473,10 +3669,7 @@ export function RealDataFactorySimulation() {
         );
 
         if (baugruppenOfType.length === 0) {
-          return {
-            demontage: factoryData.factory?.defaultDemontagezeit || 30,
-            montage: factoryData.factory?.defaultMontagezeit || 45
-          };
+          throw new Error(`[addNewOrderToSimulation] NO Baugruppen found for type ${baugruppentypId}. FIX DATA!`);
         }
 
         let totalDem = 0, totalMon = 0, countDem = 0, countMon = 0;
@@ -3491,12 +3684,15 @@ export function RealDataFactorySimulation() {
           }
         });
 
-        const avgDem = countDem > 0
-          ? Math.round(totalDem / countDem)
-          : (factoryData.factory?.defaultDemontagezeit || 30);
-        const avgMon = countMon > 0
-          ? Math.round(totalMon / countMon)
-          : (factoryData.factory?.defaultMontagezeit || 45);
+        if (countDem === 0) {
+          throw new Error(`[addNewOrderToSimulation] Type ${baugruppentypId} has ${baugruppenOfType.length} Baugruppen but NO valid demontage times. FIX DATA!`);
+        }
+        if (countMon === 0) {
+          throw new Error(`[addNewOrderToSimulation] Type ${baugruppentypId} has ${baugruppenOfType.length} Baugruppen but NO valid montage times. FIX DATA!`);
+        }
+
+        const avgDem = Math.round(totalDem / countDem);
+        const avgMon = Math.round(totalMon / countMon);
 
         return { demontage: avgDem, montage: avgMon };
       };
@@ -3628,7 +3824,7 @@ export function RealDataFactorySimulation() {
           newOrder.id,
           getSimMinutes(), // Current sim time, not 0
           newOrder.processSequences,
-          orderProcessTimes
+          processSeqData  // Pass full sequence data including operations
         );
         console.log(`✅ [Auto-Gen] Order ${newOrder.id.slice(-4)} enqueued into PreAcceptanceQueue at t=${getSimMinutes().toFixed(1)}m`);
 
@@ -4846,391 +5042,85 @@ export function RealDataFactorySimulation() {
 
                 {showDebugInfo && (
                   <div className="space-y-3">
-                    {/* Queue Diagnostics */}
-                    <div className="mb-3 border-2 border-red-600 bg-red-50 p-3 rounded">
-                      <div className="text-sm font-bold text-red-900 mb-2">
-                        🧪 Queue Diagnostics (PAP-Pipeline)
-                      </div>
-                      <div className="text-xs text-red-900 space-y-2 bg-white p-2 rounded">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-semibold">Auto-Generate</span>
-                          <span className={autoStatusClass}>{autoStatusText}</span>
-                        </div>
-                        <div className="text-[11px]">
-                          <strong>Simulation:</strong> {queueDiagnostics.counts.totalSimOrders} gesamt • {queueDiagnostics.counts.bufferedOnly} nur im Sim-Puffer • {queueDiagnostics.counts.active} aktiv • {queueDiagnostics.counts.completed} abgeschlossen
-                        </div>
-                        <div className="text-[11px]">
-                          <strong>DB-Queues:</strong> PAP {queueDiagnostics.counts.preAccCount} ({queueDiagnostics.counts.preAccReady} ready) | PIP {queueDiagnostics.counts.preInspCount} ({queueDiagnostics.counts.preInspReady} ready) | PIPo {queueDiagnostics.counts.postInspCount} ({queueDiagnostics.counts.postInspReady} ready)
-                        </div>
-                        <div className="text-[11px]">
-                          <strong>PAP Runs:</strong> {queueDiagnostics.scheduling.papRuns} • {papLastRunText}
-                        </div>
-                        <div className="text-[11px]">
-                          <strong>Letzter PAP-Release:</strong> {releaseInfoText}
-                        </div>
-                      </div>
-                      <div className="mt-2">
-                        <div className="text-[10px] font-semibold text-red-900 uppercase tracking-wide mb-1">
-                          Findings
-                        </div>
-                        {queueDiagnostics.findings.length > 0 ? (
-                          <ul className="space-y-1 text-[11px] text-red-900">
-                            {queueDiagnostics.findings.map((finding, idx) => (
-                              <li key={`${finding.title}-${idx}`} className="flex gap-2">
-                                <span>{DIAG_SEVERITY_ICONS[finding.severity]}</span>
-                                <span>
-                                  <span className="font-semibold">{finding.title}:</span> {finding.detail}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <div className="text-[11px] text-green-700">
-                            ✅ Keine Auffälligkeiten – PAP, Queues und Monitor sind synchron.
-                          </div>
-                        )}
-                      </div>
-                    </div>
-
-                {/* Queue Status - GANZ OBEN */}
-                <div className="mb-3 border-2 border-green-600 bg-green-50 p-3 rounded">
-                  <div className="text-sm font-bold text-green-900 mb-2">
-                    🔍 QUEUE STATUS (Sim t={getSimMinutes()}min)
-                  </div>
-                  <div className="text-xs text-green-900 space-y-2 bg-white p-2 rounded">
-                    {queueDebugInfo ? (
-                      <>
-                        <div className="grid grid-cols-3 gap-2 text-[11px]">
-                          <div className="font-semibold">Queue</div>
-                          <div className="font-semibold">Orders (Ready)</div>
-                          <div className="font-semibold">Wait Time</div>
-
-                          <div>PreAcceptance:</div>
-                          <div className={queueDebugInfo.preAcceptanceReady > 0 ? 'text-green-600 font-bold' : ''}>
-                            {queueDebugInfo.preAcceptanceCount} ({queueDebugInfo.preAcceptanceReady} ready)
-                          </div>
-                          <div className="text-muted-foreground">{queueDebugInfo.config?.preAcceptanceReleaseMinutes || 0} min</div>
-
-                          <div>PreInspection:</div>
-                          <div className={queueDebugInfo.preInspectionReady > 0 ? 'text-green-600 font-bold' : ''}>
-                            {queueDebugInfo.preInspectionCount} ({queueDebugInfo.preInspectionReady} ready)
-                          </div>
-                          <div className="text-muted-foreground">{queueDebugInfo.config?.preInspectionReleaseMinutes || 0} min</div>
-
-                          <div>PostInspection:</div>
-                          <div className={queueDebugInfo.postInspectionReady > 0 ? 'text-green-600 font-bold' : ''}>
-                            {queueDebugInfo.postInspectionCount} ({queueDebugInfo.postInspectionReady} ready)
-                          </div>
-                          <div className="text-muted-foreground">{queueDebugInfo.config?.postInspectionReleaseMinutes || 0} min</div>
-                        </div>
-
-                        {queueDebugInfo.lastRelease && (
-                          <div className="border-t pt-2 mt-2 bg-green-100 p-2 rounded">
-                            <div className="text-[10px] font-bold text-green-800">
-                              🎉 Last Release: {queueDebugInfo.lastRelease.queue} released {queueDebugInfo.lastRelease.count} order(s) at sim t={queueDebugInfo.lastRelease.simTime}min
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="border-t pt-2 mt-2 text-[10px] text-muted-foreground">
-                          Last checked: sim t={queueDebugInfo.lastCheck}min | Current: sim t={getSimMinutes()}min
-                        </div>
-                      </>
-                    ) : (
-                      <div className="text-yellow-600 font-bold">⏳ Waiting for queue data... (updates every sim minute)</div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="mb-3 border-2 border-purple-600 bg-purple-50 p-3 rounded">
-                  <div className="text-sm font-bold text-purple-900 mb-2">🧠 Terminierung (Live)</div>
-                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {/* Python Scheduling Insights - Three Cards for PAP, PIP, PIPO */}
                     {(Object.keys(schedulingStageLabels) as SchedulingStageKey[]).map((stageKey) => {
                       const stats = schedulingStats[stageKey]
+                      const latestRun = schedulingHistory[stageKey][0]
+
+                      // Extract ALL logs from pythonDebug entries
+                      let pythonLogs = 'Keine Logs verfügbar'
+                      let debugStages: string[] = []
+
+                      if (latestRun?.pythonDebug && Array.isArray(latestRun.pythonDebug)) {
+                        const allLogs: string[] = []
+                        latestRun.pythonDebug.forEach((d: any) => {
+                          if (d.stage) debugStages.push(d.stage)
+                          if (d.logs && typeof d.logs === 'string') {
+                            allLogs.push(`=== ${d.stage} ===\n${d.logs}`)
+                          }
+                        })
+                        if (allLogs.length > 0) {
+                          pythonLogs = allLogs.join('\n\n')
+                        }
+                      }
+
                       return (
-                        <div
-                          key={stageKey}
-                          className="bg-white border border-purple-200 rounded p-2 space-y-1"
-                        >
-                          <div className="text-xs font-semibold text-purple-900">
-                            {schedulingStageLabels[stageKey]}
+                        <div key={stageKey} className="border-2 border-purple-600 bg-purple-50 p-3 rounded">
+                          <div className="text-sm font-bold text-purple-900 mb-2">
+                            {stageKey.toUpperCase()}: {schedulingStageLabels[stageKey]}
                           </div>
-                          <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-purple-900">
-                            <span>Läufe</span>
-                            <span className="text-right font-medium">{stats.runs}</span>
-                            <span>Letzter Lauf</span>
-                            <span className="text-right">{stats.lastRun !== null ? `${stats.lastRun} min` : '–'}</span>
-                            <span>Letzte Freigaben</span>
-                            <span className="text-right">{stats.lastReleased}</span>
-                            <span>Summe Freigaben</span>
-                            <span className="text-right">{stats.totalReleased}</span>
-                            <span>Letzte Änderungen</span>
-                            <span className="text-right">{stats.lastReorder}</span>
-                            <span>Summe Änderungen</span>
-                            <span className="text-right">{stats.totalReorder}</span>
-                            <span>Letzte Queuegröße</span>
-                            <span className="text-right">{stats.lastQueueSize}</span>
-                            <span>Letzte Batches</span>
-                            <span className="text-right">{stats.lastBatches}</span>
+
+                          {/* Stats Summary */}
+                          <div className="bg-white p-2 rounded mb-2">
+                            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-purple-900">
+                              <span>Runs:</span>
+                              <span className="text-right font-medium">{stats.runs}</span>
+                              <span>Last Run:</span>
+                              <span className="text-right">{stats.lastRun !== null ? `t=${stats.lastRun}min` : '–'}</span>
+                              <span>Released:</span>
+                              <span className="text-right">{stats.lastReleased} (total: {stats.totalReleased})</span>
+                              <span>Queue Size:</span>
+                              <span className="text-right">{stats.lastQueueSize}</span>
+                            </div>
+                          </div>
+
+                          {/* Latest Run Payload Info */}
+                          {latestRun && (
+                            <div className="bg-blue-50 border border-blue-200 p-2 rounded mb-2">
+                              <div className="text-xs font-semibold text-blue-900 mb-1">Latest Run Payload</div>
+                              <div className="text-[10px] text-blue-900 space-y-0.5 font-mono">
+                                <div>t={latestRun.simMinute}min • Orders: {latestRun.queueSize || 0}</div>
+                                <div>Released: {latestRun.releasedCount || 0} • Reordered: {latestRun.reorderCount || 0}</div>
+                                {latestRun.pythonReleaseList && latestRun.pythonReleaseList.length > 0 && (
+                                  <div className="mt-1 text-[9px]">
+                                    Python Release List: {latestRun.pythonReleaseList.slice(0, 3).map(id => id.slice(-4)).join(', ')}
+                                    {latestRun.pythonReleaseList.length > 3 && ` +${latestRun.pythonReleaseList.length - 3} more`}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Python Debug Info */}
+                          <div className="bg-yellow-50 border border-yellow-200 p-2 rounded mb-2">
+                            <div className="text-xs font-semibold text-yellow-900 mb-1">Debug Stages Found</div>
+                            <div className="text-[9px] text-yellow-900 font-mono">
+                              {debugStages.length > 0 ? debugStages.join(', ') : 'No debug data'}
+                            </div>
+                          </div>
+
+                          {/* Python Logs */}
+                          <div className="bg-green-50 border border-green-200 p-2 rounded">
+                            <div className="text-xs font-semibold text-green-900 mb-1">Python Logs</div>
+                            <pre className="text-[9px] text-green-900 font-mono whitespace-pre-wrap max-h-96 overflow-y-auto bg-white p-2 rounded">
+                              {pythonLogs}
+                            </pre>
                           </div>
                         </div>
                       )
                     })}
                   </div>
-                  <div className="mt-3 border-t border-purple-200 pt-2">
-                    <div className="text-xs font-semibold text-purple-900 mb-1">Run-Historie (letzte 3)</div>
-                    <div className="space-y-2">
-                      {(Object.keys(schedulingStageLabels) as SchedulingStageKey[]).map((stageKey) => (
-                        <div key={stageKey} className="bg-white border border-purple-100 rounded p-2 text-[10px] text-purple-900">
-                          <div className="font-semibold mb-1">{schedulingStageLabels[stageKey]}</div>
-                          {schedulingHistory[stageKey].length === 0 ? (
-                            <div className="text-muted-foreground">Keine Läufe protokolliert.</div>
-                          ) : (
-                            schedulingHistory[stageKey].slice(0, 3).map((entry, idx) => (
-                              <div key={idx} className="border-t border-dashed pt-1 mt-1">
-                                <div>
-                                  t={entry.simMinute ?? '–'}min • Released: {entry.releasedCount ?? 0} • Changes: {entry.reorderCount ?? 0}
-                                </div>
-                                {Array.isArray(entry.orderSequence) && entry.orderSequence.length > 0 && (
-                                  <div>
-                                    Seq: {entry.orderSequence.slice(0, 5).join(', ')}
-                                    {entry.orderSequence.length > 5 ? ' …' : ''}
-                                  </div>
-                                )}
-                                {Array.isArray(entry.pythonReleaseList) && entry.pythonReleaseList.length > 0 && (
-                                  <div>
-                                    Python: {entry.pythonReleaseList.slice(0, 5).join(', ')}
-                                    {entry.pythonReleaseList.length > 5 ? ' …' : ''}
-                                  </div>
-                                )}
-                                <div>PyDiff: {entry.pythonDiffCount ?? entry.reorderCount ?? 0}</div>
-                                {Array.isArray(entry.pythonDebug) && entry.pythonDebug.length > 0 && (
-                                  <div>
-                                    Debug:{' '}
-                                    {entry.pythonDebug
-                                      .slice(0, 2)
-                                      .map((d: any, idx: number) => {
-                                        const stage = typeof d?.stage === 'string' ? d.stage : `step-${idx + 1}`
-                                        const message =
-                                          typeof d?.message === 'string'
-                                            ? d.message
-                                            : JSON.stringify(d)
-                                        return `${stage}: ${message}`
-                                      })
-                                      .join(' | ')}
-                                    {entry.pythonDebug.length > 2 ? ' …' : ''}
-                                  </div>
-                                )}
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  {Object.values(schedulingStats).every(stats => stats.runs === 0) && (
-                    <div className="text-[10px] text-purple-700 mt-2">
-                      Noch keine Terminierung durchgeführt.
-                    </div>
-                  )}
-                </div>
 
-                {/* React Flow Debug Section */}
-                <div className="mb-3 border-2 border-blue-600 bg-blue-50 p-3 rounded">
-                  <div className="text-sm font-bold text-blue-900 mb-2">🎨 React Flow Status</div>
-                  <div className="text-xs text-blue-900 space-y-2 bg-white p-2 rounded">
-                    <div><strong>Nodes Count:</strong> {nodes.length} {nodes.length === 0 && <span className="text-red-600 font-bold">❌ LEER!</span>}</div>
-                    <div><strong>Edges Count:</strong> {edges.length} {edges.length === 0 && <span className="text-red-600 font-bold">❌ LEER!</span>}</div>
-                    <div className="border-t pt-2 mt-2">
-                      <strong>Nodes:</strong>
-                      <div className="font-mono text-[10px] bg-gray-50 p-2 rounded mt-1 max-h-24 overflow-y-auto">
-                        {nodes.length > 0 ? (
-                          nodes.map(n => (
-                            <div key={n.id}>{n.id} ({n.type || 'default'}) @ x:{n.position.x} y:{n.position.y}</div>
-                          ))
-                        ) : (
-                          <div className="text-red-600 font-bold">❌ KEINE NODES!</div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="border-t pt-2 mt-2">
-                      <strong>Edges:</strong>
-                      <div className="font-mono text-[10px] bg-gray-50 p-2 rounded mt-1 max-h-24 overflow-y-auto">
-                        {edges.length > 0 ? (
-                          edges.map(e => (
-                            <div key={e.id}>{e.source} → {e.target}</div>
-                          ))
-                        ) : (
-                          <div className="text-red-600 font-bold">❌ KEINE EDGES!</div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mb-3 border-2 border-red-600 bg-red-50 p-3 rounded">
-                  <div className="text-sm font-bold text-red-900 mb-2">⚠️ PROBLEM DIAGNOSTICS</div>
-                  <div className="text-xs text-red-900 space-y-2 bg-white p-2 rounded">
-                    <div><strong>DEM Queue:</strong> {demQueueRef.current.length} (SOLLTE &gt; 0 SEIN!)</div>
-                    <div><strong>MON Queue:</strong> {monQueueRef.current.length}</div>
-                    <div><strong>DEM Ready:</strong> {demReadySetRef.current.size} Aufträge warten</div>
-                    <div><strong>Active Orders:</strong> {activeOrders.length}</div>
-                    {initError && (
-                      <div className="border-t pt-2 mt-2 bg-red-100 p-2 rounded">
-                        <strong className="text-red-900">🚨 INIT ERROR:</strong>
-                        <div className="font-mono text-[10px] text-red-800 mt-1">{initError}</div>
-                      </div>
-                    )}
-                    <div className="border-t pt-2 mt-2">
-                      <strong>Initialization Logs ({initDebugLogs.length} total):</strong>
-                      <div className="mt-1 max-h-32 overflow-y-auto font-mono text-[10px] bg-yellow-50 p-2 rounded">
-                        {initDebugLogs.length > 0 ? (
-                          initDebugLogs.map((log, i) => (
-                            <div key={i} className={i < 3 ? 'font-bold text-red-800' : 'text-gray-700'}>{log}</div>
-                          ))
-                        ) : (
-                          <div className="text-red-600 font-bold">❌ KEINE LOGS! initDebugLogs ist LEER!</div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs mb-3">
-                  <div>
-                    <span className="font-semibold">DEM Queue:</span> {demQueueRef.current.length}
-                  </div>
-                  <div>
-                    <span className="font-semibold">MON Queue:</span> {monQueueRef.current.length}
-                  </div>
-                  <div>
-                    <span className="font-semibold">DEM Active:</span> {demActivesRef.current.length}
-                  </div>
-                  <div>
-                    <span className="font-semibold">MON Active:</span> {monActivesRef.current.length}
-                  </div>
-                  <div>
-                    <span className="font-semibold">DEM Ready:</span> {demReadySetRef.current.size}
-                  </div>
-                  <div className="col-span-2">
-                    <span className="font-semibold">Main Queues:</span> A:{mainQueuesRef.current.acceptance.length} I:{mainQueuesRef.current.inspection.length} <strong className="text-red-600">QS:{mainQueuesRef.current.qualityShipping.length}</strong>
-                  </div>
-                  <div className="col-span-2">
-                    <span className="font-semibold">Quality-Shipping Station:</span> {stations.find(s => s.id === 'quality-shipping')?.currentOrder?.kundeName || 'FREI'} | Queue: {stations.find(s => s.id === 'quality-shipping')?.waitingQueue?.length || 0}
-                  </div>
-                  <div className="col-span-2">
-                    <span className="font-semibold">DEM Queue IDs:</span> {demQueueRef.current.map(b => `${b.orderId.slice(-4)}(${b.ops.length}ops)`).join(', ') || 'empty'}
-                  </div>
-                  <div className="col-span-2">
-                    <span className="font-semibold">DEM Active:</span> {demActivesRef.current.map(a => `${a.orderId.slice(-4)}@slot${a.slotIdx}(${a.remaining.toFixed(1)}/${a.total}min)`).join(', ') || 'none'}
-                  </div>
-                  <div className="col-span-4">
-                    <span className="font-semibold">Orders @ Demontage:</span> {activeOrders.filter(o => o.currentStation === 'demontage').map(o => `${(o as any).kundeName?.slice(0,10)}(${o.progress.toFixed(0)}%)`).join(', ') || 'none'}
-                  </div>
-                  <div className="col-span-4 bg-red-100 p-2 rounded">
-                    <span className="font-semibold text-red-900">Orders @ Quality-Shipping:</span> {activeOrders.filter(o => o.currentStation === 'quality-shipping').map(o => `${(o as any).kundeName?.slice(0,10)}(${o.progress.toFixed(0)}%, waiting:${o.isWaiting})`).join(', ') || 'NONE - THIS IS THE PROBLEM!'}
-                  </div>
-                  <div className="col-span-4 border-t pt-2 mt-2">
-                    <div className="font-semibold mb-1">🔧 Dispatcher Debug:</div>
-                    <div className="text-[10px] space-y-1">
-                      <div>Current Sim Time: {getSimMinutes()} minutes (Speed: {speed}x, Setup: {setupTimeHours}h = {Math.round(setupTimeHours * 60)}min)</div>
-                      <div>DEM Slots: {demSlotsRef.current.length} ({demSlotsRef.current.filter(s => s.busy).length} busy)</div>
-                      <div>Slot Details: {demSlotsRef.current.map((s, i) => `S${i}:${s.busy?'B':'F'}${s.flex?'flex':'rigid'}${s.specialization?`(${normalizeOperationKey(s.specialization)})`:''}`).join(' ')}</div>
-                      <div className="text-[9px] text-blue-700 mt-1">
-                        DEM Active Ops: {demActivesRef.current.length} - {demActivesRef.current.map(a => `${a.orderId.slice(-4)}:${a.label}@S${a.slotIdx}`).join(', ') || 'none'}
-                      </div>
-                      <div className="text-[9px] text-purple-700">
-                        MON Active Ops: {monActivesRef.current.length} - {monActivesRef.current.map(a => `${a.orderId.slice(-4)}:${a.label}@S${a.slotIdx}`).join(', ') || 'none'}
-                      </div>
-                      <div className="mt-2 p-2 bg-red-50 border border-red-300 rounded">
-                        <div className="font-semibold text-red-900 mb-1">🔍 Slot Consistency Check:</div>
-                        {(() => {
-                          const demBusySlots = demSlotsRef.current.map((s, i) => ({ idx: i, busy: s.busy })).filter(s => s.busy)
-                          const demActiveSlots = demActivesRef.current.map(a => a.slotIdx)
-                          const demOrphans = demBusySlots.filter(s => !demActiveSlots.includes(s.idx))
-
-                          const monBusySlots = monSlotsRef.current.map((s, i) => ({ idx: i, busy: s.busy })).filter(s => s.busy)
-                          const monActiveSlots = monActivesRef.current.map(a => a.slotIdx)
-                          const monOrphans = monBusySlots.filter(s => !monActiveSlots.includes(s.idx))
-
-                          return (
-                            <div className="text-[9px] space-y-1">
-                              <div className={demOrphans.length > 0 ? 'text-red-700 font-bold' : 'text-green-700'}>
-                                DEM: {demBusySlots.length} busy slots [{demBusySlots.map(s => s.idx).join(',')}], {demActiveSlots.length} active ops [{demActiveSlots.join(',')}]
-                                {demOrphans.length > 0 && <span className="ml-2">⚠️ ORPHAN SLOTS: [{demOrphans.map(s => s.idx).join(',')}]</span>}
-                              </div>
-                              <div className={monOrphans.length > 0 ? 'text-red-700 font-bold' : 'text-green-700'}>
-                                MON: {monBusySlots.length} busy slots [{monBusySlots.map(s => s.idx).join(',')}], {monActiveSlots.length} active ops [{monActiveSlots.join(',')}]
-                                {monOrphans.length > 0 && <span className="ml-2">⚠️ ORPHAN SLOTS: [{monOrphans.map(s => s.idx).join(',')}]</span>}
-                              </div>
-                            </div>
-                          )
-                        })()}
-                      </div>
-                      <div className="mt-1 p-1 bg-yellow-50 border border-yellow-300 rounded">
-                        <div className="font-semibold text-yellow-900">⚠️ Multi-Slot Check:</div>
-                        {(() => {
-                          const orderSlotMap: Record<string, number[]> = {}
-                          demActivesRef.current.forEach((active, idx) => {
-                            if (!orderSlotMap[active.orderId]) orderSlotMap[active.orderId] = []
-                            orderSlotMap[active.orderId].push(active.slotIdx)
-                          })
-                          const violations = Object.entries(orderSlotMap).filter(([_, slots]) => slots.length > 1)
-                          return violations.length > 0 ? (
-                            <div className="text-[9px] text-red-700">
-                              {violations.map(([orderId, slots]) => (
-                                <div key={orderId}>
-                                  🔴 Order {orderId.slice(-6)} occupies {slots.length} DEM slots: [{slots.join(', ')}]
-                                </div>
-                              ))}
-                            </div>
-                          ) : <div className="text-[9px] text-green-700">✅ No order occupies multiple DEM slots</div>
-                        })()}
-                      </div>
-                      <div className="mt-1 p-1 bg-yellow-50 border border-yellow-300 rounded">
-                        <div className="font-semibold text-yellow-900">⚠️ Multi-Slot Check (MON):</div>
-                        {(() => {
-                          const orderSlotMap: Record<string, number[]> = {}
-                          monActivesRef.current.forEach((active, idx) => {
-                            if (!orderSlotMap[active.orderId]) orderSlotMap[active.orderId] = []
-                            orderSlotMap[active.orderId].push(active.slotIdx)
-                          })
-                          const violations = Object.entries(orderSlotMap).filter(([_, slots]) => slots.length > 1)
-                          return violations.length > 0 ? (
-                            <div className="text-[9px] text-red-700">
-                              {violations.map(([orderId, slots]) => (
-                                <div key={orderId}>
-                                  🔴 Order {orderId.slice(-6)} occupies {slots.length} MON slots: [{slots.join(', ')}]
-                                </div>
-                              ))}
-                            </div>
-                          ) : <div className="text-[9px] text-green-700">✅ No order occupies multiple MON slots</div>
-                        })()}
-                      </div>
-                      <div>Simulation Running: {isRunning ? 'YES' : 'NO'}</div>
-                      <div>Aggregate View: {aggregateView ? 'YES' : 'NO'}</div>
-                      <div className="mt-2 border-t pt-2">
-                        <div className="font-semibold">Last Dispatcher Attempts:</div>
-                        <div className="max-h-20 overflow-y-auto bg-gray-100 p-1 rounded mt-1">
-                          {dispatcherLogsRef.current.slice(-10).map((log, i) => (
-                            <div key={i} className="text-[9px]">{log}</div>
-                          ))}
-                          {dispatcherLogsRef.current.length === 0 && <div className="text-gray-500">No logs yet</div>}
-                        </div>
-                      </div>
-                      <div className="mt-2 border-t pt-2">
-                        <div className="font-semibold">Last pickSlot Debug:</div>
-                        <div className="max-h-40 overflow-y-auto bg-red-50 p-1 rounded mt-1 font-mono">
-                          {pickSlotDebugLogsRef.current.map((log, i) => (
-                            <div key={i} className="text-[9px] whitespace-pre">{log}</div>
-                          ))}
-                          {pickSlotDebugLogsRef.current.length === 0 && <div className="text-gray-500">No logs yet</div>}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                </div>
                 )}
               </div>
             )}
@@ -5553,7 +5443,7 @@ export function RealDataFactorySimulation() {
 
         {/* Rüstzeiten Analysis */}
         <Card>
-          <CardHeader>
+          <CardHeader className="pb-2">
             <CardTitle className="text-lg">Rüstzeiten-Analyse</CardTitle>
           </CardHeader>
           <CardContent>
@@ -5646,76 +5536,94 @@ export function RealDataFactorySimulation() {
 
                 return (
                   <div className="space-y-2">
-                    {/* Summary Cards */}
-                    <div className="grid grid-cols-1 gap-1.5">
-                      <div className="p-2 bg-slate-50 border border-slate-200 rounded">
-                        <div className="text-xs text-slate-600 font-medium">Eingestellte Rüstzeit</div>
-                        <div className="text-xl font-bold text-slate-900">{setupMinutes} min</div>
-                      </div>
-                      <div className="p-2 bg-slate-50 border border-slate-200 rounded">
-                        <div className="text-xs text-slate-600 font-medium">Anzahl Umrüstungen</div>
-                        <div className="text-xl font-bold text-slate-900">{setupEventCount}</div>
-                      </div>
-                      <div className="p-2 bg-blue-50 border border-blue-200 rounded">
-                        <div className="text-xs text-blue-700 font-medium">Ø Rüstzeit / Auftrag</div>
-                        <div className="text-xl font-bold text-blue-900">{avgSetupPerOrder.toFixed(1)} min</div>
-                      </div>
-                      <div className="p-2 bg-blue-50 border border-blue-200 rounded">
-                        <div className="text-xs text-blue-700 font-medium">Ø Fertigungszeit / Auftrag</div>
-                        <div className="text-xl font-bold text-blue-900">{avgProdPerOrder.toFixed(1)} min</div>
-                      </div>
+                    {/* Main Summary - Always Visible */}
+                    <div className="p-3 bg-blue-50 border border-blue-200 rounded">
+                      <div className="text-xs text-blue-700 font-medium">Ø Rüstzeit / Auftrag</div>
+                      <div className="text-2xl font-bold text-blue-900">{avgSetupPerOrder.toFixed(1)} min</div>
                     </div>
 
-                    {/* Ratio Visualization */}
-                    <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
-                      <h4 className="text-xs font-semibold mb-1.5 text-slate-700">Rüstzeit im Verhältnis zur Fertigungszeit</h4>
-                      <div className="flex items-center gap-2">
-                        <div className="flex-1">
-                          <div className="flex items-center justify-between text-[11px] mb-1">
-                            <span className="text-slate-600 font-medium">Rüstzeit: {avgSetupPerOrder.toFixed(1)} min</span>
-                            <span className="text-slate-600 font-medium">Fertigungszeit: {avgProdPerOrder.toFixed(1)} min</span>
+                    {/* Toggle Button */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full text-xs text-slate-600 hover:text-slate-900"
+                      onClick={() => setShowSetupTimeDetails(!showSetupTimeDetails)}
+                    >
+                      {showSetupTimeDetails ? 'Details ausblenden' : 'Details anzeigen'}
+                      <ChevronDown className={`ml-1 h-3 w-3 transition-transform ${showSetupTimeDetails ? 'rotate-180' : ''}`} />
+                    </Button>
+
+                    {/* Detailed View - Collapsible */}
+                    {showSetupTimeDetails && (
+                      <>
+                        {/* Additional Summary Cards */}
+                        <div className="grid grid-cols-1 gap-1.5">
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <div className="text-xs text-slate-600 font-medium">Eingestellte Rüstzeit</div>
+                            <div className="text-xl font-bold text-slate-900">{setupMinutes} min</div>
                           </div>
-                          <div className="h-5 bg-slate-200 rounded overflow-hidden flex">
-                            <div
-                              className="bg-blue-600 flex items-center justify-center text-[11px] text-white font-medium"
-                              style={{ width: `${Math.min((avgSetupPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
-                            >
-                              {setupRatio > 5 && `${setupRatio.toFixed(1)}%`}
-                            </div>
-                            <div
-                              className="bg-blue-900 flex items-center justify-center text-[11px] text-white font-medium"
-                              style={{ width: `${Math.min((avgProdPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
-                            >
-                              {setupRatio < 95 && `${(100 - setupRatio).toFixed(1)}%`}
-                            </div>
+                          <div className="p-2 bg-slate-50 border border-slate-200 rounded">
+                            <div className="text-xs text-slate-600 font-medium">Anzahl Umrüstungen</div>
+                            <div className="text-xl font-bold text-slate-900">{setupEventCount}</div>
+                          </div>
+                          <div className="p-2 bg-blue-50 border border-blue-200 rounded">
+                            <div className="text-xs text-blue-700 font-medium">Ø Fertigungszeit / Auftrag</div>
+                            <div className="text-xl font-bold text-blue-900">{avgProdPerOrder.toFixed(1)} min</div>
                           </div>
                         </div>
-                      </div>
-                      <div className="mt-1.5 text-center">
-                        <span className={`text-sm font-semibold ${setupRatio > 30 ? 'text-slate-700' : setupRatio > 15 ? 'text-slate-700' : 'text-blue-700'}`}>
-                          Verhältnis: {setupRatio.toFixed(1)}% Rüstzeit
-                        </span>
-                        <p className="text-xs text-slate-600 mt-0.5">
-                          {setupRatio > 30 && 'Hoher Rüstzeitanteil - Flexibilität prüfen'}
-                          {setupRatio <= 30 && setupRatio > 15 && 'Moderater Rüstzeitanteil'}
-                          {setupRatio <= 15 && 'Niedriger Rüstzeitanteil - Effiziente Nutzung'}
-                        </p>
-                      </div>
-                    </div>
 
-                    {/* Phase Details */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
-                        <h4 className="text-xs font-semibold mb-1 text-blue-800">Demontage</h4>
-                        <div className="text-xs text-slate-600">Umrüstungen: {demChanges}</div>
-                        <div className="text-xs text-slate-600">Operationen: {demOps.length}</div>
-                      </div>
-                      <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
-                        <h4 className="text-xs font-semibold mb-1 text-blue-800">Montage</h4>
-                        <div className="text-xs text-slate-600">Umrüstungen: {monChanges}</div>
-                        <div className="text-xs text-slate-600">Operationen: {monOps.length}</div>
-                      </div>
-                    </div>
+                        {/* Ratio Visualization */}
+                        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                          <h4 className="text-xs font-semibold mb-1.5 text-slate-700">Rüstzeit im Verhältnis zur Fertigungszeit</h4>
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1">
+                              <div className="flex items-center justify-between text-[11px] mb-1">
+                                <span className="text-slate-600 font-medium">Rüstzeit: {avgSetupPerOrder.toFixed(1)} min</span>
+                                <span className="text-slate-600 font-medium">Fertigungszeit: {avgProdPerOrder.toFixed(1)} min</span>
+                              </div>
+                              <div className="h-5 bg-slate-200 rounded overflow-hidden flex">
+                                <div
+                                  className="bg-blue-600 flex items-center justify-center text-[11px] text-white font-medium"
+                                  style={{ width: `${Math.min((avgSetupPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
+                                >
+                                  {setupRatio > 5 && `${setupRatio.toFixed(1)}%`}
+                                </div>
+                                <div
+                                  className="bg-blue-900 flex items-center justify-center text-[11px] text-white font-medium"
+                                  style={{ width: `${Math.min((avgProdPerOrder / (avgSetupPerOrder + avgProdPerOrder)) * 100, 100)}%` }}
+                                >
+                                  {setupRatio < 95 && `${(100 - setupRatio).toFixed(1)}%`}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="mt-1.5 text-center">
+                            <span className={`text-sm font-semibold ${setupRatio > 30 ? 'text-slate-700' : setupRatio > 15 ? 'text-slate-700' : 'text-blue-700'}`}>
+                              Verhältnis: {setupRatio.toFixed(1)}% Rüstzeit
+                            </span>
+                            <p className="text-xs text-slate-600 mt-0.5">
+                              {setupRatio > 30 && 'Hoher Rüstzeitanteil - Flexibilität prüfen'}
+                              {setupRatio <= 30 && setupRatio > 15 && 'Moderater Rüstzeitanteil'}
+                              {setupRatio <= 15 && 'Niedriger Rüstzeitanteil - Effiziente Nutzung'}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Phase Details */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                            <h4 className="text-xs font-semibold mb-1 text-blue-800">Demontage</h4>
+                            <div className="text-xs text-slate-600">Umrüstungen: {demChanges}</div>
+                            <div className="text-xs text-slate-600">Operationen: {demOps.length}</div>
+                          </div>
+                          <div className="p-2.5 bg-slate-50 border border-slate-200 rounded">
+                            <h4 className="text-xs font-semibold mb-1 text-blue-800">Montage</h4>
+                            <div className="text-xs text-slate-600">Umrüstungen: {monChanges}</div>
+                            <div className="text-xs text-slate-600">Operationen: {monOps.length}</div>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )
               } catch (e) {
@@ -5774,71 +5682,87 @@ export function RealDataFactorySimulation() {
                 const sample = Array.isArray(deliveryMetrics.sample) ? deliveryMetrics.sample : []
 
                 return (
-                  <div className="space-y-4">
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div className="p-3 bg-slate-50 border border-slate-200 rounded">
-                        <div className="text-xs text-slate-600">Ø Abweichung</div>
-                        <div className={`text-xl font-semibold ${averageDeviation > 0 ? 'text-red-600' : averageDeviation < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
-                          {formatDeviationMinutes(averageDeviation)}
-                        </div>
-                        <div className="text-[10px] text-slate-500 mt-1">
-                          {averageDeviation > 0 ? 'Verspätet' : averageDeviation < 0 ? 'Früher' : 'Pünktlich'}
-                        </div>
+                  <div className="space-y-2">
+                    {/* Main Summary - Always Visible */}
+                    <div className={`p-3 border rounded ${averageDeviation > 0 ? 'bg-red-50 border-red-200' : averageDeviation < 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-slate-50 border-slate-200'}`}>
+                      <div className="text-xs text-slate-600">Ø Abweichung</div>
+                      <div className={`text-2xl font-bold ${averageDeviation > 0 ? 'text-red-600' : averageDeviation < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                        {formatDeviationMinutes(averageDeviation)}
                       </div>
-                      <div className="p-3 bg-slate-50 border border-slate-200 rounded">
-                        <div className="text-xs text-slate-600">Bewertete Aufträge</div>
-                        <div className="text-xl font-semibold text-slate-700">{completed}</div>
-                        {pending > 0 && (
-                          <div className="text-[11px] text-slate-500">{pending} weitere warten auf einen finalen Termin</div>
-                        )}
+                      <div className="text-[10px] text-slate-500 mt-1">
+                        {averageDeviation > 0 ? 'Verspätet' : averageDeviation < 0 ? 'Früher' : 'Pünktlich'}
                       </div>
                     </div>
 
-                    <div className="grid gap-2 md:grid-cols-3 text-xs text-slate-600">
-                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
-                        <span>Verspätet</span>
-                        <span className="font-semibold text-red-600">{lateCount}</span>
-                      </div>
-                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
-                        <span>Pünktlich</span>
-                        <span className="font-semibold text-slate-700">{onTimeCount}</span>
-                      </div>
-                      <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
-                        <span>Früher fertig</span>
-                        <span className="font-semibold text-emerald-600">{earlyCount}</span>
-                      </div>
-                    </div>
+                    {/* Toggle Button */}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="w-full text-xs text-slate-600 hover:text-slate-900"
+                      onClick={() => setShowDeliveryDetails(!showDeliveryDetails)}
+                    >
+                      {showDeliveryDetails ? 'Details ausblenden' : 'Details anzeigen'}
+                      <ChevronDown className={`ml-1 h-3 w-3 transition-transform ${showDeliveryDetails ? 'rotate-180' : ''}`} />
+                    </Button>
 
-                    <div className="rounded-lg border border-slate-200 p-3">
-                      <div className="text-xs font-semibold text-slate-700 mb-1">Größte Abweichungen</div>
-                      {sample.length === 0 ? (
-                        <div className="text-xs text-muted-foreground">Noch keine Feinplanungsdaten verfügbar.</div>
-                      ) : (
-                        <div className="space-y-1.5">
-                          {sample.map((item: any) => (
-                            <div key={item.orderId} className="flex items-center justify-between text-xs">
-                              <div className="flex flex-col">
-                                <span className="font-mono text-slate-700">{item.orderId.slice(0, 8)}</span>
-                                <span className="text-[11px] text-slate-500">{item.productVariant || 'Produktvariante unbekannt'}</span>
-                              </div>
-                              <div className="text-right">
-                                <div className={`font-semibold ${item.deviationMinutes > 0 ? 'text-red-600' : item.deviationMinutes < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
-                                  {formatDeviationMinutes(Number(item.deviationMinutes ?? 0))}
+                    {/* Detailed View - Collapsible */}
+                    {showDeliveryDetails && (
+                      <>
+                        <div className="p-3 bg-slate-50 border border-slate-200 rounded">
+                          <div className="text-xs text-slate-600">Bewertete Aufträge</div>
+                          <div className="text-xl font-semibold text-slate-700">{completed}</div>
+                          {pending > 0 && (
+                            <div className="text-[11px] text-slate-500">{pending} weitere warten auf einen finalen Termin</div>
+                          )}
+                        </div>
+
+                        <div className="grid gap-2 md:grid-cols-3 text-xs text-slate-600">
+                          <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                            <span>Verspätet</span>
+                            <span className="font-semibold text-red-600">{lateCount}</span>
+                          </div>
+                          <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                            <span>Pünktlich</span>
+                            <span className="font-semibold text-slate-700">{onTimeCount}</span>
+                          </div>
+                          <div className="flex items-center justify-between rounded border border-slate-200 px-3 py-2">
+                            <span>Früher fertig</span>
+                            <span className="font-semibold text-emerald-600">{earlyCount}</span>
+                          </div>
+                        </div>
+
+                        <div className="rounded-lg border border-slate-200 p-3">
+                          <div className="text-xs font-semibold text-slate-700 mb-1">Größte Abweichungen</div>
+                          {sample.length === 0 ? (
+                            <div className="text-xs text-muted-foreground">Noch keine Feinplanungsdaten verfügbar.</div>
+                          ) : (
+                            <div className="space-y-1.5">
+                              {sample.map((item: any) => (
+                                <div key={item.orderId} className="flex items-center justify-between text-xs">
+                                  <div className="flex flex-col">
+                                    <span className="font-mono text-slate-700">{item.orderId.slice(0, 8)}</span>
+                                    <span className="text-[11px] text-slate-500">{item.productVariant || 'Produktvariante unbekannt'}</span>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className={`font-semibold ${item.deviationMinutes > 0 ? 'text-red-600' : item.deviationMinutes < 0 ? 'text-emerald-600' : 'text-slate-700'}`}>
+                                      {formatDeviationMinutes(Number(item.deviationMinutes ?? 0))}
+                                    </div>
+                                    <div className="text-[11px] text-slate-500">
+                                      Plan: {formatIsoDateTime(item.plannedIso)} | Prog.: {formatIsoDateTime(item.finalIso)}
+                                    </div>
+                                  </div>
                                 </div>
-                                <div className="text-[11px] text-slate-500">
-                                  Plan: {formatIsoDateTime(item.plannedIso)} | Prog.: {formatIsoDateTime(item.finalIso)}
-                                </div>
-                              </div>
+                              ))}
                             </div>
-                          ))}
+                          )}
                         </div>
-                      )}
-                    </div>
 
-                    <div className="text-[11px] text-slate-500 flex items-center justify-between">
-                      <span>Positive Werte entsprechen Verspätungen.</span>
-                      <span>Stand: {formatIsoDateTime(deliveryMetrics.lastUpdated)}</span>
-                    </div>
+                        <div className="text-[11px] text-slate-500 flex items-center justify-between">
+                          <span>Positive Werte entsprechen Verspätungen.</span>
+                          <span>Stand: {formatIsoDateTime(deliveryMetrics.lastUpdated)}</span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )
               } catch (error) {

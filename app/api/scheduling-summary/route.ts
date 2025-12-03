@@ -270,6 +270,7 @@ const summarizePipoResult = (details: any) => {
           tardiness: plan.objectiveValues?.tardiness ?? null,
         }))
       : [],
+    debug: details?.debug,
     _scriptExecution: details?._scriptExecution ?? null,
   }
 }
@@ -462,7 +463,8 @@ export async function GET(request: Request) {
       if (!details || typeof details !== 'object') return false
       return (
         hasMeaningfulBatchSizes(details.batchSizes) ||
-        hasMeaningfulTopBatches(details.topBatches)
+        hasMeaningfulTopBatches(details.topBatches) ||
+        (Array.isArray(details.debug) && details.debug.length > 0)
       )
     }
 
@@ -642,6 +644,15 @@ export async function GET(request: Request) {
             topBatches: condenseTopBatches(summaryDetails.topBatches),
           })
         }
+
+        // Add to recentSummaries for historical access to pythonDebug
+        recentSummaries.push({
+          id: log.id,
+          stage: stageKey,
+          simMinute,
+          createdAt: log.createdAt.toISOString(),
+          pythonDebug: Array.isArray(details?.debug) ? details.debug : undefined,
+        })
       }
       insights[stageKey] = {
         ...existingInsight,

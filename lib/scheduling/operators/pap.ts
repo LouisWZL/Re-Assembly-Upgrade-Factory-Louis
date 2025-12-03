@@ -8,8 +8,10 @@ interface PythonPapOrder {
   orderId: string
   createdAt?: number
   dueDate?: number
-  processTimeDem?: number
-  processTimeMon?: number
+  demOps?: Array<{ id: string; stationId: string; expectedDuration: number; label?: string }>
+  monOps?: Array<{ id: string; stationId: string; expectedDuration: number; label?: string }>
+  processTimeDem?: number  // Deprecated: sum of demOps, for backward compatibility
+  processTimeMon?: number  // Deprecated: sum of monOps, for backward compatibility
   priorityHint?: number
   baugruppen?: unknown  // Process sequences for components
   baugruppentypen?: unknown  // Process sequences for component types
@@ -32,9 +34,27 @@ interface PythonPapResult {
 
 const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'pap.py')
 
+/**
+ * Converts dueDate from absolute timestamp (ms) to simulation minutes.
+ * Uses the earliest createdAt as the simulation start reference.
+ */
+function convertDueDateToSimMinutes(dueDateMs: number | undefined, simStartMs: number): number | undefined {
+  if (dueDateMs === undefined || dueDateMs === null) return undefined
+  // Convert from absolute ms timestamp to minutes relative to simulation start
+  const diffMs = dueDateMs - simStartMs
+  return diffMs / 60000  // ms to minutes
+}
+
 function buildPayload(pools: Pools, now: number, config: SchedulingConfig, factory: ReassemblyFactory): PythonPapPayload {
   const records = pools.getSnapshot('pap')
   const processSequencesMap: Record<string, unknown> = {}
+
+  // Find simulation start: earliest createdAt timestamp (in ms)
+  const createdAtValues = records
+    .map(r => r.meta?.createdAt ? Number(r.meta.createdAt) : null)
+    .filter((v): v is number => v !== null && !isNaN(v))
+  const simStartMs = createdAtValues.length > 0 ? Math.min(...createdAtValues) : Date.now()
+
   const orders: PythonPapOrder[] = records.map((record) => {
     const processSeqs = record.processSequences as any
     if (record.oid && processSeqs) {
@@ -43,12 +63,16 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig, facto
     const baugruppen = processSeqs?.baugruppen
     const baugruppentypen = processSeqs?.baugruppentypen
 
+    const rawDueDate = record.meta?.dueDate ? Number(record.meta.dueDate) : undefined
+
     return {
       orderId: record.oid,
       createdAt: record.meta?.createdAt ? Number(record.meta.createdAt) : undefined,
-      dueDate: record.meta?.dueDate ? Number(record.meta.dueDate) : undefined,
-      processTimeDem: record.demOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
-      processTimeMon: record.monOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,
+      dueDate: convertDueDateToSimMinutes(rawDueDate, simStartMs),
+      demOps: record.demOps || [],  // Pass actual operations array
+      monOps: record.monOps || [],  // Pass actual operations array
+      processTimeDem: record.demOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,  // For backward compatibility
+      processTimeMon: record.monOps?.reduce((sum, op) => sum + op.expectedDuration, 0) ?? 0,  // For backward compatibility
       priorityHint: record.priorityScore,
       baugruppen,
       baugruppentypen,
@@ -95,7 +119,7 @@ export async function runPAPForecastAndBatch(
   console.log(`[scheduling][pap] Payload:`, JSON.stringify(payload, null, 2))
 
   try {
-    const result = await runPythonOperator<PythonPapPayload, PythonPapResult>({
+    const { result, stderr } = await runPythonOperator<PythonPapPayload, PythonPapResult>({
       script: scriptPath,
       payload,
     })
@@ -107,8 +131,18 @@ export async function runPAPForecastAndBatch(
     console.log(`[scheduling][pap] ⏱️  Duration: ${duration}ms`)
     console.log(`[scheduling][pap] Result:`, JSON.stringify(result, null, 2))
 
+    // Add stderr logs to debug output
+    const debugWithLogs = [
+      ...(result.debug || []),
+      {
+        stage: 'PAP_PYTHON_LOGS',
+        logs: stderr || 'No logs available'
+      }
+    ]
+
     return {
       ...result,
+      debug: debugWithLogs,
       _scriptExecution: {
         scriptPath,
         startTime,

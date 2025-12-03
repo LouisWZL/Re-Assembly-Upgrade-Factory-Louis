@@ -7,11 +7,16 @@ interface RunOptions<TInput> {
   timeoutMs?: number
 }
 
+export interface PythonResult<TOutput> {
+  result: TOutput
+  stderr: string
+}
+
 export async function runPythonOperator<TInput, TOutput>({
   script,
   payload,
   timeoutMs = 30_000,
-}: RunOptions<TInput>): Promise<TOutput> {
+}: RunOptions<TInput>): Promise<PythonResult<TOutput>> {
   return new Promise((resolve, reject) => {
     try {
       const scriptPath = path.isAbsolute(script) ? script : path.join(process.cwd(), script)
@@ -35,7 +40,10 @@ export async function runPythonOperator<TInput, TOutput>({
         }
         try {
           const parsed = JSON.parse(stdout)
-          resolve(parsed as TOutput)
+          resolve({
+            result: parsed as TOutput,
+            stderr: stderr.trim()
+          })
         } catch (error) {
           reject(new Error(`Failed to parse Python output: ${(error as Error).message}`))
         }

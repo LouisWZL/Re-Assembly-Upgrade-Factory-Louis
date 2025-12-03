@@ -62,6 +62,14 @@ export async function enqueueOrder(
   sequence?: any,
   processTimes?: any
 ) {
+  console.log(`🔍 [ENQUEUE] ========== START ==========`)
+  console.log(`🔍 [ENQUEUE] Queue: ${queue}`)
+  console.log(`🔍 [ENQUEUE] Order: ${orderId.slice(-4)}`)
+  console.log(`🔍 [ENQUEUE] processTimes argument received:`, processTimes)
+  console.log(`🔍 [ENQUEUE] processTimes type:`, typeof processTimes)
+  console.log(`🔍 [ENQUEUE] processTimes is object?`, typeof processTimes === 'object')
+  console.log(`🔍 [ENQUEUE] processTimes is truthy?`, !!processTimes)
+
   try {
     await ensureDatabaseInitialized()
 
@@ -143,6 +151,61 @@ export async function enqueueOrder(
       }
     }
 
+    // ✅ CRITICAL: Require valid processTimes with individual operations - NO FALLBACKS!
+    let effectiveProcessTimes = processTimes
+    console.log(`🔍 [ENQUEUE] effectiveProcessTimes initial:`, effectiveProcessTimes)
+
+    // Validate that we have proper process times structure
+    if (!effectiveProcessTimes || typeof effectiveProcessTimes !== 'object') {
+      console.error(`❌ [ENQUEUE] CRITICAL: No processTimes provided for order ${orderId.slice(-4)} (queue=${queue})`)
+      console.error(`❌ [ENQUEUE] This order was likely not created with processSequenceDurations`)
+      console.error(`❌ [ENQUEUE] Refusing to enqueue without valid operation data - NO FALLBACKS!`)
+
+      return {
+        success: false,
+        error: `Order ${orderId.slice(-4)} missing processTimes - cannot enqueue without operation data`
+      }
+    }
+
+    // Validate that we have the complete structure with operations arrays
+    const hasValidStructure = effectiveProcessTimes.totals &&
+                              typeof effectiveProcessTimes.totals === 'object' &&
+                              Array.isArray(effectiveProcessTimes.demontage) &&
+                              Array.isArray(effectiveProcessTimes.remontage)
+
+    if (!hasValidStructure) {
+      console.error(`❌ [ENQUEUE] CRITICAL: Invalid processTimes structure for order ${orderId.slice(-4)} (queue=${queue})`)
+      console.error(`❌ [ENQUEUE] Expected: {demontage: [], remontage: [], totals: {demontage: X, montage: Y}}`)
+      console.error(`❌ [ENQUEUE] Received:`, effectiveProcessTimes)
+      console.error(`❌ [ENQUEUE] Refusing to enqueue without valid operation arrays - NO FALLBACKS!`)
+
+      return {
+        success: false,
+        error: `Order ${orderId.slice(-4)} has invalid processTimes structure - missing operation arrays`
+      }
+    }
+
+    // Validate totals are > 0
+    // NOTE: Database uses "remontage", not "montage"!
+    const demTotal = effectiveProcessTimes.totals.demontage || 0
+    const monTotal = effectiveProcessTimes.totals.montage || effectiveProcessTimes.totals.remontage || 0
+
+    if (demTotal <= 0 || monTotal <= 0) {
+      console.error(`❌ [ENQUEUE] CRITICAL: processTimes totals are ≤ 0 for order ${orderId.slice(-4)} (queue=${queue})`)
+      console.error(`❌ [ENQUEUE] Totals:`, effectiveProcessTimes.totals)
+      console.error(`❌ [ENQUEUE] demTotal=${demTotal}, monTotal=${monTotal}`)
+      console.error(`❌ [ENQUEUE] Refusing to enqueue - NO FALLBACKS!`)
+
+      return {
+        success: false,
+        error: `Order ${orderId.slice(-4)} has invalid processTimes totals (≤ 0)`
+      }
+    }
+
+    console.log(`✅ [ENQUEUE] Valid processTimes structure confirmed:`)
+    console.log(`✅ [ENQUEUE]   - demontage ops: ${effectiveProcessTimes.demontage.length}, total: ${demTotal}m`)
+    console.log(`✅ [ENQUEUE]   - remontage ops: ${effectiveProcessTimes.remontage.length}, total: ${monTotal}m`)
+
     // Determine release time based on queue type
     const releaseAfterMinutes = queue === 'preAcceptance'
       ? queueConfig.preAcceptanceReleaseMinutes
@@ -185,11 +248,17 @@ export async function enqueueOrder(
     const data = {
       orderId,
       possibleSequence: sequence,
-      processTimes,
+      processTimes: effectiveProcessTimes,
       processingOrder: maxOrder + 1,
       releaseAfterMinutes,
       queuedAtSimMinute: currentSimMinute
     }
+
+    console.log(`🔍 [ENQUEUE] Data being written to DB:`, {
+      orderId: orderId.slice(-4),
+      processTimes: data.processTimes,
+      queue
+    })
 
     let result
     try {
@@ -213,6 +282,35 @@ export async function enqueueOrder(
     }
 
     revalidatePath('/simulation')
+
+    // Diagnostics: log what was persisted to processTimes
+    try {
+      const stored = queue === 'preAcceptance'
+        ? await prisma.preAcceptanceQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
+        : queue === 'preInspection'
+        ? await prisma.preInspectionQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
+        : await prisma.postInspectionQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
+      const diag = {
+        stage: 'PROCESS_TIMES_ENQUEUE',
+        queue,
+        orderId,
+        processTimesStored: stored?.processTimes || null,
+        processTimesInput: processTimes || null,
+        processTimesComputed: effectiveProcessTimes || null,
+        queuedAtSimMinute: currentSimMinute
+      }
+      console.log(`[enqueueOrder] Stored processTimes for ${orderId.slice(-4)} (queue=${queue}):`, stored?.processTimes)
+      // Push to liveDiagnostics store if present (best-effort)
+      try {
+        globalThis.__queueDiagnosticsLog = globalThis.__queueDiagnosticsLog || []
+        globalThis.__queueDiagnosticsLog.push(diag)
+        if (globalThis.__queueDiagnosticsLog.length > 100) {
+          globalThis.__queueDiagnosticsLog.shift()
+        }
+      } catch {}
+    } catch (diagError) {
+      console.warn('[enqueueOrder] Failed to read back processTimes for diagnostics:', diagError)
+    }
 
     return {
       success: true,
@@ -325,7 +423,7 @@ export async function releaseNext(queue: QueueType, currentSimMinute: number) {
     const debugEntries = Array.isArray(scheduling?.result?.debug)
       ? (scheduling.result.debug as any[])
       : []
-    const pythonDebug = debugEntries.slice(0, 10)
+    const pythonDebug = debugEntries // Keep all debug entries including Python logs at the end
     const assignmentsEntry = debugEntries.find(
       (entry: any) => entry?.stage === 'PAP_ASSIGNMENTS' && Array.isArray(entry.sequence)
     )
@@ -970,6 +1068,92 @@ export async function checkAndReleaseBatch(
       }
     }
 
+    // ✅ CRITICAL: Update dispatcherOrder* fields in Auftrag model based on Python-optimized releaseList
+    // Verwende inputOrderList von Python als FIFO-Referenz (= Reihenfolge wie Aufträge im Batch ankamen)
+    // dispatcherOrder* = optimierte Position aus GA
+    // Dashboard zeigt dann: queuePosition (aus inputOrderList) vs optimizedPosition (aus releaseList)
+    if (scheduling?.result?.releaseList && Array.isArray(scheduling.result.releaseList)) {
+      const releaseList = scheduling.result.releaseList as string[]
+      const inputOrderList = scheduling.result.inputOrderList as string[] | undefined
+
+      console.log(`[Scheduling] 🔄 Updating dispatcherOrder based on Python releaseList (${releaseList.length} orders)`)
+
+      const dispatcherField = queue === 'preAcceptance'
+        ? 'dispatcherOrderPreAcceptance'
+        : queue === 'preInspection'
+        ? 'dispatcherOrderPreInspection'
+        : 'dispatcherOrderPostInspection'
+
+      // Baue Map: orderId -> Input-Position (aus Python inputOrderList)
+      const inputPositionMap = new Map<string, number>()
+      if (inputOrderList && Array.isArray(inputOrderList)) {
+        inputOrderList.forEach((orderId: string, idx: number) => {
+          inputPositionMap.set(orderId, idx + 1) // 1-indexed
+        })
+      }
+
+      // Berechne die optimierte Position für jeden Auftrag
+      const optimizedPositionMap = new Map<string, number>()
+      releaseList.forEach((orderId: string, idx: number) => {
+        optimizedPositionMap.set(orderId, idx + 1) // 1-indexed
+      })
+
+      console.log(`[Scheduling] 🔄 Preparing to update ${dispatcherField} for ${releaseList.length} orders...`)
+      console.log(`[Scheduling]   Input (FIFO) positions: ${Array.from(inputPositionMap.entries()).map(([id, pos]) => `${id.slice(-4)}:${pos}`).join(', ')}`)
+      console.log(`[Scheduling]   Optimized positions: ${Array.from(optimizedPositionMap.entries()).map(([id, pos]) => `${id.slice(-4)}:${pos}`).join(', ')}`)
+
+      // Update Auftrag mit optimierter Position UND speichere die Input-Position in processingOrder der Queue
+      const updatePromises: Promise<any>[] = []
+
+      for (const orderId of releaseList) {
+        const optimizedPos = optimizedPositionMap.get(orderId) ?? 0
+        const inputPos = inputPositionMap.get(orderId) ?? 0
+        const delta = optimizedPos - inputPos
+        console.log(`[Scheduling]   - ${orderId.slice(-4)}: Input=${inputPos} -> Optimized=${optimizedPos} (delta=${delta > 0 ? '+' : ''}${delta})`)
+
+        // Update dispatcherOrder in Auftrag
+        updatePromises.push(
+          prisma.auftrag.update({
+            where: { id: orderId },
+            data: { [dispatcherField]: optimizedPos }
+          })
+        )
+
+        // Update processingOrder in Queue auf die Input-Position (FIFO)
+        if (inputPos > 0) {
+          if (queue === 'preAcceptance') {
+            updatePromises.push(
+              prisma.preAcceptanceQueue.updateMany({
+                where: { orderId },
+                data: { processingOrder: inputPos }
+              })
+            )
+          } else if (queue === 'preInspection') {
+            updatePromises.push(
+              prisma.preInspectionQueue.updateMany({
+                where: { orderId },
+                data: { processingOrder: inputPos }
+              })
+            )
+          } else {
+            updatePromises.push(
+              prisma.postInspectionQueue.updateMany({
+                where: { orderId },
+                data: { processingOrder: inputPos }
+              })
+            )
+          }
+        }
+      }
+
+      try {
+        await Promise.all(updatePromises)
+        console.log(`[Scheduling] ✅ Updated ${dispatcherField} AND processingOrder for ${releaseList.length} orders`)
+      } catch (error) {
+        console.error(`[Scheduling] ⚠️ Failed to update:`, error)
+      }
+    }
+
     const ownOrderIds = entries.map((entry: any) => entry.orderId)
     const orderIds = orderedEntries.map((e: any) => e.orderId)
     const reorderCount = orderIds.reduce((acc: number, id: string, idx: number) => {
@@ -1009,7 +1193,7 @@ export async function checkAndReleaseBatch(
     const debugEntries = Array.isArray(scheduling?.result?.debug)
       ? (scheduling.result.debug as any[])
       : []
-    const pythonDebug = debugEntries.slice(0, 12)
+    const pythonDebug = debugEntries // Keep all debug entries including Python logs at the end
     const assignmentsEntry = debugEntries.find(
       (entry: any) => entry?.stage === 'PAP_ASSIGNMENTS' && Array.isArray(entry.sequence)
     )

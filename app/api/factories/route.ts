@@ -42,7 +42,7 @@ export async function POST(request: Request) {
   try {
     // Ensure database is initialized before creating
     await ensureDatabaseInitialized()
-    
+
     const body = await request.json()
     const { name, kapazität } = body
 
@@ -65,6 +65,50 @@ export async function POST(request: Request) {
     console.error('Error creating factory:', error)
     return NextResponse.json(
       { error: 'Fehler beim Erstellen der Fabrik' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function PUT(request: Request) {
+  try {
+    await ensureDatabaseInitialized()
+
+    const body = await request.json()
+    const {
+      id,
+      anzahlDemontagestationen,
+      anzahlMontagestationen,
+      demFlexSharePct,
+      monFlexSharePct,
+      setupTimeMinutes
+    } = body
+
+    if (!id) {
+      return NextResponse.json(
+        { error: 'Factory ID is required' },
+        { status: 400 }
+      )
+    }
+
+    // Build update data object with only provided fields
+    const updateData: any = {}
+    if (anzahlDemontagestationen !== undefined) updateData.anzahlDemontagestationen = Number(anzahlDemontagestationen)
+    if (anzahlMontagestationen !== undefined) updateData.anzahlMontagestationen = Number(anzahlMontagestationen)
+    if (demFlexSharePct !== undefined) updateData.demFlexSharePct = Number(demFlexSharePct)
+    if (monFlexSharePct !== undefined) updateData.monFlexSharePct = Number(monFlexSharePct)
+    if (setupTimeMinutes !== undefined) updateData.setupTimeMinutes = Number(setupTimeMinutes)
+
+    const factory = await prisma.reassemblyFactory.update({
+      where: { id },
+      data: updateData,
+    })
+
+    return NextResponse.json(factory)
+  } catch (error) {
+    console.error('Error updating factory capacity:', error)
+    return NextResponse.json(
+      { error: 'Failed to update factory capacity' },
       { status: 500 }
     )
   }

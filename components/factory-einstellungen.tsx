@@ -9,7 +9,7 @@ import { toast } from 'sonner'
 import { Loader2, Save, Clock, Wrench, TrendingUp } from 'lucide-react'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
-import { updateFactoryName, updateFactoryCapacity, getFactory, updateFactorySchichtmodell, updateFactoryMontagestationen, updateFactoryTargetBatchAverage, updateFactoryPflichtUpgradeSchwelle, updateFactoryDefaultDemontagezeit, updateFactoryDefaultMontagezeit } from '@/app/actions/factory.actions'
+import { updateFactoryName, updateFactoryCapacity, getFactory, updateFactorySchichtmodell, updateFactoryMontagestationen, updateFactoryTargetBatchAverage, updateFactoryPflichtUpgradeSchwelle } from '@/app/actions/factory.actions'
 
 interface FactoryEinstellungenProps {
   factoryId: string
@@ -23,8 +23,6 @@ export function FactoryEinstellungen({ factoryId }: FactoryEinstellungenProps) {
   const [savingMontagestationen, setSavingMontagestationen] = useState(false)
   const [savingTargetBatchAverage, setSavingTargetBatchAverage] = useState(false)
   const [savingPflichtUpgradeSchwelle, setSavingPflichtUpgradeSchwelle] = useState(false)
-  const [savingDemontagezeit, setSavingDemontagezeit] = useState(false)
-  const [savingMontagezeit, setSavingMontagezeit] = useState(false)
   const [factoryData, setFactoryData] = useState<any>(null)
   const [name, setName] = useState('')
   const [capacity, setCapacity] = useState('')
@@ -32,8 +30,6 @@ export function FactoryEinstellungen({ factoryId }: FactoryEinstellungenProps) {
   const [montagestationen, setMontagestationen] = useState('')
   const [targetBatchAverage, setTargetBatchAverage] = useState(65)
   const [pflichtUpgradeSchwelle, setPflichtUpgradeSchwelle] = useState(30)
-  const [defaultDemontagezeit, setDefaultDemontagezeit] = useState(30)
-  const [defaultMontagezeit, setDefaultMontagezeit] = useState(45)
 
   useEffect(() => {
     loadFactoryData()
@@ -51,8 +47,6 @@ export function FactoryEinstellungen({ factoryId }: FactoryEinstellungenProps) {
         setMontagestationen(result.data.anzahlMontagestationen?.toString() || '10')
         setTargetBatchAverage(result.data.targetBatchAverage || 65)
         setPflichtUpgradeSchwelle(result.data.pflichtUpgradeSchwelle || 30)
-        setDefaultDemontagezeit(result.data.defaultDemontagezeit || 30)
-        setDefaultMontagezeit(result.data.defaultMontagezeit || 45)
       } else {
         toast.error('Fehler beim Laden der Factory-Daten')
       }
@@ -530,122 +524,6 @@ export function FactoryEinstellungen({ factoryId }: FactoryEinstellungenProps) {
           </CardContent>
         </Card>
 
-        {/* Default Process Times Card */}
-        <Card className="flex flex-col h-full lg:col-span-2">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Clock className="h-5 w-5" />
-              Standard-Prozesszeiten
-            </CardTitle>
-            <CardDescription>
-              Legen Sie die Standard-Demontage- und Montagezeiten fest, die verwendet werden, wenn für einzelne Baugruppen keine spezifischen Zeiten definiert sind.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col flex-1">
-            <div className="flex-1">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="space-y-2">
-                  <Label htmlFor="defaultDemontagezeit">Standard-Demontagezeit (Minuten)</Label>
-                  <Input
-                    id="defaultDemontagezeit"
-                    type="number"
-                    value={defaultDemontagezeit}
-                    onChange={(e) => setDefaultDemontagezeit(parseInt(e.target.value) || 0)}
-                    placeholder="z.B. 30"
-                    min="0"
-                    disabled={savingDemontagezeit}
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    Fallback-Wert für Baugruppen ohne eigene Demontagezeit
-                  </p>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="defaultMontagezeit">Standard-Montagezeit (Minuten)</Label>
-                  <Input
-                    id="defaultMontagezeit"
-                    type="number"
-                    value={defaultMontagezeit}
-                    onChange={(e) => setDefaultMontagezeit(parseInt(e.target.value) || 0)}
-                    placeholder="z.B. 45"
-                    min="0"
-                    disabled={savingMontagezeit}
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    Fallback-Wert für Baugruppen ohne eigene Montagezeit
-                  </p>
-                </div>
-              </div>
-            </div>
-            <div className="pt-4 flex gap-2">
-              <Button
-                onClick={async () => {
-                  setSavingDemontagezeit(true)
-                  try {
-                    const result = await updateFactoryDefaultDemontagezeit(factoryId, defaultDemontagezeit)
-                    if (result.success) {
-                      toast.success(result.message)
-                      await loadFactoryData()
-                    } else {
-                      toast.error(result.error)
-                    }
-                  } catch (error) {
-                    toast.error('Ein unerwarteter Fehler ist aufgetreten')
-                  } finally {
-                    setSavingDemontagezeit(false)
-                  }
-                }}
-                disabled={savingDemontagezeit || defaultDemontagezeit === factoryData?.defaultDemontagezeit}
-                size="sm"
-              >
-                {savingDemontagezeit ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Speichern...
-                  </>
-                ) : (
-                  <>
-                    <Save className="mr-2 h-4 w-4" />
-                    Demontagezeit speichern
-                  </>
-                )}
-              </Button>
-
-              <Button
-                onClick={async () => {
-                  setSavingMontagezeit(true)
-                  try {
-                    const result = await updateFactoryDefaultMontagezeit(factoryId, defaultMontagezeit)
-                    if (result.success) {
-                      toast.success(result.message)
-                      await loadFactoryData()
-                    } else {
-                      toast.error(result.error)
-                    }
-                  } catch (error) {
-                    toast.error('Ein unerwarteter Fehler ist aufgetreten')
-                  } finally {
-                    setSavingMontagezeit(false)
-                  }
-                }}
-                disabled={savingMontagezeit || defaultMontagezeit === factoryData?.defaultMontagezeit}
-                size="sm"
-              >
-                {savingMontagezeit ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Speichern...
-                  </>
-                ) : (
-                  <>
-                    <Save className="mr-2 h-4 w-4" />
-                    Montagezeit speichern
-                  </>
-                )}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
       </div>
     </div>
   )

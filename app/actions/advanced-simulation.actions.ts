@@ -61,6 +61,55 @@ export async function getAdvancedSimulationData(factoryId: string) {
       }
     }
 
+    // DEBUG: Check if baugruppenInstances are loaded
+    const firstOrder = factory.auftraege[0]
+    console.log('🔍 [API] First order in DB:', firstOrder?.id?.slice(-4))
+    console.log('🔍 [API] BaugruppenInstances count:', firstOrder?.baugruppenInstances?.length || 0)
+    if (firstOrder?.baugruppenInstances?.length > 0) {
+      console.log('🔍 [API] First baugruppe:', {
+        id: firstOrder.baugruppenInstances[0].baugruppe?.id,
+        name: firstOrder.baugruppenInstances[0].baugruppe?.bezeichnung,
+        dem: firstOrder.baugruppenInstances[0].baugruppe?.demontagezeit,
+        mon: firstOrder.baugruppenInstances[0].baugruppe?.montagezeit
+      })
+    }
+
+    // Extract process sequences from each order on the SERVER SIDE (before serialization!)
+    // This is CRITICAL because we need the full operation sequences, not just averages
+    // Store as a SEPARATE MAP because adding properties to Prisma objects doesn't survive serialization
+    const orderProcessSequences: Record<string, any> = {}
+
+    factory.auftraege.forEach(order => {
+      // Try to get processSequenceDurations from the order
+      const processSequenceDurations = order.processSequenceDurations as any
+
+      if (processSequenceDurations?.baugruppen?.sequences?.[0]) {
+        // Use the first sequence from baugruppen level (has individual Baugruppe times)
+        const sequence = processSequenceDurations.baugruppen.sequences[0]
+
+        console.log(`✅ [API] Using processSequenceDurations for order ${order.id.slice(-4)}:`, {
+          demOps: sequence.demontage?.length || 0,
+          monOps: sequence.remontage?.length || 0,
+          totals: sequence.totals
+        })
+
+        orderProcessSequences[order.id] = {
+          demontage: sequence.demontage || [],
+          remontage: sequence.remontage || [],
+          totals: sequence.totals || { demontage: 0, montage: 0 }
+        }
+      } else {
+        console.error(`❌ [API] No processSequenceDurations for order ${order.id.slice(-4)} - order may not have been created with sequences`)
+
+        // No fallback - expose the problem
+        orderProcessSequences[order.id] = {
+          demontage: [],
+          remontage: [],
+          totals: { demontage: 0, montage: 0 }
+        }
+      }
+    })
+
     // Get process sequences from products
     const processSequences = factory.produkte.map(product => ({
       productId: product.id,
@@ -82,12 +131,13 @@ export async function getAdvancedSimulationData(factoryId: string) {
       data: {
         factory,
         orders: factory.auftraege,
+        orderProcessSequences, // NEW: Separate map of process sequences with operations
         baugruppentypen: Array.from(usedBaugruppentypen),
         processSequences,
         stations: {
           mainStations: [
             'AUFTRAGSANNAHME',
-            'INSPEKTION', 
+            'INSPEKTION',
             'DEMONTAGE',
             'REASSEMBLY',
             'QUALITAETSPRUEFUNG',
@@ -137,7 +187,7 @@ export async function updateStationProcessingTime(
   }
 }
 
-export async function getDeliveryDeviationMetrics(factoryId: string, since?: Date | null) {
+export async function getDeliveryDeviationMetrics(factoryId: string, since?: Date | null, simulationStartTime?: number | null) {
   try {
     const orders = await prisma.auftrag.findMany({
       where: {
@@ -209,8 +259,9 @@ export async function getDeliveryDeviationMetrics(factoryId: string, since?: Dat
     const earlyCount = diffs.filter((diff) => diff < -0.5).length
     const onTimeCount = diffs.length - lateCount - earlyCount
 
+    const baseTime = simulationStartTime ?? 0
     const toIso = (value: number | null | undefined) =>
-      typeof value === 'number' ? new Date(value * 60000).toISOString() : null
+      typeof value === 'number' ? new Date(baseTime + value * 60000).toISOString() : null
 
     const sample = [...withFinal]
       .sort((a, b) => {

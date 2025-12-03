@@ -3,9 +3,10 @@
 Ansatz_Becker_Mittelfristige_Terminierung
 -----------------------------------------
 
-Strategischer Mittelfrist-Planer (Pre-Inspection) mit genetischer Optimierung.
+Strategischer Mittelfrist-Planer (Pre-Inspection) mit genetischer Optimierung
+und rüstzeitfreundlicher Losbildung (Jaccard-Ähnlichkeit der Prozessketten).
 
-* Input  (stdin, JSON):
+* Input (stdin, JSON):
     {
       "now": <float, aktuelle Simulationsminute>,
       "orders": [
@@ -25,6 +26,7 @@ Strategischer Mittelfrist-Planer (Pre-Inspection) mit genetischer Optimierung.
         "horizonMinutes": 240,
         "tardinessWeight": 1.0,
         "varianceWeight": 0.1,
+        "batchSimilarityWeight": 0.7,              # NEU: α für Priority vs. Ähnlichkeit
         "ga": {
           "population": 60,
           "generations": 80,
@@ -45,7 +47,6 @@ Strategischer Mittelfrist-Planer (Pre-Inspection) mit genetischer Optimierung.
       "debug": [...]
     }
 
-Die Struktur ist kompatibel mit den bestehenden Terminierungs-Pipelines.
 Plots werden – sofern matplotlib verfügbar ist – als Base64-PNG im Debug-Array
 zur Verfügung gestellt (Queue-Monitor „Ausgabe-Monitor“).
 """
@@ -61,10 +62,10 @@ import statistics
 import sys
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from itertools import combinations
 
 try:  # matplotlib ist optional; falls nicht installiert, funktionieren Kernfeatures dennoch.
     import matplotlib.pyplot as plt  # type: ignore
-
     HAS_MATPLOTLIB = True
 except Exception:  # pragma: no cover - best effort
     HAS_MATPLOTLIB = False
@@ -73,7 +74,6 @@ except Exception:  # pragma: no cover - best effort
 # ---------------------------------------------------------------------------
 # Utility-Datentypen
 # ---------------------------------------------------------------------------
-
 
 @dataclass
 class OrderData:
@@ -88,7 +88,6 @@ class OrderData:
 # ---------------------------------------------------------------------------
 # Allgemeine Helper
 # ---------------------------------------------------------------------------
-
 
 def load_payload() -> Dict[str, Any]:
     text = sys.stdin.read()
@@ -137,9 +136,57 @@ def random_triangular(rng: random.Random, tfn: Tuple[float, float, float]) -> fl
 
 
 # ---------------------------------------------------------------------------
-# GA-Komponenten
+# NEU: Operations-Signaturen & Jaccard-Ähnlichkeit
 # ---------------------------------------------------------------------------
 
+def order_op_signature(order: OrderData) -> frozenset:
+    """
+    Bildet eine robuste Signatur der Prozesskette eines Auftrags für Ähnlichkeitsvergleiche.
+    Nutzt (falls vorhanden) den ersten routeCandidate, sonst combined_ops.
+    Schlüssel z. B.: stationId|toolId|type
+    """
+    ops = []
+    candidates = order.raw.get("routeCandidates")
+    if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict):
+        cand_ops = candidates[0].get("operations")
+        if isinstance(cand_ops, list):
+            ops = cand_ops
+
+    if not ops:  # Fallback
+        ops = order.combined_ops
+
+    keys = []
+    for op in ops or []:
+        sid = str(op.get("stationId") or "")
+        tool = str(op.get("toolId") or "")
+        typ = str(op.get("type") or "")
+        keys.append(f"{sid}|{tool}|{typ}")
+    return frozenset(keys)
+
+
+def jaccard(a: frozenset, b: frozenset) -> float:
+    if not a and not b:
+        return 1.0
+    u = a | b
+    if not u:
+        return 1.0
+    return len(a & b) / float(len(u))
+
+
+def mean_intrabatch_jaccard(order_ids: Sequence[str], op_sigs: Dict[str, frozenset]) -> float:
+    n = len(order_ids)
+    if n <= 1:
+        return 1.0
+    pairs = list(combinations(order_ids, 2))
+    s = 0.0
+    for i, j in pairs:
+        s += jaccard(op_sigs.get(i, frozenset()), op_sigs.get(j, frozenset()))
+    return s / len(pairs)
+
+
+# ---------------------------------------------------------------------------
+# GA-Komponenten
+# ---------------------------------------------------------------------------
 
 def simulate_sequence_tardiness(
     sequence: Sequence[int],
@@ -210,7 +257,7 @@ def optimize_sequence_ga(
     seed: int,
 ) -> Tuple[List[int], List[float], Tuple[float, float]]:
     """
-    GA zur Minimierung von E[Tardiness] + lam * Var[Tardiness].
+    GA zur Minimierung von E[Tardiness)] + lam * Var[Tardiness].
     """
     rng = random.Random(seed)
     n = len(orders)
@@ -281,7 +328,6 @@ def optimize_sequence_ga(
 # Planaufbau & Auswertung
 # ---------------------------------------------------------------------------
 
-
 def build_plan(sequence: Sequence[int], orders: Sequence[OrderData], now: float) -> List[Dict[str, float]]:
     plan: List[Dict[str, float]] = []
     current_time = now
@@ -333,6 +379,10 @@ def clone_operations(ops: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
     return cloned
 
 
+# ---------------------------------------------------------------------------
+# ERSETZT: Batchbildung mit Priority & Jaccard-Ähnlichkeit
+# ---------------------------------------------------------------------------
+
 def build_batches(
     sequence: Sequence[int],
     orders: Sequence[OrderData],
@@ -340,45 +390,50 @@ def build_batches(
     priorities_map: Dict[str, float],
     q_min: int,
     q_max: int,
+    op_sigs: Dict[str, frozenset],
+    alpha: float = 0.7,   # Gewicht für Termindruck (Priority). 1-alpha für Ähnlichkeit.
 ) -> List[Dict[str, Any]]:
+    """
+    Batchbildung mit rüstzeitfreundlicher Bewertung:
+    score = alpha * mean(priority) + (1 - alpha) * mean(Jaccard-Ähnlichkeit der Prozessketten)
+    """
     batches: List[Dict[str, Any]] = []
     current: List[str] = []
-    score_acc = 0.0
-
     q_min = max(1, q_min)
     q_max = max(q_min, q_max)
+    alpha = max(0.0, min(1.0, float(alpha)))
+
+    def finalize_batch(order_ids: List[str]) -> Optional[Dict[str, Any]]:
+        if not order_ids:
+            return None
+        first = order_ids[0]
+        release_at = float(plan_lookup.get(first, {}).get("plannedStart", 0.0))
+        mean_prio = (sum(priorities_map.get(oid, 0.0) for oid in order_ids) / len(order_ids))
+        mean_sim = mean_intrabatch_jaccard(order_ids, op_sigs)
+        score = alpha * mean_prio + (1.0 - alpha) * mean_sim
+        return {
+            "id": f"pip-ga-batch-{len(batches) + 1}",
+            "orderIds": order_ids[:],
+            "releaseAt": release_at,
+            "score": float(score),
+            "meanPriority": float(mean_prio),
+            "meanSimilarity": float(mean_sim),
+            "alphaPriority": float(alpha),
+        }
 
     for idx in sequence:
-        order_id = orders[idx].order_id
-        current.append(order_id)
-        score_acc += priorities_map.get(order_id, 0.0)
+        oid = orders[idx].order_id
+        current.append(oid)
         if len(current) >= q_max:
-            first = current[0]
-            release_at = float(plan_lookup.get(first, {}).get("plannedStart", 0.0))
-            avg_score = score_acc / len(current) if current else 0.0
-            batches.append(
-                {
-                    "id": f"pip-ga-batch-{len(batches) + 1}",
-                    "orderIds": current[:],
-                    "releaseAt": release_at,
-                    "score": float(avg_score),
-                }
-            )
+            batch = finalize_batch(current)
+            if batch:
+                batches.append(batch)
             current = []
-            score_acc = 0.0
 
     if current and len(current) >= q_min:
-        first = current[0]
-        release_at = float(plan_lookup.get(first, {}).get("plannedStart", 0.0))
-        avg_score = score_acc / len(current) if current else 0.0
-        batches.append(
-            {
-                "id": f"pip-ga-batch-{len(batches) + 1}",
-                "orderIds": current[:],
-                "releaseAt": release_at,
-                "score": float(avg_score),
-            }
-        )
+        batch = finalize_batch(current)
+        if batch:
+            batches.append(batch)
 
     return batches
 
@@ -669,6 +724,10 @@ def prepare_debug_entries(
     return debug
 
 
+# ---------------------------------------------------------------------------
+# Fallback (FIFO)
+# ---------------------------------------------------------------------------
+
 def simple_fifo_result(
     raw_orders: Sequence[Dict[str, Any]],
     now: float,
@@ -684,10 +743,7 @@ def simple_fifo_result(
             "batches": [],
             "releaseList": [],
             "debug": [
-                {
-                    "stage": "PIP_EMPTY",
-                    "message": "Keine Aufträge verfügbar.",
-                }
+                {"stage": "PIP_EMPTY", "message": "Keine Aufträge verfügbar."},
             ],
         }
 
@@ -702,9 +758,17 @@ def simple_fifo_result(
     plan = build_plan(sequence, orders, now)
     plan_lookup = {row["orderId"]: row for row in plan}
     priorities, priority_map = compute_priorities(plan)
+
     q_min = int(config.get("qMin", 3) or 3)
     q_max = int(config.get("qMax", max(q_min, 6)) or max(q_min, 6))
-    batches = build_batches(sequence, orders, plan_lookup, priority_map, q_min, q_max)
+    # NEU: Signaturen & α lesen
+    op_sigs = {o.order_id: order_op_signature(o) for o in orders}
+    alpha = float(config.get("batchSimilarityWeight", 0.7) or 0.7)
+
+    batches = build_batches(
+        sequence, orders, plan_lookup, priority_map,
+        q_min, q_max, op_sigs=op_sigs, alpha=alpha
+    )
     routes = build_routes(orders, plan_lookup)
     release_list = [orders[idx].order_id for idx in sequence]
 
@@ -722,6 +786,10 @@ def simple_fifo_result(
         ],
     }
 
+
+# ---------------------------------------------------------------------------
+# Main Scheduling
+# ---------------------------------------------------------------------------
 
 def schedule_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     now = float(payload.get("now") or 0.0)
@@ -792,7 +860,15 @@ def schedule_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     q_min = int(config.get("qMin", 3) or 3)
     q_max = int(config.get("qMax", max(q_min, 6)) or max(q_min, 6))
-    batches = build_batches(best_seq, orders, plan_lookup, priority_map, q_min, q_max)
+
+    # NEU: Signaturen & α lesen
+    op_sigs = {o.order_id: order_op_signature(o) for o in orders}
+    alpha = float(config.get("batchSimilarityWeight", 0.7) or 0.7)
+
+    batches = build_batches(
+        best_seq, orders, plan_lookup, priority_map,
+        q_min, q_max, op_sigs=op_sigs, alpha=alpha
+    )
 
     release_list = [orders[idx].order_id for idx in best_seq]
 
@@ -818,6 +894,15 @@ def schedule_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         baseline_plan=baseline_plan,
         optimized_plan=optimized_plan,
     )
+
+    # Optionaler Debug-Hinweis zur Batchbildung
+    debug.append({
+        "stage": "PIP_BATCH_SIMILARITY",
+        "note": "Batch-Score = alpha*mean(priority) + (1-alpha)*mean(JaccardSimilarity)",
+        "alphaPriority": alpha,
+        "qMin": q_min,
+        "qMax": q_max
+    })
 
     return {
         "priorities": priorities,

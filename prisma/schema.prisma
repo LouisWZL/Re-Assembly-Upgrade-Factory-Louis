@@ -21,25 +21,29 @@ model Baugruppentyp {
 }
 
 model ReassemblyFactory {
-  id                     String        @id @default(cuid())
-  name                   String
-  kapazität             Int
-  schichtmodell          String        @default("EINSCHICHT")
-  anzahlMontagestationen Int           @default(10)
-  targetBatchAverage     Int           @default(65)
-  pflichtUpgradeSchwelle Int           @default(30)
-  defaultDemontagezeit   Int           @default(30)
-  defaultMontagezeit     Int           @default(45)
-  beschaffung            Json?
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
-  auftraege              Auftrag[]
-  baugruppen             Baugruppe[]
-  baugruppentypen        Baugruppentyp[]
-  produkte               Produkt[]
-  queueConfig            QueueConfig?
-  schedulingLogs         SchedulingLog[]
-  algorithmBundles       AlgorithmBundle[]
+  id                       String        @id @default(cuid())
+  name                     String
+  kapazität               Int
+  schichtmodell            String        @default("EINSCHICHT")
+  anzahlMontagestationen   Int           @default(10)
+  anzahlDemontagestationen Int           @default(5)
+  demFlexSharePct          Int           @default(50)  // Percentage of flexible demontage slots
+  monFlexSharePct          Int           @default(50)  // Percentage of flexible montage slots
+  setupTimeMinutes         Int           @default(0)   // Setup time between different component types in minutes
+  targetBatchAverage       Int           @default(65)
+  pflichtUpgradeSchwelle   Int           @default(30)
+  defaultDemontagezeit     Int           @default(30)
+  defaultMontagezeit       Int           @default(45)
+  beschaffung              Json?
+  createdAt                DateTime      @default(now())
+  updatedAt                DateTime      @updatedAt
+  auftraege                Auftrag[]
+  baugruppen               Baugruppe[]
+  baugruppentypen          Baugruppentyp[]
+  produkte                 Produkt[]
+  queueConfig              QueueConfig?
+  schedulingLogs           SchedulingLog[]
+  algorithmBundles         AlgorithmBundle[]
 }
 
 model Kunde {
@@ -165,98 +169,6 @@ model Prozess {
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
   baugruppen Baugruppe[] @relation("BaugruppeToProzess")
-}
-
-model ProductionStepTiming {
-  id                    String    @id @default(cuid())
-  orderId               String
-  componentType         String
-  stationId             String
-  lineNumber            Int
-  simulationTimeMinutes Int       @default(0)
-  simulationStartTime   DateTime
-  startTime             DateTime
-  endTime               DateTime?
-  durationMinutes       Int?
-  stepType              String    @default("assembly")
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@index([orderId])
-  @@index([stationId])
-}
-
-model DemontageTimings {
-  id                    String    @id @default(cuid())
-  orderId               String
-  componentType         String
-  stationId             String
-  startTime             DateTime
-  endTime               DateTime?
-  durationMinutes       Int?
-  simulationTimeMinutes Int       @default(0)
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-
-  @@index([orderId])
-  @@index([stationId])
-}
-
-model AdvancedOrder {
-  id                  String                @id @default(cuid())
-  displayId           String?
-  customerName        String
-  productVariantName  String
-  productVariantType  String
-  currentPhase        String
-  status              String                @default("active")
-  deliveryDate        DateTime
-  totalProcessingTime Int                   @default(0)
-  completedAt         DateTime?
-  reassemblyReason    String?
-  requiresReassembly  Boolean               @default(false)
-  assignedLineNumber  Int?
-  needsQualityRework  Boolean               @default(false)
-  createdAt           DateTime              @default(now())
-  updatedAt           DateTime              @updatedAt
-  components          AdvancedComponent[]
-  processSteps        AdvancedProcessStep[]
-
-  @@index([currentPhase])
-  @@index([status])
-}
-
-model AdvancedProcessStep {
-  id                     String        @id @default(cuid())
-  orderId                String
-  phase                  String
-  startedAt              DateTime
-  completedAt            DateTime?
-  durationMinutes        Int?
-  wasRework              Boolean       @default(false)
-  disruptionOccurred     Boolean       @default(false)
-  disruptionDelayMinutes Int           @default(0)
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
-  order                  AdvancedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-
-  @@index([orderId])
-  @@index([phase])
-}
-
-model AdvancedComponent {
-  id                     String        @id @default(cuid())
-  orderId                String
-  componentType          String
-  conditionPercentage    Int
-  reassemblyType         String?
-  replacementComponentId String?
-  createdAt              DateTime      @default(now())
-  updatedAt              DateTime      @updatedAt
-  order                  AdvancedOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-
-  @@index([orderId])
-  @@index([componentType])
 }
 
 model StationDuration {
