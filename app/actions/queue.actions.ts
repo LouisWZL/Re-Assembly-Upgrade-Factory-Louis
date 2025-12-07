@@ -62,13 +62,13 @@ export async function enqueueOrder(
   sequence?: any,
   processTimes?: any
 ) {
-  console.log(`🔍 [ENQUEUE] ========== START ==========`)
-  console.log(`🔍 [ENQUEUE] Queue: ${queue}`)
-  console.log(`🔍 [ENQUEUE] Order: ${orderId.slice(-4)}`)
-  console.log(`🔍 [ENQUEUE] processTimes argument received:`, processTimes)
-  console.log(`🔍 [ENQUEUE] processTimes type:`, typeof processTimes)
-  console.log(`🔍 [ENQUEUE] processTimes is object?`, typeof processTimes === 'object')
-  console.log(`🔍 [ENQUEUE] processTimes is truthy?`, !!processTimes)
+  // Reduced logging - only log summary, not full processTimes object
+  const ptSummary = processTimes ? {
+    demOps: processTimes.demontage?.length ?? 0,
+    monOps: processTimes.remontage?.length ?? 0,
+    totals: processTimes.totals
+  } : null
+  console.log(`[ENQUEUE] ${queue} order=${orderId.slice(-4)} processTimes=${ptSummary ? JSON.stringify(ptSummary) : 'null'}`)
 
   try {
     await ensureDatabaseInitialized()
@@ -151,16 +151,12 @@ export async function enqueueOrder(
       }
     }
 
-    // ✅ CRITICAL: Require valid processTimes with individual operations - NO FALLBACKS!
+    // Require valid processTimes with individual operations - NO FALLBACKS!
     let effectiveProcessTimes = processTimes
-    console.log(`🔍 [ENQUEUE] effectiveProcessTimes initial:`, effectiveProcessTimes)
 
     // Validate that we have proper process times structure
     if (!effectiveProcessTimes || typeof effectiveProcessTimes !== 'object') {
-      console.error(`❌ [ENQUEUE] CRITICAL: No processTimes provided for order ${orderId.slice(-4)} (queue=${queue})`)
-      console.error(`❌ [ENQUEUE] This order was likely not created with processSequenceDurations`)
-      console.error(`❌ [ENQUEUE] Refusing to enqueue without valid operation data - NO FALLBACKS!`)
-
+      console.error(`[ENQUEUE] No processTimes for order ${orderId.slice(-4)} (queue=${queue})`)
       return {
         success: false,
         error: `Order ${orderId.slice(-4)} missing processTimes - cannot enqueue without operation data`
@@ -174,11 +170,7 @@ export async function enqueueOrder(
                               Array.isArray(effectiveProcessTimes.remontage)
 
     if (!hasValidStructure) {
-      console.error(`❌ [ENQUEUE] CRITICAL: Invalid processTimes structure for order ${orderId.slice(-4)} (queue=${queue})`)
-      console.error(`❌ [ENQUEUE] Expected: {demontage: [], remontage: [], totals: {demontage: X, montage: Y}}`)
-      console.error(`❌ [ENQUEUE] Received:`, effectiveProcessTimes)
-      console.error(`❌ [ENQUEUE] Refusing to enqueue without valid operation arrays - NO FALLBACKS!`)
-
+      console.error(`[ENQUEUE] Invalid processTimes structure for order ${orderId.slice(-4)} (queue=${queue})`)
       return {
         success: false,
         error: `Order ${orderId.slice(-4)} has invalid processTimes structure - missing operation arrays`
@@ -186,25 +178,16 @@ export async function enqueueOrder(
     }
 
     // Validate totals are > 0
-    // NOTE: Database uses "remontage", not "montage"!
     const demTotal = effectiveProcessTimes.totals.demontage || 0
     const monTotal = effectiveProcessTimes.totals.montage || effectiveProcessTimes.totals.remontage || 0
 
     if (demTotal <= 0 || monTotal <= 0) {
-      console.error(`❌ [ENQUEUE] CRITICAL: processTimes totals are ≤ 0 for order ${orderId.slice(-4)} (queue=${queue})`)
-      console.error(`❌ [ENQUEUE] Totals:`, effectiveProcessTimes.totals)
-      console.error(`❌ [ENQUEUE] demTotal=${demTotal}, monTotal=${monTotal}`)
-      console.error(`❌ [ENQUEUE] Refusing to enqueue - NO FALLBACKS!`)
-
+      console.error(`[ENQUEUE] processTimes totals ≤ 0 for order ${orderId.slice(-4)}: dem=${demTotal}, mon=${monTotal}`)
       return {
         success: false,
         error: `Order ${orderId.slice(-4)} has invalid processTimes totals (≤ 0)`
       }
     }
-
-    console.log(`✅ [ENQUEUE] Valid processTimes structure confirmed:`)
-    console.log(`✅ [ENQUEUE]   - demontage ops: ${effectiveProcessTimes.demontage.length}, total: ${demTotal}m`)
-    console.log(`✅ [ENQUEUE]   - remontage ops: ${effectiveProcessTimes.remontage.length}, total: ${monTotal}m`)
 
     // Determine release time based on queue type
     const releaseAfterMinutes = queue === 'preAcceptance'
@@ -254,11 +237,6 @@ export async function enqueueOrder(
       queuedAtSimMinute: currentSimMinute
     }
 
-    console.log(`🔍 [ENQUEUE] Data being written to DB:`, {
-      orderId: orderId.slice(-4),
-      processTimes: data.processTimes,
-      queue
-    })
 
     let result
     try {
@@ -283,34 +261,6 @@ export async function enqueueOrder(
 
     revalidatePath('/simulation')
 
-    // Diagnostics: log what was persisted to processTimes
-    try {
-      const stored = queue === 'preAcceptance'
-        ? await prisma.preAcceptanceQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
-        : queue === 'preInspection'
-        ? await prisma.preInspectionQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
-        : await prisma.postInspectionQueue.findUnique({ where: { id: (result as any).id }, select: { processTimes: true } })
-      const diag = {
-        stage: 'PROCESS_TIMES_ENQUEUE',
-        queue,
-        orderId,
-        processTimesStored: stored?.processTimes || null,
-        processTimesInput: processTimes || null,
-        processTimesComputed: effectiveProcessTimes || null,
-        queuedAtSimMinute: currentSimMinute
-      }
-      console.log(`[enqueueOrder] Stored processTimes for ${orderId.slice(-4)} (queue=${queue}):`, stored?.processTimes)
-      // Push to liveDiagnostics store if present (best-effort)
-      try {
-        globalThis.__queueDiagnosticsLog = globalThis.__queueDiagnosticsLog || []
-        globalThis.__queueDiagnosticsLog.push(diag)
-        if (globalThis.__queueDiagnosticsLog.length > 100) {
-          globalThis.__queueDiagnosticsLog.shift()
-        }
-      } catch {}
-    } catch (diagError) {
-      console.warn('[enqueueOrder] Failed to read back processTimes for diagnostics:', diagError)
-    }
 
     return {
       success: true,

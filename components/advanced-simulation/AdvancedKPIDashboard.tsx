@@ -44,6 +44,7 @@ interface AdvancedKPIDashboardProps {
   stations: ProductionStation[];
   onClearData: () => void;
   calculatedKPIs?: CalculatedKPIs;
+  deteriorationCount?: number;
   children?: React.ReactNode;
 }
 
@@ -53,6 +54,7 @@ export function AdvancedKPIDashboard({
   stations,
   onClearData,
   calculatedKPIs,
+  deteriorationCount = 0,
   children
 }: AdvancedKPIDashboardProps) {
   const { activeFactory } = useFactory();
@@ -113,7 +115,8 @@ export function AdvancedKPIDashboard({
             { label: 'Demontage Auslastung', value: `${demUtilization.toFixed(1)}%`, accent: 'text-blue-600' },
             { label: 'Montage Auslastung', value: `${monUtilization.toFixed(1)}%`, accent: 'text-green-600' },
             { label: 'Aktive Aufträge', value: orders.length.toString() },
-            { label: 'In Warteschlangen', value: totalWaitingOrders.toString() }
+            { label: 'In Warteschlangen', value: totalWaitingOrders.toString() },
+            { label: 'Inspektions-Verschlechterungen', value: deteriorationCount.toString(), accent: 'text-red-600' }
           ].map(({ label, value, accent }, idx) => (
             <Card key={idx} className="min-w-[160px] flex-1 md:min-w-[140px]">
               <CardContent className="pt-6">

@@ -7,6 +7,9 @@ import { useSimulation } from '@/contexts/simulation-context';
 import { useRouter } from 'next/navigation';
 import { getAdvancedSimulationData } from '@/app/actions/advanced-simulation.actions';
 import { getAllAlgorithmBundles, setActiveAlgorithmBundle } from '@/app/actions/algorithm-bundle.actions';
+import { applyInspectionDeterioration } from '@/app/actions/auftrag.actions';
+import { updateFactorySimulationSettings } from '@/app/actions/factory.actions';
+// queue.actions are imported dynamically where needed to avoid render-blocking
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
@@ -15,7 +18,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tooltip as UITooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info, ChevronDown, ChevronUp, Database } from 'lucide-react';
+import { Play, Pause, Square, RefreshCw, Settings, Plus, Clock, Trash2, BarChart3, ArrowLeft, Info, ChevronDown, ChevronUp, Database, Download, Save } from 'lucide-react';
+// ExcelJS loaded dynamically in handleExportToExcel to avoid loading 1.5MB on every page load
 import { toast } from 'sonner';
 import {
   ReactFlow,
@@ -86,16 +90,21 @@ interface SimulationOrder {
   currentSequenceStep?: number; // Current step index in the selected sequence
   plannedDeliverySimMinute?: number | null;
   finalCompletionSimMinute?: number | null;
+  simMinutesAtStart?: number; // Simulation minute when order started (entered first station)
+  simMinutesAtEnd?: number; // Simulation minute when order completed (exited last station)
+  // MOAHS-optimierte Reihenfolge aus Python-Scheduling
+  dispatcherOrderPostInspection?: number | null;
 }
 
 // Scheduling algorithms enum and interface
 enum SchedulingAlgorithm {
   FIFO = 'FIFO',
   SJF = 'SJF', // Shortest Job First
-  LJF = 'LJF', // Longest Job First  
+  LJF = 'LJF', // Longest Job First
   PRIORITY = 'PRIORITY',
   EDD = 'EDD', // Earliest Due Date
-  RANDOM = 'RANDOM'
+  RANDOM = 'RANDOM',
+  MOAHS = 'MOAHS' // Multi-Objective Adaptive Harmony Search (Python-optimiert)
 }
 
 interface SchedulingStrategy {
@@ -341,6 +350,8 @@ export function RealDataFactorySimulation() {
   const [demFlexSharePct, setDemFlexSharePct] = useState<number>(50)
   const [monFlexSharePct, setMonFlexSharePct] = useState<number>(50)
   const [setupTimeHours, setSetupTimeHours] = useState<number>(0)
+  const [isSavingSettings, setIsSavingSettings] = useState<boolean>(false)
+  const [slotVersion, setSlotVersion] = useState<number>(0) // Triggers re-render when slots change
   const [aggregateView] = useState<boolean>(true)
   const [initDebugLogs, setInitDebugLogs] = useState<string[]>([])
   const [initError, setInitError] = useState<string | null>(null)
@@ -378,10 +389,26 @@ export function RealDataFactorySimulation() {
   const [algorithmBundles, setAlgorithmBundles] = useState<any[]>([])
   const [loadingBundles, setLoadingBundles] = useState(false)
 
+  // FIFO slot mode: derived from active bundle's pipoScriptPath
+  // When true, pickSlot uses "dumb" slot selection (first free slot, no setup optimization)
+  const isFifoSlotMode = useMemo(() => {
+    if (!selectedBundleId || algorithmBundles.length === 0) return false
+    const activeBundle = algorithmBundles.find(b => b.id === selectedBundleId)
+    if (!activeBundle?.pipoScriptPath) return false
+    // Check if the script path indicates FIFO mode
+    const scriptName = activeBundle.pipoScriptPath.toLowerCase()
+    return scriptName.includes('fifo')
+  }, [selectedBundleId, algorithmBundles])
+
   // Auto-generate orders feature
   const [autoGenerateOrders, setAutoGenerateOrders] = useState(false)
   const [autoGenerateIntervalMinutes, setAutoGenerateIntervalMinutes] = useState(10) // Sim-minutes
   const lastAutoGenerateTimeRef = useRef<number>(0) // Track last generation time in sim-minutes
+
+  // Utilization history for Excel export (tracked every 30 sim-minutes)
+  type UtilizationSnapshot = { simMinute: number; demUtilization: number; monUtilization: number }
+  const utilizationHistoryRef = useRef<UtilizationSnapshot[]>([])
+  const lastUtilizationSnapshotMinuteRef = useRef<number>(0)
 
   // Phase slot state (approximation of rigid/flexible slots)
   type SlotState = { flex: boolean; specialization?: string | null; currentType?: string | null; idleSince?: number | null; busy?: boolean }
@@ -421,21 +448,22 @@ export function RealDataFactorySimulation() {
   }, [])
 
   // Initialize slots based on current used types
+  // usedTypes arrays are expected to be PRE-SORTED by duration (longest first)
   const initPhaseSlots = useCallback((usedDemTypes: string[], usedMonTypes: string[]) => {
     const makeSlots = (total: number, flexSharePct: number, usedTypes: string[]) => {
       const flexCount = Math.max(0, Math.round((flexSharePct / 100) * total))
       const rigidCount = Math.max(0, total - flexCount)
-      // Determine rigid specializations from top types
-      const counts: Record<string, number> = {}
-      usedTypes.forEach(t => { counts[t] = (counts[t] || 0) + 1 })
-      const topTypes = Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([t])=>t)
+      // usedTypes is already sorted by duration (longest first)
+      // Use unique types only, preserving the duration-based order
+      const uniqueTypes = [...new Set(usedTypes)]
       const slots: SlotState[] = []
-      for (let i=0;i<rigidCount;i++) {
-        const specRaw = topTypes.length ? topTypes[i % topTypes.length] : (usedTypes[0] || null)
+      for (let i = 0; i < rigidCount; i++) {
+        // Assign rigid slots to types in order (longest duration first)
+        const specRaw = uniqueTypes.length ? uniqueTypes[i % uniqueTypes.length] : null
         const spec = specRaw ? normalizeOperationKey(specRaw) : null
         slots.push({ flex: false, specialization: spec, currentType: null, idleSince: 0, busy: false })
       }
-      for (let i=0;i<flexCount;i++) {
+      for (let i = 0; i < flexCount; i++) {
         slots.push({ flex: true, specialization: null, currentType: null, idleSince: null, busy: false })
       }
       return slots
@@ -443,9 +471,46 @@ export function RealDataFactorySimulation() {
     demSlotsRef.current = makeSlots(demSlots, demFlexSharePct, usedDemTypes)
     monSlotsRef.current = makeSlots(monSlots, monFlexSharePct, usedMonTypes)
     orderPhaseSlotMapRef.current = {}
+
+    // Trigger UI re-render by incrementing version
+    setSlotVersion(v => v + 1)
+
+    // Log slot assignments
+    console.log('🎰 [SLOT-INIT] Demontage slots:', demSlotsRef.current.map((s, i) =>
+      s.flex ? `S${i}:flex` : `S${i}:${s.specialization}`).join(', '))
+    console.log('🎰 [SLOT-INIT] Montage slots:', monSlotsRef.current.map((s, i) =>
+      s.flex ? `S${i}:flex` : `S${i}:${s.specialization}`).join(', '))
   }, [demSlots, monSlots, demFlexSharePct, monFlexSharePct])
 
+  // Re-initialize slots when capacity settings change (but NOT during running simulation)
+  useEffect(() => {
+    // Don't re-init during running simulation to avoid breaking in-progress work
+    if (isRunning) {
+      console.log('⚠️ [SLOT-REINIT] Skipped - simulation is running. Changes take effect on next start.')
+      return
+    }
+    // Only re-init if slots exist (meaning we've had at least one initialization)
+    if (demSlotsRef.current.length === 0 && monSlotsRef.current.length === 0) {
+      return
+    }
+    // Preserve the existing specialization types but adjust slot count/flex ratio
+    const existingDemTypes = demSlotsRef.current
+      .filter(s => !s.flex && s.specialization)
+      .map(s => s.specialization!)
+    const existingMonTypes = monSlotsRef.current
+      .filter(s => !s.flex && s.specialization)
+      .map(s => s.specialization!)
+
+    if (existingDemTypes.length > 0 || existingMonTypes.length > 0) {
+      console.log('🔄 [SLOT-REINIT] Capacity changed, re-initializing slots...')
+      initPhaseSlots(existingDemTypes, existingMonTypes)
+    }
+  }, [demSlots, monSlots, demFlexSharePct, monFlexSharePct, isRunning, initPhaseSlots])
+
   // Pick a slot for a given phase and op type (returns slot index or -1)
+  // Diese Funktion wird verwendet wenn KEIN Python-Plan vorliegt oder als Fallback
+  // In FIFO mode: "dumb" slot selection - first free slot, rigid constraint preserved, no setup optimization
+  // In MOAHS mode: smart slot selection with setup time optimization
   const pickSlot = useCallback((phase: 'DEMONTAGE'|'REASSEMBLY', opType: string) => {
     const slots = phase === 'DEMONTAGE' ? demSlotsRef.current : monSlotsRef.current
     const nowMin = getSimMinutes()
@@ -453,8 +518,79 @@ export function RealDataFactorySimulation() {
     const desiredKey = normalizeOperationKey(opType)
 
     pickSlotDebugLogsRef.current = []
-    pickSlotDebugLogsRef.current.push(`🎯 pickSlot: phase=${phase} opType=${opType} desiredKey=${desiredKey} setupMin=${setupMinutes} nowMin=${nowMin}`)
+    pickSlotDebugLogsRef.current.push(`🎯 pickSlot: phase=${phase} opType=${opType} desiredKey=${desiredKey} setupMin=${setupMinutes} nowMin=${nowMin} FIFO_MODE=${isFifoSlotMode}`)
 
+    // FIFO MODE: Dumb slot selection
+    // - Take first free slot in order (NO preference for same type = no setup optimization)
+    // - Rigid slots still must match specialization
+    // - Flex slots: take first free, BUT setup time still applies on type change!
+    // Key difference vs MOAHS: FIFO doesn't PREFER same-type slots, it just takes the first one
+    if (isFifoSlotMode) {
+      pickSlotDebugLogsRef.current.push(`  📋 FIFO MODE: Using dumb slot selection (setup time still applies!)`)
+      for (let i = 0; i < slots.length; i++) {
+        const slot = slots[i]
+        const slotCurrentKey = normalizeOperationKey(slot.currentType)
+
+        // Setup is needed ONLY if:
+        // 1. Slot was previously used (has currentType)
+        // 2. AND currentType differs from desired type (use explicit !== '' check)
+        // 3. AND idleSince is set (meaning it was released and is waiting for setup)
+        // BUG FIX: Don't use && desiredKey which fails for empty string!
+        const typesDiffer = slotCurrentKey !== '' && desiredKey !== '' ? slotCurrentKey !== desiredKey : true
+        const needsSetup = slot.currentType && typesDiffer && slot.idleSince !== null
+
+        // Calculate idle duration only if setup is needed
+        const idleDuration = slot.idleSince != null ? Math.max(0, nowMin - slot.idleSince) : 0
+        const setupComplete = !needsSetup || idleDuration >= setupMinutes
+
+        pickSlotDebugLogsRef.current.push(`  S${i}: busy=${slot.busy} flex=${slot.flex} currType=${slot.currentType} idleSince=${slot.idleSince} idleDur=${idleDuration} needsSetup=${needsSetup} setupComplete=${setupComplete} slotKey="${slotCurrentKey}" desiredKey="${desiredKey}"`)
+
+        if (slot.busy) {
+          pickSlotDebugLogsRef.current.push(`    ❌ skip: busy`)
+          continue
+        }
+
+        // Rigid slot: must match specialization
+        if (!slot.flex) {
+          const slotSpecKey = normalizeOperationKey(slot.specialization)
+          if (desiredKey && slotSpecKey !== desiredKey) {
+            pickSlotDebugLogsRef.current.push(`    ❌ skip: rigid mismatch (${slotSpecKey} !== ${desiredKey})`)
+            continue
+          }
+          pickSlotDebugLogsRef.current.push(`    ✅ FIFO MATCH rigid slot!`)
+          slot.busy = true
+          slot.currentType = opType
+          slot.idleSince = null
+          return i
+        }
+
+        // Flex slot in FIFO: take first free, but MUST wait for setup if type changes
+        // This is the key difference: FIFO doesn't skip to find a same-type slot,
+        // it takes the first one and pays the setup penalty
+        if (!setupComplete) {
+          pickSlotDebugLogsRef.current.push(`    ❌ FIFO skip: setup not elapsed (${idleDuration}/${setupMinutes}min) - type change ${slotCurrentKey} → ${desiredKey}`)
+          continue
+        }
+
+        if (needsSetup) {
+          pickSlotDebugLogsRef.current.push(`    ✅ FIFO MATCH flex slot (setup elapsed: ${idleDuration} >= ${setupMinutes})`)
+        } else if (!slot.currentType) {
+          pickSlotDebugLogsRef.current.push(`    ✅ FIFO MATCH flex slot (first use, no setup needed)`)
+        } else {
+          pickSlotDebugLogsRef.current.push(`    ✅ FIFO MATCH flex slot (same type, no setup needed)`)
+        }
+        slot.busy = true
+        slot.currentType = opType
+        slot.idleSince = null
+        return i
+      }
+
+      pickSlotDebugLogsRef.current.push(`  ❌ FIFO: NO SLOT FOUND (all busy or in setup)`)
+      return -1
+    }
+
+    // MOAHS MODE: Smart slot selection with setup optimization
+    pickSlotDebugLogsRef.current.push(`  🧠 MOAHS MODE: Using smart slot selection`)
     for (let i = 0; i < slots.length; i++) {
       const slot = slots[i]
       pickSlotDebugLogsRef.current.push(`  S${i}: busy=${slot.busy} flex=${slot.flex} spec=${slot.specialization} currType=${slot.currentType} idleSince=${slot.idleSince}`)
@@ -481,22 +617,50 @@ export function RealDataFactorySimulation() {
         return i
       }
 
-      const sameOrUnassigned = !slot.currentType || slotCurrentKey === desiredKey || !desiredKey
-      pickSlotDebugLogsRef.current.push(`    flex slot: sameOrUnassigned=${sameOrUnassigned} (!currType=${!slot.currentType} || match=${slotCurrentKey === desiredKey} || !desired=${!desiredKey})`)
-      if (sameOrUnassigned) {
-        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (same/unassigned)!`)
+      // Flex slot logic: Check if setup time is needed
+      // FIXED: Don't skip setup check when desiredKey is empty - that was the bug!
+      const isUnassigned = !slot.currentType  // Slot never used
+      // BUG FIX: Use explicit string comparison, don't rely on && short-circuit
+      const isSameType = slotCurrentKey !== '' && desiredKey !== '' && slotCurrentKey === desiredKey
+      const needsSetup = slot.currentType && !isSameType  // Had a type and it's different
+
+      pickSlotDebugLogsRef.current.push(`    flex slot: isUnassigned=${isUnassigned} isSameType=${isSameType} needsSetup=${needsSetup} slotCurrentKey="${slotCurrentKey}" desiredKey="${desiredKey}"`)
+
+      // Case 1: Unassigned slot - take it immediately (no setup needed)
+      if (isUnassigned) {
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (first use, no setup needed)!`)
         slot.busy = true
         slot.currentType = opType
         slot.idleSince = null
         return i
       }
 
-      const idleSince = slot.idleSince == null ? nowMin : slot.idleSince
-      const idleDuration = Math.max(0, nowMin - idleSince)
-      pickSlotDebugLogsRef.current.push(`    idleSince=${idleSince} idleDuration=${idleDuration} setupMinutes=${setupMinutes}`)
+      // Case 2: Same type - take it immediately (no setup needed)
+      if (isSameType) {
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (same type, no setup needed)!`)
+        slot.busy = true
+        slot.currentType = opType
+        slot.idleSince = null
+        return i
+      }
+
+      // Case 3: Type change - MUST check setup time!
+      // BUG FIX: If idleSince is null but slot has currentType, this is a BUG state!
+      // This can happen if slot was never released properly after previous use.
+      // In this case, we should NOT take the slot - it needs to be released first.
+      if (slot.idleSince === null) {
+        pickSlotDebugLogsRef.current.push(`    ⚠️ BUG STATE: currentType=${slot.currentType} but idleSince=null! Slot was never released!`)
+        console.error(`🐛 BUG: Slot S${i} has currentType=${slot.currentType} but idleSince=null - this should never happen!`)
+        // Fallback: treat as needing full setup time from now
+        // This means we skip this slot until it's properly released
+        continue
+      }
+
+      const idleDuration = Math.max(0, nowMin - slot.idleSince)
+      pickSlotDebugLogsRef.current.push(`    type change: idleSince=${slot.idleSince} idleDuration=${idleDuration} setupMinutes=${setupMinutes}`)
 
       if (idleDuration >= setupMinutes) {
-        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (setup elapsed)!`)
+        pickSlotDebugLogsRef.current.push(`    ✅ MATCH flex slot (setup elapsed: ${idleDuration} >= ${setupMinutes})!`)
         slot.busy = true
         slot.currentType = opType
         slot.idleSince = null
@@ -507,17 +671,227 @@ export function RealDataFactorySimulation() {
 
     pickSlotDebugLogsRef.current.push(`  ❌ NO SLOT FOUND`)
     return -1
-  }, [getSimMinutes, setupTimeHours])
+  }, [getSimMinutes, setupTimeHours, isFifoSlotMode])
 
   const releaseSlot = useCallback((phase: 'DEMONTAGE'|'REASSEMBLY', slotIdx: number) => {
     const slots = phase === 'DEMONTAGE' ? demSlotsRef.current : monSlotsRef.current
     const s = slots[slotIdx]
     if (!s) return
+    const prevType = s.currentType
     s.busy = false
     s.idleSince = getSimMinutes()
+    // DEBUG: Log release with details
+    console.log(`🔓 [RELEASE] ${phase} S${slotIdx}: busy=false, idleSince=${s.idleSince}, currentType=${s.currentType} (was ${prevType})`)
+    // Trigger UI update
+    setSlotVersion(v => v + 1)
   }, [getSimMinutes])
-  
-  
+
+  // Excel export function
+  const handleExportToExcel = useCallback(async () => {
+    try {
+      // Dynamic import - only load ExcelJS when user clicks export
+      const ExcelJS = await import('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = 'Factory Simulation';
+      workbook.created = new Date();
+
+      // Create worksheet for orders
+      const ordersSheet = workbook.addWorksheet('Aufträge');
+
+      // Define columns - using simulation minutes for time columns
+      ordersSheet.columns = [
+        { header: 'Order ID', key: 'orderId', width: 15 },
+        { header: 'Kunde', key: 'kundeName', width: 25 },
+        { header: 'Produktvariante', key: 'produktvariante', width: 20 },
+        { header: 'Prozesssequenz (Vorranggraph)', key: 'processSequence', width: 60 },
+        { header: 'Demontage (min)', key: 'demontageTime', width: 15 },
+        { header: 'Remontage (min)', key: 'remontageTime', width: 15 },
+        { header: 'Liefertermin (Sim-Min)', key: 'plannedDelivery', width: 22 },
+        { header: 'Startzeit (Sim-Min)', key: 'startTime', width: 20 },
+        { header: 'Endzeit (Sim-Min)', key: 'completedAt', width: 20 },
+        { header: 'Durchlaufzeit (min)', key: 'leadTime', width: 20 },
+        { header: 'Verspätung (min)', key: 'tardiness', width: 18 },
+        { header: 'Status', key: 'status', width: 15 },
+      ];
+
+      // Style header row
+      ordersSheet.getRow(1).font = { bold: true };
+      ordersSheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' }
+      };
+
+      // Combine all orders
+      const allOrders = [...completedOrders, ...activeOrders];
+
+      // Add data rows
+      allOrders.forEach(order => {
+        // Extract sequence from selectedSequence (the sequence from Vorranggraph)
+        // Format: I → BG1 → BG2 → × → BG3 → BG4 → Q
+        let processSeq = '-';
+        if (order.selectedSequence?.steps && Array.isArray(order.selectedSequence.steps)) {
+          processSeq = order.selectedSequence.steps.join(' → ');
+        }
+
+        // Extract demontage and remontage times from stationDurations
+        let demontageTime = 0;
+        let remontageTime = 0;
+        if (order.stationDurations) {
+          Object.entries(order.stationDurations).forEach(([station, data]: [string, any]) => {
+            const time = data.expected || data.actual || 0;
+            if (station.toLowerCase().includes('dem') || station.toLowerCase().includes('disassembly')) {
+              demontageTime += time;
+            } else if (station.toLowerCase().includes('mon') || station.toLowerCase().includes('reassembly') || station.toLowerCase().includes('assembly')) {
+              remontageTime += time;
+            }
+          });
+        }
+
+        // Convert real timestamps to simulation minutes
+        // startTime and completedAt are real timestamps, we need to convert to sim-minutes
+        // by calculating how many sim-minutes have elapsed since simulation start
+        const toSimMinutes = (date: Date | string | undefined): number | string => {
+          if (!date) return '-';
+          const d = new Date(date);
+          if (isNaN(d.getTime())) return '-';
+          // If we have simulationStartTime, calculate sim-minutes relative to it
+          if (simulationStartTime) {
+            const elapsedRealMs = d.getTime() - simulationStartTime.getTime();
+            // Convert real ms to sim-minutes using current speed
+            // But since speed can change, we use a different approach:
+            // The order stores simMinutesAtStart/simMinutesAtEnd if available
+            // Otherwise fallback to elapsed minutes calculation
+            return Math.round(elapsedRealMs / 60000 * speed);
+          }
+          return '-';
+        };
+
+        // Use order's simMinutes fields if available (set during simulation)
+        const startSimMin = order.simMinutesAtStart !== undefined ? order.simMinutesAtStart : toSimMinutes(order.startTime);
+        const endSimMin = order.simMinutesAtEnd !== undefined ? order.simMinutesAtEnd : toSimMinutes(order.completedAt);
+
+        // Calculate lead time in simulation minutes
+        let leadTime: number | string = '-';
+        if (typeof startSimMin === 'number' && typeof endSimMin === 'number') {
+          leadTime = Math.round(endSimMin - startSimMin);
+        }
+
+        // Get planned delivery (Liefertermin) from Python scheduling
+        const plannedDelivery = order.plannedDeliverySimMinute ?? '-';
+
+        // Calculate tardiness (Verspätung): actual completion - planned delivery
+        // Positive = late, Negative = early
+        let tardiness: number | string = '-';
+        if (typeof endSimMin === 'number' && typeof order.plannedDeliverySimMinute === 'number') {
+          tardiness = Math.round(endSimMin - order.plannedDeliverySimMinute);
+        }
+
+        ordersSheet.addRow({
+          orderId: order.id.slice(-8),
+          kundeName: order.kundeName || '-',
+          produktvariante: order.produktvariante || '-',
+          processSequence: processSeq,
+          demontageTime: demontageTime || '-',
+          remontageTime: remontageTime || '-',
+          plannedDelivery: plannedDelivery,
+          startTime: startSimMin,
+          completedAt: endSimMin,
+          leadTime: leadTime,
+          tardiness: tardiness,
+          status: order.completedAt ? 'Fertig' : 'In Bearbeitung',
+        });
+      });
+
+      // Auto-filter (updated to include new columns: L = 12 columns)
+      ordersSheet.autoFilter = {
+        from: 'A1',
+        to: `L${allOrders.length + 1}`
+      };
+
+      // Create second worksheet for utilization history
+      const utilizationSheet = workbook.addWorksheet('Auslastung');
+
+      // Define columns for utilization sheet
+      utilizationSheet.columns = [
+        { header: 'Sim-Minute', key: 'simMinute', width: 15 },
+        { header: 'Demontage (%)', key: 'demUtilization', width: 18 },
+        { header: 'Montage (%)', key: 'monUtilization', width: 18 },
+      ];
+
+      // Style header row
+      utilizationSheet.getRow(1).font = { bold: true };
+      utilizationSheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' }
+      };
+
+      // Add utilization data rows from history (tracked every 30 sim-minutes)
+      const utilHistory = utilizationHistoryRef.current;
+      utilHistory.forEach(snapshot => {
+        utilizationSheet.addRow({
+          simMinute: snapshot.simMinute,
+          demUtilization: snapshot.demUtilization,
+          monUtilization: snapshot.monUtilization,
+        });
+      });
+
+      // Auto-filter for utilization sheet
+      if (utilHistory.length > 0) {
+        utilizationSheet.autoFilter = {
+          from: 'A1',
+          to: `C${utilHistory.length + 1}`
+        };
+      }
+
+      // Generate file and download
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `simulation-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      toast.success('Excel-Export erfolgreich!');
+    } catch (error) {
+      console.error('Excel export error:', error);
+      toast.error('Fehler beim Excel-Export');
+    }
+  }, [completedOrders, activeOrders, simulationStartTime, speed]);
+
+  // Save simulation settings to factory DB
+  const handleSaveSettingsToFactory = useCallback(async () => {
+    if (!activeFactory) {
+      toast.error('Keine Factory ausgewählt')
+      return
+    }
+    setIsSavingSettings(true)
+    try {
+      const result = await updateFactorySimulationSettings(activeFactory.id, {
+        demStations: demSlots,
+        monStations: monSlots,
+        demFlexPct: demFlexSharePct,
+        monFlexPct: monFlexSharePct,
+        setupMinutes: Math.round(setupTimeHours * 60)
+      })
+      if (result.success) {
+        toast.success('Einstellungen in Factory gespeichert')
+      } else {
+        toast.error(result.error || 'Fehler beim Speichern')
+      }
+    } catch (error) {
+      console.error('Error saving settings to factory:', error)
+      toast.error('Fehler beim Speichern der Einstellungen')
+    } finally {
+      setIsSavingSettings(false)
+    }
+  }, [activeFactory, demSlots, monSlots, demFlexSharePct, monFlexSharePct, setupTimeHours])
+
   // View state for simulation vs data dashboard
   const [currentView, setCurrentView] = useState<'simulation' | 'kpi'>('simulation');
   
@@ -582,6 +956,23 @@ export function RealDataFactorySimulation() {
         const randomIndex = Math.floor(Math.random() * waitingQueue.length);
         return waitingQueue[randomIndex];
       }
+    },
+    [SchedulingAlgorithm.MOAHS]: {
+      name: 'MOAHS (Python-optimiert)',
+      description: 'Multi-Objective Adaptive Harmony Search - nutzt Python-Feinterminierung',
+      selectNext: (waitingQueue: SimulationOrder[]) => {
+        if (waitingQueue.length === 0) return null;
+        // Sortiere nach dispatcherOrderPostInspection (niedrigere Werte zuerst)
+        // Falls kein Wert vorhanden, falle auf FIFO zurück
+        const sorted = [...waitingQueue].sort((a, b) => {
+          const orderA = a.dispatcherOrderPostInspection ?? Infinity;
+          const orderB = b.dispatcherOrderPostInspection ?? Infinity;
+          if (orderA !== orderB) return orderA - orderB;
+          // Bei gleichem/fehlendem dispatcherOrder: FIFO (nach startTime)
+          return a.startTime.getTime() - b.startTime.getTime();
+        });
+        return sorted[0];
+      }
     }
   };
   
@@ -594,6 +985,44 @@ export function RealDataFactorySimulation() {
     phaseNode: PhaseNode,
     queueCircle: QueueCircleNode
   }), []);
+
+  // Update ReactFlow PhaseNode data when slots change (via slotVersion)
+  useEffect(() => {
+    if (slotVersion === 0) return // Skip initial render
+
+    console.log('🔄 [SLOT-UPDATE] Updating PhaseNode data in ReactFlow, slotVersion:', slotVersion)
+
+    // Update the ReactFlow nodes with new slot data
+    setNodes(prev => prev.map(n => {
+      if (n.id === 'demontage-phase') {
+        return {
+          ...n,
+          data: {
+            ...(n.data || {}),
+            title: 'Demontage',
+            queue: demQueueRef.current.length || 0,
+            totalSlots: demSlotsRef.current.length || 0,
+            busySlots: (demSlotsRef.current.filter(s => s.busy).length) || 0,
+            slots: demSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+          }
+        } as any
+      }
+      if (n.id === 'reassembly-phase') {
+        return {
+          ...n,
+          data: {
+            ...(n.data || {}),
+            title: 'Montage',
+            queue: monQueueRef.current.length || 0,
+            totalSlots: monSlotsRef.current.length || 0,
+            busySlots: (monSlotsRef.current.filter(s => s.busy).length) || 0,
+            slots: monSlotsRef.current.map(s => ({ flex: s.flex, specialization: s.specialization || null, busy: s.busy }))
+          }
+        } as any
+      }
+      return n
+    }))
+  }, [slotVersion, setNodes])
 
   // Debug info toggle
   const [showDebugInfo, setShowDebugInfo] = useState(true);
@@ -611,6 +1040,10 @@ export function RealDataFactorySimulation() {
   // Inspection settings
   const [inspectionDialogOpen, setInspectionDialogOpen] = useState(false);
   const [reassemblyPercentage, setReassemblyPercentage] = useState(25); // Default 25% need reassembly
+
+  // Deterioration counter (components discovered during inspection that need replacement)
+  const [deteriorationCount, setDeteriorationCount] = useState(0);
+  const deteriorationCountRef = useRef(0);
 
   // Local event log for Gantt (START/END of sub-ops)
   const simEventsRef = useRef<Array<{ t:number; order_id:string; activity:string; slot?: number | null }>>([])
@@ -1083,6 +1516,8 @@ export function RealDataFactorySimulation() {
             currentSequenceStep: 0, // Start at beginning of sequence
             plannedDeliverySimMinute: order.plannedDeliverySimMinute ?? null,
             finalCompletionSimMinute: null,
+            // MOAHS-optimierte Reihenfolge aus Python-Scheduling
+            dispatcherOrderPostInspection: order.dispatcherOrderPostInspection ?? null,
           };
         });
 
@@ -1102,11 +1537,20 @@ export function RealDataFactorySimulation() {
         // Build FCFS queues (aggregate mode)
         try {
           // Initialize phase slots based on used types
-          // Use station names instead of IDs for proper matching
-          initPhaseSlots(
-            demontageSubStations.map(s => normalizeOperationKey(s.name || s.baugruppentypId || '')),
-            reassemblySubStations.map(s => normalizeOperationKey(s.name || s.baugruppentypId || ''))
-          )
+          // Sort by processingTime (descending) so rigid slots get the longest operations
+          // This ensures the heaviest operations get dedicated rigid slots
+          const demTypesByDuration = [...demontageSubStations]
+            .sort((a, b) => (b.processingTime || 0) - (a.processingTime || 0))
+            .map(s => normalizeOperationKey(s.name || s.baugruppentypId || ''))
+          const monTypesByDuration = [...reassemblySubStations]
+            .sort((a, b) => (b.processingTime || 0) - (a.processingTime || 0))
+            .map(s => normalizeOperationKey(s.name || s.baugruppentypId || ''))
+
+          console.log('🎯 [SLOT-INIT] Rigid slots by duration (longest first):')
+          console.log('  DEM:', demTypesByDuration.slice(0, 5).join(', '))
+          console.log('  MON:', monTypesByDuration.slice(0, 5).join(', '))
+
+          initPhaseSlots(demTypesByDuration, monTypesByDuration)
           const makeOps = (steps: string[], which: 'DEM'|'MON'): OpItem[] => {
             const ops: OpItem[] = []
             const crossIdx = steps.indexOf('×')
@@ -1304,12 +1748,13 @@ export function RealDataFactorySimulation() {
     }
   };
 
-  // New function to randomly select and convert a JSON sequence to simulation process sequence
+  // Function to select and convert a JSON sequence to simulation process sequence
+  // Uses PIPO's selectedSequenceVariantIndex if available, otherwise falls back to random
   const selectRandomSequenceAndConvert = (order: any, allStations: SimulationStation[]): { processSequence: string[], selectedSequence: any } => {
-    const processSequencesData = typeof order.processSequences === 'string' 
-      ? JSON.parse(order.processSequences) 
+    const processSequencesData = typeof order.processSequences === 'string'
+      ? JSON.parse(order.processSequences)
       : order.processSequences;
-    
+
     if (!processSequencesData?.baugruppentypen?.sequences || processSequencesData.baugruppentypen.sequences.length === 0) {
       // Fallback to old method if no sequences
       const requiredBgt = extractRequiredBaugruppentypen(order);
@@ -1319,11 +1764,24 @@ export function RealDataFactorySimulation() {
         selectedSequence: null
       };
     }
-    
-    // Randomly select one sequence from baugruppentypen sequences
+
+    // Check if PIPO has selected a sequence variant (stored in terminierung.selectedSequenceVariantIndex)
     const sequences = processSequencesData.baugruppentypen.sequences;
-    const randomIndex = Math.floor(Math.random() * sequences.length);
-    const selectedSequence = sequences[randomIndex];
+    const terminierung = order.terminierung;
+    const pipoSelectedIndex = terminierung?.selectedSequenceVariantIndex;
+
+    let selectedIndex: number;
+    if (typeof pipoSelectedIndex === 'number' && pipoSelectedIndex >= 0 && pipoSelectedIndex < sequences.length) {
+      // Use PIPO's selected sequence variant
+      selectedIndex = pipoSelectedIndex;
+      console.log(`🎯 [PIPO-SEQ] Order ${order.id?.slice(-4) || order.kunde?.vorname}: Using PIPO-selected sequence variant ${selectedIndex}`);
+    } else {
+      // Fallback to random selection (for orders not yet processed by PIPO)
+      selectedIndex = Math.floor(Math.random() * sequences.length);
+      console.log(`🎲 [RANDOM-SEQ] Order ${order.id?.slice(-4) || order.kunde?.vorname}: No PIPO selection, using random variant ${selectedIndex}`);
+    }
+
+    const selectedSequence = sequences[selectedIndex];
     
     console.log(`Order ${order.kunde.vorname} ${order.kunde.nachname}: Selected sequence ${selectedSequence.id}:`, selectedSequence.steps);
     
@@ -2035,7 +2493,10 @@ export function RealDataFactorySimulation() {
           const releasedOrderIds = preAcceptanceResult.orderIds
           const ordersToActivate = simulationOrdersRef.current.filter(order =>
             releasedOrderIds.includes(order.id)
-          )
+          ).map(order => ({
+            ...order,
+            simMinutesAtStart: currentSimMinute // Track when order entered simulation
+          }))
 
           console.log(`📋 Activating ${ordersToActivate.length} orders:`, ordersToActivate.map(o => `${o.id.slice(-4)}:${(o as any).kundeName}`))
 
@@ -2321,20 +2782,55 @@ export function RealDataFactorySimulation() {
                     // Add Gantt event for queue waiting start
                     pushEvent('QUEUE_WAIT:PRE_INSPECTION_START', finishedOrderId, null)
                   } else if (stationId === 'inspection') {
+                    // Get process sequences for enqueue
                     const processSeq = orderProcessSequencesRef.current[finishedOrderId];
+                    const processSequencesToUse = order.processSequences;
+
                     if (!processSeq) {
                       throw new Error(`❌ CRITICAL: No process sequences in ref for order ${finishedOrderId.slice(-4)} at inspection!`);
                     }
+
+                    // Enqueue to postInspection immediately (don't wait for deterioration)
                     await enqueueOrder(
                       'postInspection',
                       finishedOrderId,
                       getSimMinutes(),
-                      order.processSequences,
+                      processSequencesToUse,
                       processSeq
                     )
                     console.log(`✅ [t=${getSimMinutes()}] Order ${finishedOrderId.slice(-4)} finished inspection → PostInspectionQueue`)
                     // Add Gantt event for queue waiting start
                     pushEvent('QUEUE_WAIT:POST_INSPECTION_START', finishedOrderId, null)
+
+                    // Roll dice CLIENT-SIDE first - only call server if deterioration happens
+                    const roll = Math.random() * 100
+                    if (roll < reassemblyPercentage) {
+                      // Fire-and-forget: Apply deterioration in background without blocking
+                      applyInspectionDeterioration(finishedOrderId, 100) // 100% because we already rolled
+                        .then(deteriorationResult => {
+                          if (deteriorationResult.success && deteriorationResult.deteriorated) {
+                            console.log(`⚠️ Order ${finishedOrderId.slice(-4)}: Component "${deteriorationResult.deterioratedComponent?.name}" deteriorated`)
+
+                            // Update local refs with new process data
+                            if (deteriorationResult.updatedProcessSequenceDurations) {
+                              orderProcessSequencesRef.current[finishedOrderId] = deteriorationResult.updatedProcessSequenceDurations
+                            }
+
+                            if (deteriorationResult.updatedProcessSequences) {
+                              setActiveOrders(prev => prev.map(o =>
+                                o.id === finishedOrderId
+                                  ? { ...o, processSequences: deteriorationResult.updatedProcessSequences }
+                                  : o
+                              ))
+                            }
+
+                            toast.warning(`Auftrag ${finishedOrderId.slice(-4)}: Baugruppe verschlechtert → PFLICHT-Upgrade`)
+                            deteriorationCountRef.current += 1
+                            setDeteriorationCount(deteriorationCountRef.current)
+                          }
+                        })
+                        .catch(err => console.error('Deterioration error:', err))
+                    }
                   }
                 } catch (error) {
                   console.error('Failed to enqueue to database queue:', error)
@@ -2520,8 +3016,22 @@ export function RealDataFactorySimulation() {
           }
 
           // Start new ops up to free slots by scanning queue
+          // FIFO WIP-Limit: In FIFO mode, limit active ORDERS (not ops) to slot count
+          const slotsRef = phase === 'DEM' ? demSlotsRef : monSlotsRef
+          const maxSlots = slotsRef.current.length
+
           for (let i = 0; i < queueRef.current.length; i++) {
             const b = queueRef.current[i]
+
+            // FIFO WIP-LIMIT: In FIFO mode, only the first N orders in queue can be active
+            // This ensures strict "#orders ≤ #slots" constraint
+            // Queue position i (0-indexed) must be < maxSlots to be allowed to start
+            if (isFifoSlotMode && i >= maxSlots) {
+              const msg = `📋 FIFO WIP-LIMIT: Queue position ${i} >= ${maxSlots} slots, order ${b.orderId.slice(-4)} must wait`
+              console.log(msg)
+              dispatcherLogsRef.current.push(msg)
+              break  // No need to check further - queue is ordered
+            }
             if (!b.ops || b.ops.length === 0) continue
             // DEM gating: only start orders that passed inspection
             if (phase === 'DEM' && !demReadySetRef.current.has(b.orderId)) {
@@ -2547,7 +3057,7 @@ export function RealDataFactorySimulation() {
             }
 
             const desiredKey = nxt.typeKey || normalizeOperationKey(nxt.label)
-            const msg1 = `🔍 try ${b.orderId.slice(-4)} op=${nxt.label} key=${desiredKey} @t=${getSimMinutes()}`
+            const msg1 = `🔍 try ${b.orderId.slice(-4)} op=${nxt.label} key=${desiredKey} @t=${getSimMinutes()} FIFO=${isFifoSlotMode} queuePos=${i}/${maxSlots} ops=${activesRef.current.length}`
             console.log(msg1)
             dispatcherLogsRef.current.push(msg1)
             if (dispatcherLogsRef.current.length > 50) dispatcherLogsRef.current.shift()
@@ -2558,6 +3068,16 @@ export function RealDataFactorySimulation() {
             const msg2 = `🎰 pickSlot result: ${slotIdx}`
             console.log(msg2)
             dispatcherLogsRef.current.push(msg2)
+
+            // FIFO STRICT ORDER: If no slot available for first order in queue, STOP!
+            // Don't allow later orders to jump ahead just because their type matches a free slot
+            if (slotIdx < 0 && isFifoSlotMode) {
+              const msg = `📋 FIFO STRICT: No slot for first-in-queue order ${b.orderId.slice(-4)}, blocking queue`
+              console.log(msg)
+              dispatcherLogsRef.current.push(msg)
+              break  // BREAK instead of continue - strict FIFO order
+            }
+
             if (slotIdx >= 0) {
               // IMPORTANT: Check if this specific operation already has a slot assigned
               // Use operation label to track slots per operation, not per order
@@ -2614,6 +3134,47 @@ export function RealDataFactorySimulation() {
 
         tickPhase('DEM')
         tickPhase('MON')
+
+        // Track utilization every 30 sim-minutes for Excel export
+        const currentSimMin = getSimMinutes()
+        const nextSnapshotMinute = lastUtilizationSnapshotMinuteRef.current + 30
+        if (currentSimMin >= nextSnapshotMinute || (currentSimMin > 0 && utilizationHistoryRef.current.length === 0)) {
+          // Calculate current utilization using the same logic as prepareStationUtilizationData
+          const events = [...simEventsRef.current]
+          const starts: Record<string, { t:number }> = {}
+          let demBusyTime = 0
+          let monBusyTime = 0
+
+          for (const ev of events) {
+            const act = ev.activity
+            if (typeof act !== 'string') continue
+            if (act.endsWith('_START')) {
+              const stem = act.slice(0, -6)
+              starts[`${ev.order_id}|${stem}`] = { t: ev.t }
+            } else if (act.endsWith('_END')) {
+              const stem = act.slice(0, -4)
+              const s = starts[`${ev.order_id}|${stem}`]
+              if (s) {
+                const duration = Math.max(0, ev.t - s.t)
+                if (act.startsWith('DEMONTAGE:')) demBusyTime += duration
+                else if (act.startsWith('MONTAGE:')) monBusyTime += duration
+                delete starts[`${ev.order_id}|${stem}`]
+              }
+            }
+          }
+
+          const demSlotCount = demSlotsRef.current.length || 1
+          const monSlotCount = monSlotsRef.current.length || 1
+          const demUtil = currentSimMin > 0 ? (demBusyTime / (currentSimMin * demSlotCount)) * 100 : 0
+          const monUtil = currentSimMin > 0 ? (monBusyTime / (currentSimMin * monSlotCount)) * 100 : 0
+
+          utilizationHistoryRef.current.push({
+            simMinute: currentSimMin,
+            demUtilization: parseFloat(demUtil.toFixed(1)),
+            monUtilization: parseFloat(monUtil.toFixed(1))
+          })
+          lastUtilizationSnapshotMinuteRef.current = currentSimMin
+        }
 
         // Update phase node live stats (deferred to avoid setState during render)
         setTimeout(() => {
@@ -2958,6 +3519,7 @@ export function RealDataFactorySimulation() {
               // Order completed
               console.log(`${order.kundeName} completed entire sequence!`);
               order.completedAt = new Date();
+              order.simMinutesAtEnd = getSimMinutes(); // Track completion in sim-minutes for Excel export
               order.schedulingAlgorithm = currentSchedulingAlgorithm;
               newCompletedOrders.push(order);
               // Add to shared context for KPI Dashboard
@@ -3818,7 +4380,7 @@ export function RealDataFactorySimulation() {
 
       // Enqueue into PreAcceptanceQueue - SAME as initial orders
       try {
-        const { enqueueOrder } = await import('@/app/actions/queue.actions');
+        const { enqueueOrder } = await import('@/app/actions/queue.actions')
         await enqueueOrder(
           'preAcceptance',
           newOrder.id,
@@ -3891,10 +4453,14 @@ export function RealDataFactorySimulation() {
         // Reset simulation time
         setSimulationTime(new Date());
         setSimulationStartTime(new Date());
-        
+
+        // Reset deterioration counter
+        deteriorationCountRef.current = 0;
+        setDeteriorationCount(0);
+
         // Force refresh of the entire app to update Auftragsübersicht
         router.refresh();
-        
+
         toast.success(`Alle Aufträge gelöscht (${result.deletedCount} aus Datenbank)`);
       } else {
         toast.error(result.error || 'Fehler beim Löschen der Aufträge');
@@ -3929,6 +4495,14 @@ export function RealDataFactorySimulation() {
           >
             <ArrowLeft className="h-4 w-4 mr-1" />
             Zurück zur Simulation
+          </Button>
+          <Button
+            onClick={handleExportToExcel}
+            variant="outline"
+            size="sm"
+          >
+            <Download className="h-4 w-4 mr-1" />
+            Export Excel
           </Button>
         </div>
         
@@ -4094,6 +4668,7 @@ export function RealDataFactorySimulation() {
                 totalWaitingTime: totalWaitingTimeMinutes,
                 totalLeadTime: totalLeadTimeMinutes
               }}
+              deteriorationCount={deteriorationCount}
             >
               {/* Gantt Charts rendered below as children */}
         {/* Gantt Tabelle (letzte Segmente) - AUSGEBLENDET */}
@@ -4642,6 +5217,9 @@ export function RealDataFactorySimulation() {
                     if (!isRunning && !simulationStartTime) {
                       setSimulationStartTime(simulationTime);
                       console.log('Simulation FIRST start at:', simulationTime.toISOString());
+                      // Reset deterioration counter on first start
+                      deteriorationCountRef.current = 0;
+                      setDeteriorationCount(0);
                     } else if (!isRunning) {
                       console.log('Simulation resumed, keeping original start time');
                     }
@@ -4684,6 +5262,15 @@ export function RealDataFactorySimulation() {
                     setCompletedOrders([]);
                     setSimulationTime(new Date());
                     setSimulationStartTime(null);
+
+                    // Reset deterioration counter on stop
+                    deteriorationCountRef.current = 0;
+                    setDeteriorationCount(0);
+
+                    // Reset utilization history refs on stop
+                    utilizationHistoryRef.current = [];
+                    lastUtilizationSnapshotMinuteRef.current = 0;
+
                     console.log('Simulation STOPPED and RESET - Slots released');
                   }}
                   variant="outline"
@@ -5007,6 +5594,22 @@ export function RealDataFactorySimulation() {
                     value={setupTimeHours}
                     onChange={(e) => setSetupTimeHours(Math.max(0, Number(e.target.value)))}
                   />
+                </div>
+
+                {/* Save to Factory Button */}
+                <div className="md:col-span-2 flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                  <Button
+                    onClick={handleSaveSettingsToFactory}
+                    disabled={isSavingSettings || !activeFactory}
+                    size="sm"
+                    className="bg-blue-600 hover:bg-blue-700 text-xs"
+                  >
+                    <Save className="h-3 w-3 mr-1" />
+                    {isSavingSettings ? 'Speichern...' : 'In Factory speichern'}
+                  </Button>
+                  <span className="text-xs text-blue-700">
+                    Speichert Kapazität, Flex-Anteil und Rüstzeit in der Factory-DB für Python-Algorithmen
+                  </span>
                 </div>
               </div>
             </TooltipProvider>
@@ -5441,6 +6044,73 @@ export function RealDataFactorySimulation() {
           </CardContent>
         </Card>
 
+        {/* LIVE SLOT DEBUG PANEL */}
+        <Card className="border-2 border-red-500">
+          <CardHeader className="pb-2 bg-red-50">
+            <CardTitle className="text-lg text-red-700">🔴 LIVE Slot Debug (Rüstzeit)</CardTitle>
+          </CardHeader>
+          <CardContent className="text-xs font-mono">
+            {(() => {
+              const nowMin = getSimMinutes()
+              const setupMinutes = Math.round(setupTimeHours * 60)
+              const demSlotState = demSlotsRef.current
+              const monSlotState = monSlotsRef.current
+
+              const renderSlot = (slot: any, idx: number, phase: string) => {
+                const idleDur = slot.idleSince != null ? Math.max(0, nowMin - slot.idleSince) : null
+                const setupReady = idleDur !== null && idleDur >= setupMinutes
+                const statusColor = slot.busy ? 'bg-red-200' :
+                  (slot.currentType && idleDur !== null && idleDur < setupMinutes) ? 'bg-yellow-200' : 'bg-green-200'
+
+                return (
+                  <div key={`${phase}-${idx}`} className={`p-1 mb-1 rounded ${statusColor}`}>
+                    <div className="font-bold">{phase} S{idx} {slot.flex ? '(flex)' : `(rigid: ${slot.specialization || '?'})`}</div>
+                    <div>busy: <span className={slot.busy ? 'text-red-600 font-bold' : 'text-green-600'}>{String(slot.busy)}</span></div>
+                    <div>currentType: <span className="text-blue-600">{slot.currentType || 'null'}</span></div>
+                    <div>idleSince: <span className={slot.idleSince === null ? 'text-orange-600 font-bold' : ''}>{slot.idleSince ?? 'NULL!'}</span></div>
+                    {idleDur !== null && (
+                      <div>idleDuration: <span className={setupReady ? 'text-green-600' : 'text-red-600 font-bold'}>{idleDur.toFixed(1)}min</span> {setupReady ? '✅ ready' : `⏳ ${(setupMinutes - idleDur).toFixed(1)}min left`}</div>
+                    )}
+                  </div>
+                )
+              }
+
+              return (
+                <div>
+                  <div className="mb-2 p-2 bg-gray-100 rounded">
+                    <div><strong>nowMin:</strong> {nowMin}</div>
+                    <div><strong>setupTimeHours:</strong> {setupTimeHours}h = <span className="text-red-600 font-bold">{setupMinutes}min</span></div>
+                    <div><strong>isFifoSlotMode:</strong> {String(isFifoSlotMode)}</div>
+                    <div><strong>slotVersion:</strong> {slotVersion}</div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="font-bold text-sm mb-1">DEMONTAGE ({demSlotState.length} slots)</div>
+                      {demSlotState.length === 0 ? <div className="text-orange-600">No slots!</div> :
+                        demSlotState.map((s, i) => renderSlot(s, i, 'DEM'))}
+                    </div>
+                    <div>
+                      <div className="font-bold text-sm mb-1">MONTAGE ({monSlotState.length} slots)</div>
+                      {monSlotState.length === 0 ? <div className="text-orange-600">No slots!</div> :
+                        monSlotState.map((s, i) => renderSlot(s, i, 'MON'))}
+                    </div>
+                  </div>
+
+                  <div className="mt-2 p-2 bg-yellow-100 rounded">
+                    <div className="font-bold">Last pickSlot logs:</div>
+                    <div className="max-h-32 overflow-y-auto">
+                      {pickSlotDebugLogsRef.current.slice(-10).map((log, i) => (
+                        <div key={i} className="text-[10px]">{log}</div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+          </CardContent>
+        </Card>
+
         {/* Rüstzeiten Analysis */}
         <Card>
           <CardHeader className="pb-2">
@@ -5852,15 +6522,15 @@ export function RealDataFactorySimulation() {
       <Dialog open={inspectionDialogOpen} onOpenChange={setInspectionDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Inspektionseinstellungen</DialogTitle>
+            <DialogTitle>Inspektionseinstellungen - Zustandsverschlechterung</DialogTitle>
             <DialogDescription>
-              Konfigurieren Sie den Prozentsatz der Baugruppen, die nach der Inspektion zusätzlich remontiert werden müssen.
+              Konfigurieren Sie die Wahrscheinlichkeit, dass während der Inspektion eine Baugruppe so stark verschlechtert wird, dass sie ein PFLICHT-Upgrade benötigt.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="reassembly-percentage" className="text-right">
-                Remontage-Prozentsatz (%)
+                Verschlechterungswahrscheinlichkeit (%)
               </Label>
               <div className="col-span-3 space-y-2">
                 <Input
@@ -5872,7 +6542,7 @@ export function RealDataFactorySimulation() {
                   onChange={(e) => setReassemblyPercentage(Number(e.target.value))}
                 />
                 <p className="text-sm text-gray-500">
-                  Anteil der Baugruppen, die zusätzliche Remontage benötigen: {reassemblyPercentage}%
+                  Wahrscheinlichkeit: {reassemblyPercentage}% pro Auftrag
                 </p>
               </div>
             </div>
@@ -5881,10 +6551,11 @@ export function RealDataFactorySimulation() {
                 Erklärung:
               </Label>
               <div className="col-span-3 text-sm text-gray-600">
-                <p>
-                  Dieser Wert bestimmt, bei welchem Prozentsatz der Baugruppen während der Inspektion 
-                  festgestellt wird, dass sie zusätzliche Remontage-Arbeiten benötigen, 
-                  die nicht vor der Inspektion geplant waren.
+                <p className="mb-2">
+                  Bei jedem Auftrag, der die Inspektion abschließt, besteht eine <strong>{reassemblyPercentage}%</strong> Wahrscheinlichkeit, dass <strong>eine</strong> Baugruppe (die noch kein PFLICHT- oder Wunsch-Upgrade hat) sich so stark verschlechtert, dass sie unter die pflichtUpgradeSchwelle fällt.
+                </p>
+                <p className="text-xs text-gray-500">
+                  Dies simuliert versteckte Schäden, die erst bei genauer Inspektion entdeckt werden. Die betroffene Baugruppe erhält dann automatisch den Status "PFLICHT-Upgrade" und die Prozesssequenzen werden neu berechnet.
                 </p>
               </div>
             </div>
@@ -5894,8 +6565,7 @@ export function RealDataFactorySimulation() {
               Abbrechen
             </Button>
             <Button onClick={() => {
-              // Save the setting (mock-up for now)
-              toast.success(`Remontage-Prozentsatz auf ${reassemblyPercentage}% gesetzt`);
+              toast.success(`Verschlechterungswahrscheinlichkeit auf ${reassemblyPercentage}% gesetzt`);
               setInspectionDialogOpen(false);
             }}>
               Speichern

@@ -106,25 +106,24 @@ export async function updateAlgorithmBundle(id: string, data: {
   try {
     await ensureDatabaseInitialized()
 
-    // If setting as active, deactivate all other bundles for this factory
+    // If setting as active, deactivate all other bundles for this factory (or all global bundles if no factory)
     if (data.isActive) {
       const existingBundle = await prisma.algorithmBundle.findUnique({
         where: { id },
         select: { factoryId: true }
       })
 
-      if (existingBundle?.factoryId) {
-        await prisma.algorithmBundle.updateMany({
-          where: {
-            factoryId: existingBundle.factoryId,
-            isActive: true,
-            id: { not: id }
-          },
-          data: {
-            isActive: false
-          }
-        })
-      }
+      // Deactivate other bundles - either those with same factoryId, or all global (null factoryId) bundles
+      await prisma.algorithmBundle.updateMany({
+        where: {
+          factoryId: existingBundle?.factoryId ?? null,  // null matches other global bundles
+          isActive: true,
+          id: { not: id }
+        },
+        data: {
+          isActive: false
+        }
+      })
     }
 
     const bundle = await prisma.algorithmBundle.update({

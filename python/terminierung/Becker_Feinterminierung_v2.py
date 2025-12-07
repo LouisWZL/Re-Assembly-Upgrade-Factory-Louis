@@ -943,12 +943,34 @@ def _adaptive_hmcr_par(
     par_min: float,
     par_max: float,
 ) -> Tuple[float, float]:
-    hmcr = hmcr_min + (hmcr_max - hmcr_min) * similarity
-    par = par_min + (par_max - par_min) * similarity
+    """
+    Adaptive HMCR/PAR basierend auf Harmony Memory Similarity.
+
+    Diversitäts-Strategie (invertiert für bessere Exploration):
+    - Bei hoher Similarity (Konvergenz) → niedrigere HMCR → mehr Random-Exploration
+    - Bei niedriger Similarity (Diversität) → höhere HMCR → mehr Memory-Nutzung
+
+    PAR wird quadratisch skaliert für stärkere lokale Suche bei Konvergenz.
+    """
+    # Invertierte HMCR: Bei hoher Similarity mehr Exploration (niedrigere HMCR)
+    hmcr = hmcr_max - (hmcr_max - hmcr_min) * similarity
+
+    # Quadratische PAR-Skalierung: Stärkerer Pitch Adjustment bei hoher Similarity
+    # Dies ermöglicht feinere lokale Suche wenn die Population konvergiert
+    par = par_min + (par_max - par_min) * (similarity ** 0.7)
+
     return hmcr, par
 
 
 def _generate_new_sequence(hm: List[Plan], rng: random.Random, hmcr: float, par: float) -> List[int]:
+    """
+    Generiert eine neue Auftragssequenz basierend auf Harmony Memory.
+
+    Diversitäts-Verbesserungen:
+    - Gewichtete Memory-Wahl (bessere Pläne bevorzugt)
+    - Multi-Swap PAR (bis zu 3 Swaps statt nur 1)
+    - Segment-Inversion für größere Strukturänderungen
+    """
     if not hm:
         return []
     n = len(hm[0].sequence)
@@ -960,21 +982,51 @@ def _generate_new_sequence(hm: List[Plan], rng: random.Random, hmcr: float, par:
         choose_memory = rng.random() < hmcr
         val = None
         if choose_memory:
-            candidates = [plan.sequence[pos] for plan in hm]
-            rng.shuffle(candidates)
-            for cand in candidates:
-                if cand not in used:
-                    val = cand
-                    break
+            # Gewichtete Auswahl: Bessere Pläne (niedrigerer Index in HM) bevorzugen
+            weights = [1.0 / (idx + 1) for idx in range(len(hm))]
+            total_weight = sum(weights)
+            weights = [w / total_weight for w in weights]
+
+            # Gewichtete Planauswahl
+            plan_indices = list(range(len(hm)))
+            rng.shuffle(plan_indices)  # Shuffle für Tie-Breaking
+            for plan_idx in plan_indices:
+                if rng.random() < weights[plan_idx] * len(hm):
+                    cand = hm[plan_idx].sequence[pos]
+                    if cand not in used:
+                        val = cand
+                        break
+
+            # Fallback: Einfache Memory-Wahl
+            if val is None:
+                candidates = [plan.sequence[pos] for plan in hm]
+                rng.shuffle(candidates)
+                for cand in candidates:
+                    if cand not in used:
+                        val = cand
+                        break
+
         if val is None:
             remaining = [job for job in jobs if job not in used]
             val = rng.choice(remaining)
         new_seq[pos] = val
         used.add(val)
 
+    # Erweiterte Pitch Adjustment: Multi-Swap und Segment-Inversion
     if n > 1 and rng.random() < par:
-        i, j = rng.sample(range(n), 2)
-        new_seq[i], new_seq[j] = new_seq[j], new_seq[i]
+        # Anzahl der Swaps: 1-3 basierend auf PAR-Intensität
+        num_swaps = 1 + int(rng.random() * min(3, n // 2) * par)
+        for _ in range(num_swaps):
+            i, j = rng.sample(range(n), 2)
+            new_seq[i], new_seq[j] = new_seq[j], new_seq[i]
+
+        # Zusätzliche Segment-Inversion mit halber PAR-Wahrscheinlichkeit
+        if n > 3 and rng.random() < par * 0.5:
+            seg_len = rng.randint(2, max(2, n // 3))
+            start = rng.randint(0, n - seg_len)
+            # Segment invertieren
+            segment = new_seq[start:start + seg_len]
+            new_seq[start:start + seg_len] = segment[::-1]
 
     return [int(x) for x in new_seq if x is not None]
 
@@ -989,6 +1041,11 @@ def _generate_variant_choices(
     """
     Generiert Sequenzvarianten-Wahl für alle Aufträge.
     Wenn hm (Harmony Memory) gegeben, nutzt HMCR/PAR für Memory-basierte Wahl.
+
+    Diversitäts-Verbesserungen:
+    - Gewichtete Memory-Wahl (seltene Varianten bevorzugen)
+    - Erweiterter PAR: Sprung zu beliebiger Variante möglich
+    - Block-Mutation: Mehrere aufeinanderfolgende Varianten ändern
     """
     n = len(orders)
     choices: List[int] = []
@@ -1002,27 +1059,68 @@ def _generate_variant_choices(
             continue
 
         if hm and rng.random() < hmcr:
-            # Memory-basierte Wahl: Aus HM-Plänen wählen
+            # Memory-basierte Wahl mit Diversitäts-Bonus für seltene Varianten
             candidates = []
             for plan in hm:
                 if i < len(plan.variant_choices):
                     candidates.append(plan.variant_choices[i])
+
             if candidates:
-                choice = rng.choice(candidates)
+                # Zähle Häufigkeit jeder Variante in HM
+                variant_counts = {}
+                for c in candidates:
+                    variant_counts[c] = variant_counts.get(c, 0) + 1
+
+                # Invertierte Gewichtung: Seltene Varianten bevorzugen
+                weights = []
+                for c in candidates:
+                    # Weniger häufig = höheres Gewicht
+                    weights.append(1.0 / (variant_counts[c] + 0.5))
+
+                total_weight = sum(weights)
+                weights = [w / total_weight for w in weights]
+
+                # Gewichtete Auswahl
+                r = rng.random()
+                cumsum = 0.0
+                choice = candidates[0]
+                for idx, w in enumerate(weights):
+                    cumsum += w
+                    if r <= cumsum:
+                        choice = candidates[idx]
+                        break
             else:
                 choice = rng.randint(0, num_variants - 1)
         else:
             # Zufällige Wahl
             choice = rng.randint(0, num_variants - 1)
 
-        # Pitch Adjustment: Nachbar-Variante mit Wahrscheinlichkeit PAR
+        # Erweiterter Pitch Adjustment: Größere Sprünge möglich
         if rng.random() < par:
-            if rng.random() < 0.5 and choice > 0:
-                choice -= 1
-            elif choice < num_variants - 1:
-                choice += 1
+            if num_variants > 2 and rng.random() < 0.3:
+                # Mit 30% Wahrscheinlichkeit: Sprung zu beliebiger anderer Variante
+                other_variants = [v for v in range(num_variants) if v != choice]
+                if other_variants:
+                    choice = rng.choice(other_variants)
+            else:
+                # Standard: Nachbar-Variante
+                if rng.random() < 0.5 and choice > 0:
+                    choice -= 1
+                elif choice < num_variants - 1:
+                    choice += 1
 
         choices.append(choice)
+
+    # Block-Mutation: Mit PAR-Wahrscheinlichkeit mehrere aufeinanderfolgende Varianten ändern
+    if n > 2 and rng.random() < par * 0.4:
+        block_size = rng.randint(2, max(2, n // 4))
+        start = rng.randint(0, n - block_size)
+        for j in range(start, start + block_size):
+            order = orders[j]
+            num_v = len(order.sequence_variants) if order.sequence_variants else 1
+            if num_v > 1:
+                # Neue zufällige Variante für diesen Block
+                choices[j] = rng.randint(0, num_v - 1)
 
     return choices
 
@@ -1343,6 +1441,7 @@ def _schedule(payload: Dict[str, Any]) -> Dict[str, Any]:
             "paretoSet": [],
             "selectedPlanId": None,
             "releasedOps": [],
+            "holdDecisions": [],
             "debug": [{"stage": "PIPO_EMPTY", "message": "Keine Aufträge vorhanden."}],
         }
 
@@ -1402,6 +1501,7 @@ def _schedule(payload: Dict[str, Any]) -> Dict[str, Any]:
             "paretoSet": [{"id": plan.plan_id, "sequence": plan.sequence, "variantChoices": plan.variant_choices, "operations": plan.operations, "objectiveValues": plan.metrics}],
             "selectedPlanId": plan.plan_id,
             "releasedOps": released_ops,
+            "holdDecisions": [],  # Single order fallback - no holds needed
             "debug": debug,
         }
 
@@ -1410,10 +1510,13 @@ def _schedule(payload: Dict[str, Any]) -> Dict[str, Any]:
     candidates_per_iter = max(1, _safe_int(config.get("candidatesPerIter"), 25))
     max_pareto = max(1, _safe_int(config.get("maxPareto"), 20))
     release_fraction = min(max(_safe_float(config.get("releaseFraction"), 0.5), 0.0), 1.0)
-    hmcr_min = _safe_float(config.get("HMCRmin"), 0.7)
-    hmcr_max = _safe_float(config.get("HMCRmax"), 0.95)
-    par_min = _safe_float(config.get("PARmin"), 0.2)
-    par_max = _safe_float(config.get("PARmax"), 0.5)
+    # Diversitäts-verbesserte HMCR/PAR Spannen (erweitert für mehr Exploration)
+    # HMCR: 0.5-0.92 statt 0.7-0.95 → mehr Random-Wahl bei niedriger Similarity
+    # PAR: 0.15-0.65 statt 0.2-0.5 → mehr Pitch Adjustment für lokale Suche
+    hmcr_min = _safe_float(config.get("HMCRmin"), 0.5)
+    hmcr_max = _safe_float(config.get("HMCRmax"), 0.92)
+    par_min = _safe_float(config.get("PARmin"), 0.15)
+    par_max = _safe_float(config.get("PARmax"), 0.65)
 
     # MOAHS Initialization Logging
     print(f"[MOAHS-PIPO] Starting with {len(orders)} orders", file=sys.stderr)
@@ -1592,6 +1695,73 @@ def _schedule(payload: Dict[str, Any]) -> Dict[str, Any]:
             for order_id, end_time in order_end_times.items()
         ]
 
+    # ========== HOLD DECISIONS ==========
+    # For PIPO (fine scheduling): Hold orders at the end of the sequence
+    # if capacity is overloaded AND they have enough due-date buffer
+    hold_decisions: List[Dict[str, Any]] = []
+
+    # Use makespan as batch cycle estimate (or default to 120 minutes)
+    batch_cycle_minutes = selected.metrics.get("makespan", 120.0) if selected else 120.0
+    hold_until = start_time + batch_cycle_minutes
+
+    # Total capacity
+    total_capacity = max(1, dem_machines + mon_machines)
+
+    # Get utilization from selected plan metrics
+    utilization = (selected.metrics.get("avgUtilization", 0.0) / 100.0) if selected else 0.0
+
+    # Only hold if overloaded
+    UTILIZATION_THRESHOLD = 0.8
+    MIN_DUE_DATE_BUFFER = batch_cycle_minutes * 2
+
+    if utilization > UTILIZATION_THRESHOLD and selected and len(orders) > total_capacity:
+        release_sequence = selected.sequence  # indices into orders list
+        orders_beyond_capacity = release_sequence[total_capacity:]
+
+        for order_idx in orders_beyond_capacity:
+            order = orders[order_idx]
+            # Calculate slack
+            eta_entry = next((e for e in eta_list if e["orderId"] == order.order_id), None)
+            estimated_completion = eta_entry["eta"] if eta_entry else start_time + batch_cycle_minutes
+            slack = order.due_date - estimated_completion
+
+            if slack > MIN_DUE_DATE_BUFFER:
+                hold_decisions.append({
+                    "orderId": order.order_id,
+                    "holdUntilSimMinute": hold_until,
+                    "holdReason": f"PIPO capacity overload ({utilization:.0%} util) - due date buffer {slack:.0f}min"
+                })
+
+    if hold_decisions:
+        print(f"\n🔒 [PIPO Hold] {len(hold_decisions)} orders held until t={hold_until:.0f} (util={utilization:.0%})", file=sys.stderr)
+        for hd in hold_decisions[:5]:
+            print(f"  - {hd['orderId'][:12]}: {hd['holdReason']}", file=sys.stderr)
+    else:
+        print(f"\n✅ [PIPO Hold] No holds - utilization={utilization:.0%}, threshold={UTILIZATION_THRESHOLD:.0%}", file=sys.stderr)
+
+    debug.append({
+        "stage": "PIPO_HOLD_DECISIONS",
+        "holdCount": len(hold_decisions),
+        "utilizationEstimate": utilization,
+        "utilizationThreshold": UTILIZATION_THRESHOLD,
+        "totalCapacity": total_capacity,
+        "ordersInBatch": len(orders),
+        "batchCycleMinutes": batch_cycle_minutes,
+    })
+
+    # Input order = FIFO order (orders as they were received)
+    # Release order = Optimized order from MOAHS (selected.sequence maps indices to orders)
+    input_order_list = [o.order_id for o in orders]  # FIFO = original input order
+    optimized_release_list = [orders[idx].order_id for idx in (selected.sequence if selected else [])]
+
+    # Debug: log the sequence change
+    if selected and selected.sequence:
+        fifo_seq = list(range(len(orders)))
+        if selected.sequence != fifo_seq:
+            print(f"[PIPO] ✅ Sequence CHANGED from FIFO: {fifo_seq[:10]} -> {selected.sequence[:10]}", file=sys.stderr)
+        else:
+            print(f"[PIPO] ⚠️ Sequence UNCHANGED (still FIFO): {selected.sequence[:10]}", file=sys.stderr)
+
     return {
         "paretoSet": [
             {
@@ -1606,9 +1776,12 @@ def _schedule(payload: Dict[str, Any]) -> Dict[str, Any]:
         "selectedPlanId": selected.plan_id if selected else None,
         "selectedVariantChoices": selected.variant_choices if selected else [],
         "releasedOps": released_ops,
-        # Optional releaseList helps the queue monitor compare Python vs dispatcher order
-        "releaseList": [orders[idx].order_id for idx in (selected.sequence if selected else [])],
+        # inputOrderList = FIFO order (how orders arrived)
+        # releaseList = Optimized order from MOAHS
+        "inputOrderList": input_order_list,
+        "releaseList": optimized_release_list,
         "etaList": eta_list,
+        "holdDecisions": hold_decisions,
         "debug": debug,
     }
 
@@ -1623,6 +1796,7 @@ def main() -> None:
             "paretoSet": [],
             "selectedPlanId": None,
             "releasedOps": [],
+            "holdDecisions": [],
             "debug": [{"stage": "PIPO_ERROR", "message": str(exc)}],
         }
         print(json.dumps(error_result))

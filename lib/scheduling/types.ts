@@ -134,11 +134,14 @@ export interface SchedulingLogEntryInput {
  * Factory capacity information passed to Python scheduling scripts
  */
 export interface FactoryCapacity {
-  montageStationen: number       // Number of assembly stations
-  demontageStationen: number      // Number of disassembly stations (default: 5 if not stored)
-  flexibel: boolean               // Whether stations are flexible (default: false if not stored)
-  defaultDemontagezeit: number    // Default disassembly time in minutes
-  defaultMontagezeit: number      // Default assembly time in minutes
-  schichtmodell: string           // Shift model (e.g., "EINSCHICHT", "ZWEISCHICHT")
-  kapazitaet: number              // Overall factory capacity
+  montageStationen: number         // Number of assembly stations
+  demontageStationen: number       // Number of disassembly stations
+  flexibel: boolean                // Whether stations are flexible (default: false)
+  defaultDemontagezeit: number     // Default disassembly time in minutes
+  defaultMontagezeit: number       // Default assembly time in minutes
+  schichtmodell: string            // Shift model (e.g., "EINSCHICHT", "ZWEISCHICHT")
+  kapazitaet: number               // Overall factory capacity
+  demFlexSharePct?: number         // Percentage of demontage slots that are flexible (0-100)
+  monFlexSharePct?: number         // Percentage of montage slots that are flexible (0-100)
+  setupTimeMinutes?: number        // Setup time in minutes between different operation types
 }

@@ -30,10 +30,16 @@ interface PythonPipoPayload {
 }
 
 interface PythonPipoResult {
-  paretoSet: Plan[]
+  paretoSet: Array<Plan & { sequence?: number[]; variantChoices?: number[] }>
   selectedPlanId: string | null
+  selectedVariantChoices?: number[]
   releasedOps: OperationBlock[]
+  inputOrderList?: string[]  // FIFO order (how orders arrived)
+  releaseList?: string[]     // Optimized order from MOAHS
+  etaList?: Array<{ orderId: string; eta: number }>
+  holdDecisions?: Array<{ orderId: string; holdUntilSimMinute: number; holdReason: string }>
   debug?: Array<Record<string, unknown>>
+  schedulingMode?: 'fifo' | 'moahs'  // Signals simulation how to handle slot selection
 }
 
 const DEFAULT_SCRIPT = path.join('python', 'terminierung', 'Becker_Feinterminierung_v2.py')
@@ -58,6 +64,15 @@ function buildPayload(pools: Pools, factoryEnv: FactoryEnv, config: SchedulingCo
     .filter((v): v is number => v !== null && !isNaN(v))
   const simStartMs = createdAtValues.length > 0 ? Math.min(...createdAtValues) : Date.now()
 
+  // CRITICAL FIX: Convert startTime to same reference as dueDate (relative to simStartMs)
+  // factoryEnv.simTime is typically Date.now()/60000 (absolute minutes since epoch ~28M)
+  // dueDate is converted to minutes relative to simStartMs (e.g. ~43200 for 30 days)
+  // Without this fix, tardiness = completion(~28M + duration) - dueDate(~43k) = constant ~28M
+  const simTimeMs = factoryEnv.simTime * 60000 // Convert back to ms
+  const relativeStartTime = (simTimeMs - simStartMs) / 60000 // Minutes relative to simStartMs
+
+  console.log(`🔧 [PIPO] Time reference fix: simStartMs=${new Date(simStartMs).toISOString()}, factoryEnv.simTime=${factoryEnv.simTime}, relativeStartTime=${relativeStartTime.toFixed(1)}min`)
+
   const orders = records.map((record) => {
     const rawDueDate = record.meta?.dueDate ? Number(record.meta.dueDate) : undefined
 
@@ -76,13 +91,15 @@ function buildPayload(pools: Pools, factoryEnv: FactoryEnv, config: SchedulingCo
   })
 
   return {
-    startTime: factoryEnv.simTime,
+    startTime: relativeStartTime, // Now consistent with dueDate reference
     orders,
     config: {
       weights: config.meta?.pipoWeights ?? {
-        makespan: 0.4,
-        tardiness: 0.4,
-        setupPenalty: 0.2,
+        // Focus on makespan (Durchlaufzeit) and idleTime (Auslastung)
+        // Tardiness is often 0 when due dates are far in the future
+        makespan: 0.5,
+        tardiness: 0.1,  // Low weight since due dates are usually far ahead
+        idleTime: 0.4,   // High weight to maximize slot utilization
       },
       factoryCapacity: {
         montageStationen: factory.anzahlMontagestationen,
@@ -92,6 +109,9 @@ function buildPayload(pools: Pools, factoryEnv: FactoryEnv, config: SchedulingCo
         defaultMontagezeit: factory.defaultMontagezeit,
         schichtmodell: factory.schichtmodell,
         kapazitaet: factory.kapazität,
+        demFlexSharePct: factory.demFlexSharePct ?? 50,
+        monFlexSharePct: factory.monFlexSharePct ?? 50,
+        setupTimeMinutes: factory.setupTimeMinutes ?? 0,
       },
       demFlexSharePct: factory.demFlexSharePct ?? 50,
       monFlexSharePct: factory.monFlexSharePct ?? 50,
@@ -112,6 +132,12 @@ export async function runPIPoFineTermMOAHS(
   // Debug logging for PIPO payload
   console.log('🔍 [PIPO] Payload sent to Python:')
   console.log(`  Orders: ${payload.orders.length}`)
+  console.log(`  🏭 Factory Capacity from DB:`)
+  console.log(`     - Demontage Stationen: ${payload.config.factoryCapacity?.demontageStationen}`)
+  console.log(`     - Montage Stationen: ${payload.config.factoryCapacity?.montageStationen}`)
+  console.log(`     - DEM Flex Share: ${payload.config.demFlexSharePct}%`)
+  console.log(`     - MON Flex Share: ${payload.config.monFlexSharePct}%`)
+  console.log(`     - Setup Minutes: ${payload.config.setupMinutes}`)
   payload.orders.forEach((order, idx) => {
     const durations = order.operations.map(op => op.expectedDuration).join(', ')
     console.log(`  [${idx}] Order ${order.orderId.slice(-4)}: ${order.operations.length} ops, durations=[${durations}]`)
@@ -142,6 +168,24 @@ export async function runPIPoFineTermMOAHS(
 
     console.log(`[scheduling][pipo] ✅ Python script completed successfully`)
     console.log(`[scheduling][pipo] ⏱️  Duration: ${duration}ms`)
+
+    // Log the releaseList specifically (the optimized order)
+    if (result.releaseList && result.releaseList.length > 0) {
+      const shortIds = result.releaseList.slice(0, 10).map(id => id.slice(-4))
+      console.log(`[scheduling][pipo] 📋 releaseList (${result.releaseList.length} orders): ${shortIds.join(' → ')}${result.releaseList.length > 10 ? '...' : ''}`)
+
+      // Log the selected sequence from paretoSet
+      if (result.selectedPlanId && result.paretoSet) {
+        const selectedPlan = result.paretoSet.find(p => p.id === result.selectedPlanId)
+        if (selectedPlan?.sequence) {
+          console.log(`[scheduling][pipo] 🎯 Selected sequence indices: [${selectedPlan.sequence.slice(0, 15).join(', ')}${selectedPlan.sequence.length > 15 ? '...' : ''}]`)
+          console.log(`[scheduling][pipo] 📊 Selected variants: [${(selectedPlan.variantChoices || []).slice(0, 15).join(', ')}${(selectedPlan.variantChoices || []).length > 15 ? '...' : ''}]`)
+        }
+      }
+    } else {
+      console.log(`[scheduling][pipo] ⚠️ No releaseList returned from Python!`)
+    }
+
     console.log(`[scheduling][pipo] Result:`, JSON.stringify(result, null, 2))
 
     // Add stderr logs to debug output

@@ -89,8 +89,13 @@ def main():
         "skipped": skipped_orders[:5]
     })
 
-    # 3. FIFO-Simulation: Einfaches Scheduling ohne Optimierung
-    # Maschinen-Verfügbarkeit tracken
+    # 3. ECHTES FIFO mit WIP-Limit:
+    # - Aufträge kommen in FIFO-Reihenfolge (A, B, C, D, E...)
+    # - Wenn eine Station frei wird, bekommt sie den NÄCHSTEN Auftrag aus der Warteschlange
+    # - Maximal N Aufträge gleichzeitig (N = Anzahl Stationen des jeweiligen Typs)
+    # - KEINE Rüstzeit-Optimierung - einfach nächste freie Station nehmen
+    # - Ops innerhalb eines Auftrags sind sequentiell (Op2 erst nach Op1 fertig)
+
     dem_available = [start_time] * dem_stations
     mon_available = [start_time] * mon_stations
 
@@ -105,11 +110,14 @@ def main():
     sequence = list(range(len(valid_orders)))
     variant_choices = [0] * len(valid_orders)
 
+    # Für jeden Auftrag: wann kann die nächste Op starten? (sequentielle Ops innerhalb Auftrag)
+    order_clocks: Dict[str, float] = {order["orderId"]: start_time for order in valid_orders}
+
     for order in valid_orders:
         oid = order["orderId"]
         ops = order["operations"]
 
-        order_end_time = start_time
+        order_clock = order_clocks[oid]
 
         for op in ops:
             station_id = op.get("stationId", "MISC")
@@ -124,29 +132,34 @@ def main():
             is_dem = station_id.lower() in ["demontage", "dem", "disassembly"]
             is_mon = station_id.lower() in ["reassembly", "mon", "montage", "remontage"]
 
-            # Maschine auswählen (früheste verfügbare)
+            # ECHTES FIFO: Wähle die NÄCHSTE FREIE Maschine (früheste verfügbare)
+            # ABER: Op kann nicht vor order_clock starten (sequentielle Abhängigkeit innerhalb Auftrag)
             if is_dem:
+                # Finde Maschine die am frühesten frei ist
                 earliest_idx = min(range(dem_stations), key=lambda i: dem_available[i])
-                op_start = dem_available[earliest_idx]
+                # Op startet wenn BEIDE frei sind: Maschine UND vorherige Op des Auftrags fertig
+                op_start = max(dem_available[earliest_idx], order_clock)
                 op_end = op_start + duration
                 dem_available[earliest_idx] = op_end
                 slot_name = f"DEM-{earliest_idx + 1}"
             elif is_mon:
                 earliest_idx = min(range(mon_stations), key=lambda i: mon_available[i])
-                op_start = mon_available[earliest_idx]
+                op_start = max(mon_available[earliest_idx], order_clock)
                 op_end = op_start + duration
                 mon_available[earliest_idx] = op_end
                 slot_name = f"MON-{earliest_idx + 1}"
             else:
                 # Fallback: Demontage
                 earliest_idx = min(range(dem_stations), key=lambda i: dem_available[i])
-                op_start = dem_available[earliest_idx]
+                op_start = max(dem_available[earliest_idx], order_clock)
                 op_end = op_start + duration
                 dem_available[earliest_idx] = op_end
                 slot_name = f"DEM-{earliest_idx + 1}"
 
             slot_busy_times[slot_name] += duration
-            order_end_time = max(order_end_time, op_end)
+
+            # Nächste Op dieses Auftrags kann erst nach dieser starten
+            order_clock = op_end
 
             # Operation speichern
             scheduled_op = {
@@ -161,7 +174,8 @@ def main():
             }
             all_scheduled_ops.append(scheduled_op)
 
-        order_completions[oid] = order_end_time
+        order_clocks[oid] = order_clock
+        order_completions[oid] = order_clock
 
     debug_stages.append({"stage": "sim_done", "scheduledOps": len(all_scheduled_ops)})
 
@@ -262,7 +276,8 @@ def main():
         "releasedOps": released_ops,
         "releaseList": release_list,
         "etaList": eta_list,
-        "debug": debug_stages
+        "debug": debug_stages,
+        "schedulingMode": "fifo"  # Signal to simulation: use dumb slot selection
     }
 
     print(json.dumps(result))

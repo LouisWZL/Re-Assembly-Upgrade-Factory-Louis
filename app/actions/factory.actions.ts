@@ -392,6 +392,87 @@ export async function updateFactoryDefaultDemontagezeit(id: string, defaultDemon
   }
 }
 
+/**
+ * Update simulation-related settings for a factory
+ * Used by the simulation UI to persist settings to DB
+ */
+export async function updateFactorySimulationSettings(id: string, settings: {
+  demStations?: number
+  monStations?: number
+  demFlexPct?: number
+  monFlexPct?: number
+  setupMinutes?: number
+}) {
+  try {
+    // Build update data only for provided fields
+    const updateData: Prisma.ReassemblyFactoryUpdateInput = {}
+
+    if (settings.demStations !== undefined) {
+      if (settings.demStations < 1 || settings.demStations > 100) {
+        return { success: false, error: 'Demontage-Stationen müssen zwischen 1 und 100 liegen' }
+      }
+      updateData.anzahlDemontagestationen = settings.demStations
+    }
+
+    if (settings.monStations !== undefined) {
+      if (settings.monStations < 1 || settings.monStations > 100) {
+        return { success: false, error: 'Montage-Stationen müssen zwischen 1 und 100 liegen' }
+      }
+      updateData.anzahlMontagestationen = settings.monStations
+    }
+
+    if (settings.demFlexPct !== undefined) {
+      if (settings.demFlexPct < 0 || settings.demFlexPct > 100) {
+        return { success: false, error: 'Demontage Flex-Anteil muss zwischen 0% und 100% liegen' }
+      }
+      updateData.demFlexSharePct = settings.demFlexPct
+    }
+
+    if (settings.monFlexPct !== undefined) {
+      if (settings.monFlexPct < 0 || settings.monFlexPct > 100) {
+        return { success: false, error: 'Montage Flex-Anteil muss zwischen 0% und 100% liegen' }
+      }
+      updateData.monFlexSharePct = settings.monFlexPct
+    }
+
+    if (settings.setupMinutes !== undefined) {
+      if (settings.setupMinutes < 0) {
+        return { success: false, error: 'Setup-Zeit darf nicht negativ sein' }
+      }
+      updateData.setupTimeMinutes = settings.setupMinutes
+    }
+
+    const factory = await prisma.reassemblyFactory.update({
+      where: { id },
+      data: updateData
+    })
+
+    revalidatePath('/factory-configurator')
+    revalidatePath(`/factory-configurator/${id}`)
+    revalidatePath('/api/factories')
+    revalidatePath('/simulation')
+
+    return {
+      success: true,
+      data: factory,
+      message: 'Simulation-Einstellungen erfolgreich in Factory gespeichert'
+    }
+  } catch (error) {
+    console.error('Error updating factory simulation settings:', error)
+
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2025') {
+        return { success: false, error: 'Factory nicht gefunden' }
+      }
+    }
+
+    return {
+      success: false,
+      error: 'Fehler beim Aktualisieren der Simulation-Einstellungen'
+    }
+  }
+}
+
 export async function updateFactoryDefaultMontagezeit(id: string, defaultMontagezeit: number) {
   try {
     // Validate defaultMontagezeit

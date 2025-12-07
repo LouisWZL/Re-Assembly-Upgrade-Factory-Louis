@@ -853,6 +853,25 @@ def main():
         if isinstance(new_orders, list) and new_orders:
             ctp_preview = ctp_promise_orders(new_orders, batches, orders_map, cfg, now)
 
+        # Convert deferred orders to holdDecisions format for TypeScript
+        # Hold until next batch cycle (now + intervalMinutes)
+        batch_cycle_minutes = int(cfg.get("intervalMinutes", 120))
+        hold_until = now + batch_cycle_minutes
+
+        hold_decisions = [
+            {
+                "orderId": d["orderId"],
+                "holdUntilSimMinute": hold_until,
+                "holdReason": f"PAP Defer #{d['deferredCount']} - weak batch (low Jaccard similarity or insufficient batch size)"
+            }
+            for d in deferred_list
+        ]
+
+        if hold_decisions:
+            print(f"\n🔒 [PAP Hold] {len(hold_decisions)} orders held until t={hold_until} (next batch cycle)", file=sys.stderr)
+            for hd in hold_decisions[:5]:  # Show first 5
+                print(f"  - {hd['orderId'][:12]}: {hd['holdReason']}", file=sys.stderr)
+
         debug.append({
             "stage": "SUMMARY",
             "batches": len(batches),
@@ -860,6 +879,7 @@ def main():
             "utilBuckets": len(util_fc),
             "ctp": len(ctp_preview),
             "deferred": len(deferred_list),
+            "holdDecisions": len(hold_decisions),
             "forecast_present": isinstance(forecast, dict),
             "targetUtil_eff": dynamic_target_util(cfg, forecast),
             "bufferPct_eff": adjusted_buffer_pct(cfg, forecast)
@@ -871,6 +891,7 @@ def main():
             "utilizationForecast": util_fc,
             "ctpPreview": ctp_preview,
             "deferredOrders": deferred_list,
+            "holdDecisions": hold_decisions,
             "debug": progress + debug
         }
     except Exception as exc:  # pragma: no cover
@@ -880,6 +901,7 @@ def main():
             "utilizationForecast": [],
             "ctpPreview": [],
             "deferredOrders": [],
+            "holdDecisions": [],
             "debug": progress + [{"stage": "PAP_V2_ERROR", "message": str(exc)}],
         }
 

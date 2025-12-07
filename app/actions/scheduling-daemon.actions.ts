@@ -251,32 +251,14 @@ async function buildConfig(factoryId: string, mode: SchedulingConfig['mode'], ov
   return { config, factory }
 }
 
+// Re-enabled: DB logging for Python script results (visible in Queue-Overview)
 async function logStage(factoryId: string, stage: 'PAP' | 'PIP' | 'PIPO', mode: string, details: unknown) {
   try {
-    // Debug: Log what we're about to save
-    const debugArray = Array.isArray((details as any)?.debug) ? (details as any).debug : []
-    console.log(`[logStage][${stage}] 🔍 About to save debug.length: ${debugArray.length}`)
-    if (debugArray.length > 0) {
-      console.log(`[logStage][${stage}] 🔍 Debug stages: ${debugArray.map((d: any) => d.stage).join(', ')}`)
-      const lastDebug = debugArray[debugArray.length - 1]
-      console.log(`[logStage][${stage}] 🔍 Last debug stage: ${lastDebug?.stage}`)
-      if (lastDebug?.logs) {
-        console.log(`[logStage][${stage}] 🔍 Last debug has logs: ${typeof lastDebug.logs === 'string' ? lastDebug.logs.substring(0, 100) : 'not a string'}`)
-      }
-    }
-
     await prisma.schedulingLog.create({
-      data: {
-        factoryId,
-        stage,
-        mode,
-        details: details as any,
-      },
+      data: { factoryId, stage, mode, details: details as any },
     })
-
-    console.log(`[logStage][${stage}] ✅ Successfully saved to database`)
   } catch (error) {
-    console.warn(`[SchedulingLog] Failed to persist ${stage} entry:`, error)
+    console.warn(`[SchedulingLog] Failed to persist ${stage}:`, error)
   }
 }
 
@@ -371,6 +353,12 @@ export async function runPapStage(factoryId: string, simMinute?: number) {
     const dbg = Array.isArray((result as any).debug) ? (result as any).debug : []
     dbg.unshift(...jsDebugBase)
     ;(result as any).debug = dbg
+  }
+
+  // Process hold decisions from Python result
+  const holdsApplied = await processHoldDecisions(result, 'preAcceptance', nowMinutes)
+  if (holdsApplied > 0) {
+    console.log(`[daemon][pap] 🔒 Applied ${holdsApplied} hold decisions`)
   }
 
   const batchInsights = buildPapBatchInsights(
@@ -516,6 +504,13 @@ export async function runPipStage(factoryId: string) {
     ;(result as any).debug = dbg
     console.log(`[daemon][pip] 🔍 Final debug.length before logStage: ${dbg.length}`)
   }
+
+  // Process hold decisions from Python result
+  const holdsApplied = await processHoldDecisions(result, 'preInspection', nowMinutes)
+  if (holdsApplied > 0) {
+    console.log(`[daemon][pip] 🔒 Applied ${holdsApplied} hold decisions`)
+  }
+
   await logStage(factoryId, 'PIP', config.mode, {
     ...result,
     queueSize: entries.length,
@@ -629,22 +624,100 @@ export async function runPipoStage(factoryId: string) {
     ;(result as any).debug = dbg
     console.log(`[daemon][pipo] 🔍 Final debug.length before logStage: ${dbg.length}`)
   }
+
+  // Process hold decisions from Python result
+  const holdsApplied = await processHoldDecisions(result, 'postInspection', nowMinutes)
+  if (holdsApplied > 0) {
+    console.log(`[daemon][pipo] 🔒 Applied ${holdsApplied} hold decisions`)
+  }
+
   await logStage(factoryId, 'PIPO', config.mode, {
     ...result,
     queueSize: entries.length,
   })
 
-  if (result?.releasedOps?.length) {
+  // ✅ CRITICAL: Use MOAHS-optimized releaseList for order sequence (like PIP does)
+  let ordered = entries
+
+  // Debug: Show original queue order vs MOAHS optimized order
+  const originalOrder = entries.map(e => e.orderId.slice(-4))
+  console.log(`[daemon][pipo] 📋 Original queue order (${entries.length} orders): ${originalOrder.slice(0, 8).join(' → ')}${entries.length > 8 ? '...' : ''}`)
+
+  if (result?.releaseList?.length) {
+    const optimizedOrder = result.releaseList.slice(0, 8).map((id: string) => id.slice(-4))
+    console.log(`[daemon][pipo] 🎯 MOAHS optimized order: ${optimizedOrder.join(' → ')}${result.releaseList.length > 8 ? '...' : ''}`)
+
+    // Count how many positions changed
+    let changedPositions = 0
+    result.releaseList.forEach((orderId: string, newIdx: number) => {
+      const originalIdx = entries.findIndex(e => e.orderId === orderId)
+      if (originalIdx !== newIdx) changedPositions++
+    })
+    console.log(`[daemon][pipo] 📊 Positions changed: ${changedPositions}/${result.releaseList.length} (${((changedPositions/result.releaseList.length)*100).toFixed(1)}%)`)
+
+    ordered = orderEntriesByList(entries, result.releaseList)
+    await updateProcessingOrder('postInspection', ordered)
+    console.log(`[daemon][pipo] ✅ Applied MOAHS-optimized order sequence`)
+  } else if (result?.releasedOps?.length) {
     await updateProcessingOrder('postInspection', entries)
   }
 
+  // Build dispatcher sequence from Python's optimized releaseList (or fallback to ordered entries)
+  const dispatcherSequence =
+    result?.releaseList?.length
+      ? result.releaseList
+      : ordered.map((entry) => entry.orderId)
+
   const orderUpdates = new Map<string, Record<string, any>>()
-  entries.forEach((entry, index) => {
-    orderUpdates.set(entry.orderId, {
-      ...(orderUpdates.get(entry.orderId) ?? {}),
-      dispatcherOrderPostInspection: index + 1,
+
+  // ✅ Use optimized dispatcherSequence for dispatcherOrderPostInspection (NOT entries index!)
+  if (dispatcherSequence.length) {
+    dispatcherSequence.forEach((orderId: string, index: number) => {
+      orderUpdates.set(orderId, {
+        ...(orderUpdates.get(orderId) ?? {}),
+        dispatcherOrderPostInspection: index + 1,
+      })
     })
-  })
+  }
+
+  // ✅ Store selected sequence variant per order in terminierung JSON field
+  if (result?.selectedVariantChoices && result?.releaseList) {
+    const variantChoices = result.selectedVariantChoices as number[]
+    const releaseList = result.releaseList as string[]
+
+    // Find selectedPlan to get the sequence (order indices)
+    const selectedPlan = result?.paretoSet?.find((plan: any) => plan.id === result.selectedPlanId)
+    const orderSequence = selectedPlan?.sequence as number[] | undefined
+
+    if (orderSequence && variantChoices.length > 0) {
+      console.log(`[daemon][pipo] 📋 Storing variant choices for ${releaseList.length} orders`)
+
+      // variantChoices is indexed by ORDER position (not sequence position)
+      // So variantChoices[i] is the variant for the i-th order in the original orders array
+      releaseList.forEach((orderId: string, seqIdx: number) => {
+        // Get the original order index from the sequence
+        const orderIdx = orderSequence[seqIdx]
+        const variantIdx = orderIdx !== undefined && orderIdx < variantChoices.length
+          ? variantChoices[orderIdx]
+          : 0
+
+        const existing = orderUpdates.get(orderId) ?? {}
+        const existingTerminierung = (existing.terminierung as Record<string, any>) ?? {}
+
+        orderUpdates.set(orderId, {
+          ...existing,
+          terminierung: {
+            ...existingTerminierung,
+            selectedSequenceVariantIndex: variantIdx,
+            moahsOptimized: true,
+            optimizedAt: new Date().toISOString(),
+          },
+        })
+      })
+
+      console.log(`[daemon][pipo] ✅ Variant choices stored: ${variantChoices.slice(0, 5).join(', ')}...`)
+    }
+  }
   if (result?.selectedPlanId && Array.isArray(result?.paretoSet)) {
     const selectedPlan = result.paretoSet.find((plan) => plan.id === result.selectedPlanId)
     selectedPlan?.operations?.forEach((op) => {
@@ -698,6 +771,7 @@ const queueStageToEnum: Record<QueueStageName, SchedulingStage> = {
   postInspection: 'PIPO',
 }
 
+// Re-enabled: DB logging for queue summary (visible in Queue-Overview/Dashboard)
 export async function logSchedulingSummaryEntry(
   factoryId: string,
   queue: QueueStageName,
@@ -709,12 +783,13 @@ export async function logSchedulingSummaryEntry(
       data: {
         factoryId,
         stage,
-        mode: 'SUMMARY',
-        details: summary as Prisma.InputJsonValue,
+        mode: 'QUEUE_SUMMARY',
+        details: summary as any,
       },
     })
+    console.log(`[logSchedulingSummaryEntry][${queue}] ✅ Logged to SchedulingLog`)
   } catch (error) {
-    console.warn(`[SchedulingLog] Failed to persist summary for ${queue}:`, error)
+    console.warn(`[logSchedulingSummaryEntry][${queue}] ❌ Failed:`, error)
   }
 }
 

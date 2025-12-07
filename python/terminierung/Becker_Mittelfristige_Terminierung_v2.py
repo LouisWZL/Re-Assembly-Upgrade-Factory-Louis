@@ -1924,6 +1924,7 @@ def simple_fifo_result(raw_orders: Sequence[Dict[str, Any]], now: float, config:
         "routes": [],
         "batches": [],
         "releaseList": release_list,
+        "holdDecisions": [],  # No holds in FIFO fallback - release all
         "debug": [
             {
                 "stage": "PIP_FALLBACK",
@@ -2558,6 +2559,79 @@ def schedule_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Input-Reihenfolge (FIFO = wie die Aufträge im Payload ankamen)
     input_order_list = [orders[idx].order_id for idx in input_order]
 
+    # ========== HOLD DECISIONS ==========
+    # Determine which orders to hold based on:
+    # 1. Capacity overload (more orders than stations can handle)
+    # 2. Due-date buffer (orders with enough slack can wait)
+    # 3. Always release if capacity would be idle
+
+    hold_decisions: List[Dict[str, Any]] = []
+    batch_cycle_minutes = float(config.get("horizonMinutes", 240.0) or 240.0)
+    hold_until = now + batch_cycle_minutes
+
+    # Get total station capacity
+    total_dem_stations = dem_machines if dem_machines else 0
+    total_mon_stations = mon_machines if mon_machines else 0
+    total_capacity = max(1, total_dem_stations + total_mon_stations)
+
+    # Calculate expected processing load
+    total_processing_time = sum(
+        sum(float(op.get("expectedDuration") or 0.0) for op in ops_by_order.get(oid, []))
+        for oid in release_list
+    )
+    avg_processing_per_order = total_processing_time / len(release_list) if release_list else 0
+
+    # Capacity utilization estimate
+    capacity_per_cycle = total_capacity * batch_cycle_minutes
+    utilization = total_processing_time / capacity_per_cycle if capacity_per_cycle > 0 else 0
+
+    # Only hold if there's capacity overload (utilization > threshold)
+    UTILIZATION_THRESHOLD = 0.8  # Hold only if > 80% utilized
+    MIN_DUE_DATE_BUFFER = batch_cycle_minutes * 2  # Need at least 2 cycles of buffer to hold
+
+    if utilization > UTILIZATION_THRESHOLD and len(release_list) > total_capacity:
+        # Find orders at the end of the release list with enough due-date buffer
+        orders_by_id = {o.order_id: o for o in orders}
+
+        # Only consider orders beyond capacity threshold for holding
+        orders_beyond_capacity = release_list[total_capacity:]
+
+        for oid in orders_beyond_capacity:
+            order = orders_by_id.get(oid)
+            if not order:
+                continue
+
+            # Calculate slack (time until due date minus expected completion)
+            due_date = order.due_date
+            # Estimate completion time (rough: position in queue * avg processing time)
+            position = release_list.index(oid) + 1
+            estimated_completion = now + (position * avg_processing_per_order / max(1, total_capacity))
+            slack = due_date - estimated_completion
+
+            if slack > MIN_DUE_DATE_BUFFER:
+                hold_decisions.append({
+                    "orderId": oid,
+                    "holdUntilSimMinute": hold_until,
+                    "holdReason": f"PIP capacity overload ({utilization:.0%} util) - due date buffer {slack:.0f}min"
+                })
+
+    if hold_decisions:
+        print(f"\n🔒 [PIP Hold] {len(hold_decisions)} orders held until t={hold_until:.0f} (capacity util={utilization:.0%})", file=sys.stderr)
+        for hd in hold_decisions[:5]:
+            print(f"  - {hd['orderId'][:12]}: {hd['holdReason']}", file=sys.stderr)
+    else:
+        print(f"\n✅ [PIP Hold] No holds - capacity util={utilization:.0%}, threshold={UTILIZATION_THRESHOLD:.0%}", file=sys.stderr)
+
+    debug.append({
+        "stage": "PIP_HOLD_DECISIONS",
+        "holdCount": len(hold_decisions),
+        "utilizationEstimate": utilization,
+        "utilizationThreshold": UTILIZATION_THRESHOLD,
+        "totalCapacity": total_capacity,
+        "ordersInBatch": len(release_list),
+        "batchCycleMinutes": batch_cycle_minutes,
+    })
+
     return {
         "priorities": priorities,
         "routes": routes,
@@ -2570,6 +2644,7 @@ def schedule_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         "pnValidation": pn_valid,
         "timelineOps": timeline_export,
         "chosenVariants": chosen_variants,  # NEU: Gewählte Sequenz-Variante pro Auftrag
+        "holdDecisions": hold_decisions,
         "debug": debug,
     }
 
@@ -2585,6 +2660,7 @@ def main() -> None:
             "batches": [],
             "releaseList": [],
             "etaList": [],
+            "holdDecisions": [],
             "debug": [{"stage": "PIP_V2_ERROR", "message": str(exc)}],
         }
     print(json.dumps(result))

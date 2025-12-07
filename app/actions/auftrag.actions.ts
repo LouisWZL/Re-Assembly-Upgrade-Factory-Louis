@@ -1177,7 +1177,7 @@ export async function deleteAllAuftraege(factoryId: string) {
     })
 
     revalidatePath('/')
-    
+
     return {
       success: true,
       message: 'Alle Aufträge erfolgreich gelöscht'
@@ -1185,5 +1185,224 @@ export async function deleteAllAuftraege(factoryId: string) {
   } catch (error) {
     console.error('Error deleting all orders:', error)
     return { success: false, error: 'Fehler beim Löschen aller Aufträge' }
+  }
+}
+
+/**
+ * Apply inspection deterioration: with a given probability, one component's condition
+ * worsens to just below the pflichtUpgradeSchwelle, making it a PFLICHT reassembly.
+ * This simulates discovering hidden damage during inspection.
+ *
+ * @param orderId - The order to potentially deteriorate
+ * @param deteriorationProbability - Probability (0-100) that deterioration occurs
+ * @returns Updated order data or null if no deterioration occurred
+ */
+export async function applyInspectionDeterioration(
+  orderId: string,
+  deteriorationProbability: number
+): Promise<{
+  success: boolean
+  deteriorated: boolean
+  deterioratedComponent?: {
+    id: string
+    name: string
+    oldZustand: number
+    newZustand: number
+  }
+  updatedProcessSequences?: any
+  updatedProcessSequenceDurations?: {
+    demontage: any[]
+    remontage: any[]
+    totals: { demontage: number; montage: number }
+  }
+  error?: string
+}> {
+  try {
+    // Roll the dice: does deterioration happen?
+    const roll = Math.random() * 100
+    if (roll >= deteriorationProbability) {
+      console.log(`🎲 [Inspection] Order ${orderId.slice(-4)}: No deterioration (roll ${roll.toFixed(1)} >= ${deteriorationProbability}%)`)
+      return { success: true, deteriorated: false }
+    }
+
+    console.log(`🎲 [Inspection] Order ${orderId.slice(-4)}: Deterioration triggered! (roll ${roll.toFixed(1)} < ${deteriorationProbability}%)`)
+
+    // Fetch order with all necessary data
+    const order = await prisma.auftrag.findUnique({
+      where: { id: orderId },
+      include: {
+        factory: {
+          select: {
+            pflichtUpgradeSchwelle: true
+          }
+        },
+        produktvariante: {
+          include: {
+            produkt: true
+          }
+        },
+        baugruppenInstances: {
+          include: {
+            baugruppe: {
+              include: {
+                baugruppentyp: true
+              }
+            },
+            austauschBaugruppe: {
+              include: {
+                baugruppentyp: true
+              }
+            }
+          }
+        }
+      }
+    })
+
+    if (!order) {
+      return { success: false, deteriorated: false, error: 'Order not found' }
+    }
+
+    const pflichtSchwelle = order.factory.pflichtUpgradeSchwelle ?? 30
+
+    // Find eligible components: those WITHOUT existing reAssemblyTyp
+    const eligibleComponents = order.baugruppenInstances.filter(
+      bi => !bi.reAssemblyTyp
+    )
+
+    if (eligibleComponents.length === 0) {
+      console.log(`🔍 [Inspection] Order ${orderId.slice(-4)}: No eligible components for deterioration (all already have reAssemblyTyp)`)
+      return { success: true, deteriorated: false }
+    }
+
+    // Pick a random component to deteriorate
+    const randomIndex = Math.floor(Math.random() * eligibleComponents.length)
+    const targetComponent = eligibleComponents[randomIndex]
+    const oldZustand = targetComponent.zustand
+    const newZustand = pflichtSchwelle - 1 // Just below threshold
+
+    console.log(`⚠️ [Inspection] Order ${orderId.slice(-4)}: Component "${targetComponent.baugruppe.bezeichnung}" deteriorates from ${oldZustand}% to ${newZustand}% (< ${pflichtSchwelle}% threshold) → PFLICHT`)
+
+    // Update component in database within transaction
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Update the BaugruppeInstance
+      await tx.baugruppeInstance.update({
+        where: { id: targetComponent.id },
+        data: {
+          zustand: newZustand,
+          reAssemblyTyp: 'PFLICHT',
+          // Also assign itself as replacement (same as PFLICHT logic in createSingleOrder)
+          austauschBaugruppeId: targetComponent.baugruppeId
+        }
+      })
+
+      // 2. Re-fetch all baugruppenInstances with updated data
+      const updatedInstances = await tx.baugruppeInstance.findMany({
+        where: { auftragId: orderId },
+        include: {
+          baugruppe: {
+            include: {
+              baugruppentyp: true
+            }
+          },
+          austauschBaugruppe: {
+            include: {
+              baugruppentyp: true
+            }
+          }
+        }
+      })
+
+      // 3. Get product processGraphData for regeneration
+      const produkt = order.produktvariante.produkt
+      if (!produkt.processGraphData) {
+        throw new Error('Product has no processGraphData')
+      }
+
+      // 4. Regenerate process graphs with updated instances
+      const processGraphDataBg = transformProcessGraphToOrderGraph(
+        produkt.processGraphData as any,
+        updatedInstances as any,
+        'baugruppen'
+      )
+
+      const processGraphDataBgt = transformProcessGraphToOrderGraph(
+        produkt.processGraphData as any,
+        updatedInstances as any,
+        'baugruppentypen'
+      )
+
+      // 5. Regenerate process sequences
+      const baugruppenSequences = generateProcessSequences(
+        processGraphDataBg,
+        updatedInstances as any,
+        'baugruppen'
+      )
+
+      const baugruppentypSequences = generateProcessSequences(
+        processGraphDataBgt,
+        updatedInstances as any,
+        'baugruppentypen'
+      )
+
+      const processSequences = {
+        baugruppen: baugruppenSequences,
+        baugruppentypen: baugruppentypSequences
+      }
+
+      // 6. Regenerate durations
+      const processSequenceDurations = buildProcessSequenceDurationsPayload(
+        {
+          baugruppen: baugruppenSequences,
+          baugruppentypen: baugruppentypSequences
+        },
+        updatedInstances as unknown as BaugruppeInstanceWithDurations[]
+      )
+
+      // 7. Update order with new process data
+      await tx.auftrag.update({
+        where: { id: orderId },
+        data: {
+          processGraphDataBg: processGraphDataBg as any,
+          processGraphDataBgt: processGraphDataBgt as any,
+          processSequences: processSequences as any,
+          processSequenceDurations: processSequenceDurations as any
+        }
+      })
+
+      // Extract the first sequence in the format expected by the client
+      // (same transformation as in advanced-simulation.actions.ts)
+      const firstSequence = processSequenceDurations.baugruppen.sequences[0]
+      const clientProcessTimes = firstSequence ? {
+        demontage: firstSequence.demontage || [],
+        remontage: firstSequence.remontage || [],
+        totals: {
+          demontage: firstSequence.totals?.demontage || 0,
+          montage: firstSequence.totals?.remontage || 0 // Note: DB uses "remontage", client uses "montage"
+        }
+      } : null
+
+      return { processSequences, processSequenceDurations, clientProcessTimes }
+    })
+
+    return {
+      success: true,
+      deteriorated: true,
+      deterioratedComponent: {
+        id: targetComponent.id,
+        name: targetComponent.baugruppe.bezeichnung,
+        oldZustand,
+        newZustand
+      },
+      updatedProcessSequences: result.processSequences,
+      updatedProcessSequenceDurations: result.clientProcessTimes || undefined
+    }
+
+  } catch (error) {
+    console.error('Error applying inspection deterioration:', error)
+    return {
+      success: false,
+      deteriorated: false,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    }
   }
 }

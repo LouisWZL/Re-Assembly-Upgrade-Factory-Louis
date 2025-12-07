@@ -55,6 +55,14 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig, facto
     .filter((v): v is number => v !== null && !isNaN(v))
   const simStartMs = createdAtValues.length > 0 ? Math.min(...createdAtValues) : Date.now()
 
+  // CRITICAL FIX: Convert 'now' to same reference as dueDate (relative to simStartMs)
+  // 'now' is typically Date.now()/60000 (absolute minutes since epoch ~28M)
+  // dueDate is converted to minutes relative to simStartMs
+  const nowMs = now * 60000 // Convert back to ms
+  const relativeNow = (nowMs - simStartMs) / 60000 // Minutes relative to simStartMs
+
+  console.log(`🔧 [PAP] Time reference fix: simStartMs=${new Date(simStartMs).toISOString()}, now=${now}, relativeNow=${relativeNow.toFixed(1)}min`)
+
   const orders: PythonPapOrder[] = records.map((record) => {
     const processSeqs = record.processSequences as any
     if (record.oid && processSeqs) {
@@ -80,7 +88,7 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig, facto
   })
 
   return {
-    now,
+    now: relativeNow, // Now consistent with dueDate reference
     orders,
     config: {
       qMin: config.batchPolicy?.qMin ?? 3,
@@ -89,12 +97,15 @@ function buildPayload(pools: Pools, now: number, config: SchedulingConfig, facto
       lambda: config.meta?.poissonLambda ?? 4,
       factoryCapacity: {
         montageStationen: factory.anzahlMontagestationen,
-        demontageStationen: 5, // Not yet stored in DB - using default
-        flexibel: false, // Not yet stored in DB - using default
+        demontageStationen: factory.anzahlDemontagestationen ?? 5,
+        flexibel: false,
         defaultDemontagezeit: factory.defaultDemontagezeit,
         defaultMontagezeit: factory.defaultMontagezeit,
         schichtmodell: factory.schichtmodell,
         kapazitaet: factory.kapazität,
+        demFlexSharePct: factory.demFlexSharePct ?? 50,
+        monFlexSharePct: factory.monFlexSharePct ?? 50,
+        setupTimeMinutes: factory.setupTimeMinutes ?? 0,
       },
     },
     processSequences: Object.keys(processSequencesMap).length ? processSequencesMap : undefined,
